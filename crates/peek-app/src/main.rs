@@ -653,6 +653,7 @@ impl eframe::App for Peek {
                 if !cancelled
                     && let Some(image) = selection.and_then(|rect| capture::crop(screen, rect))
                 {
+                    let image = capture::prepare_region(image);
                     let mut png = std::io::Cursor::new(Vec::new());
                     if image::DynamicImage::ImageRgba8(image.clone())
                         .write_to(&mut png, image::ImageFormat::Png)

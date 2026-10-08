@@ -66,8 +66,45 @@ pub fn crop(screen: &Screen, rect: egui::Rect) -> Option<image::RgbaImage> {
     }
     Some(image::imageops::crop_imm(&screen.pixels, x, y, right - x, bottom - y).to_image())
 }
+/// Normalize only the selected region, never the full display. Preserve aspect ratio.
+/// 2000px fits Windows OCR's common 2600px maximum and stays below Clef's pixel cap.
+pub fn prepare_region(image: image::RgbaImage) -> image::RgbaImage {
+    let mut image = if image.width().max(image.height()) > 2000 {
+        let ratio = 2000.0 / image.width().max(image.height()) as f64;
+        let width = (image.width() as f64 * ratio).round().max(1.0) as u32;
+        let height = (image.height() as f64 * ratio).round().max(1.0) as u32;
+        image::imageops::resize(&image, width, height, image::imageops::FilterType::Triangle)
+    } else {
+        image
+    };
+    for pixel in image.pixels_mut() {
+        let alpha = u32::from(pixel[3]);
+        for channel in &mut pixel.0[..3] {
+            *channel = ((u32::from(*channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
+        }
+        pixel[3] = 255;
+    }
+    image
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn large_regions_shrink_and_transparency_is_composited() {
+        let result = super::prepare_region(image::RgbaImage::from_pixel(
+            4000,
+            2000,
+            image::Rgba([0, 0, 0, 0]),
+        ));
+        assert_eq!(result.dimensions(), (2000, 1000));
+        assert_eq!(result.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        let result = super::prepare_region(image::RgbaImage::from_pixel(
+            10,
+            10,
+            image::Rgba([0, 0, 0, 128]),
+        ));
+        assert_eq!(result.get_pixel(0, 0).0, [127, 127, 127, 255]);
+    }
     use super::*;
     #[test]
     fn invalid_selection_and_scale_rejected() {
