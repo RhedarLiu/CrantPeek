@@ -14,5 +14,8 @@ fn main() {
             std::hint::black_box(dict.lookup(w));
         }
     }
-    println!("lookup: {:?} per query", t.elapsed() / (rounds * words.len() as u32));
+    println!(
+        "lookup: {:?} per query",
+        t.elapsed() / (rounds * words.len() as u32)
+    );
 }

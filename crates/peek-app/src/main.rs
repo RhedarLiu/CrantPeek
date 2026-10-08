@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+mod capture;
 mod desktop;
+mod ocr;
 mod selection;
 mod store;
 use eframe::egui;
@@ -30,6 +32,11 @@ struct Peek {
     desktop: Option<desktop::Desktop>,
     quit: bool,
     visible: bool,
+    snip: Option<capture::Screen>,
+    snip_texture: Option<egui::TextureHandle>,
+    drag_start: Option<egui::Pos2>,
+    capture_rx: Option<std::sync::mpsc::Receiver<Result<capture::Screen, String>>>,
+    ocr_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 impl Peek {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -100,6 +107,11 @@ impl Peek {
             desktop,
             quit: false,
             visible: true,
+            snip: None,
+            snip_texture: None,
+            drag_start: None,
+            capture_rx: None,
+            ocr_rx: None,
         }
     }
     /// Single words/short tokens only; loads the dictionary file lazily on first use.
@@ -305,11 +317,133 @@ impl eframe::App for Peek {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
                 desktop::Action::Screenshot => {
-                    self.status = "截图选区正在开发中".into();
-                    self.visible = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.stop();
+                    self.visible = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.capture_rx = Some(rx);
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        // Allow the window hide to reach the compositor before capture.
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = tx.send(capture::capture());
+                        ctx.request_repaint();
+                    });
                 }
+            }
+        }
+        if let Some(result) = self.capture_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.capture_rx = None;
+            match result {
+                Ok(screen) => {
+                    let size = [
+                        screen.pixels.width() as usize,
+                        screen.pixels.height() as usize,
+                    ];
+                    self.snip_texture = Some(ctx.load_texture(
+                        "screen-selection",
+                        egui::ColorImage::from_rgba_unmultiplied(size, screen.pixels.as_raw()),
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    self.snip = Some(screen);
+                }
+                Err(e) => {
+                    self.status = format!("截图失败，请检查屏幕录制权限：{e}");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+            }
+        }
+        if let Some(result) = self.ocr_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.ocr_rx = None;
+            self.visible = true;
+            self.settings = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            match result {
+                Ok(text) if !text.trim().is_empty() => {
+                    self.input = text;
+                    self.query(&ctx, false);
+                }
+                Ok(_) => self.status = "未识别到文字，请重选区域".into(),
+                Err(e) => self.status = format!("OCR 失败：{e}"),
+            }
+        }
+        if let Some(screen) = &self.snip {
+            let size = egui::vec2(
+                screen.pixels.width() as f32 / screen.scale,
+                screen.pixels.height() as f32 / screen.scale,
+            );
+            let origin = screen.origin;
+            let texture = self.snip_texture.as_ref().unwrap().id();
+            let mut selection = None;
+            let mut cancelled = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("snip"),
+                egui::ViewportBuilder::default()
+                    .with_position(origin)
+                    .with_inner_size(size)
+                    .with_decorations(false)
+                    .with_always_on_top()
+                    .with_resizable(false),
+                |ctx, _| {
+                    egui::Area::new(egui::Id::new("snip-area"))
+                        .fixed_pos(egui::Pos2::ZERO)
+                        .show(ctx, |ui| {
+                            let (rect, response) =
+                                ui.allocate_exact_size(size, egui::Sense::drag());
+                            ui.painter().image(
+                                texture,
+                                rect,
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                            if response.drag_started() {
+                                self.drag_start = response.interact_pointer_pos();
+                            }
+                            if let (Some(start), Some(end)) =
+                                (self.drag_start, response.interact_pointer_pos())
+                            {
+                                let r = egui::Rect::from_two_pos(start, end);
+                                ui.painter().rect_stroke(
+                                    r,
+                                    0.0,
+                                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                                    egui::StrokeKind::Inside,
+                                );
+                                if response.drag_stopped() {
+                                    selection = Some(r);
+                                }
+                            }
+                            ui.painter().text(
+                                egui::pos2(24.0, 24.0),
+                                egui::Align2::LEFT_TOP,
+                                "拖动框选 · Esc 取消",
+                                egui::FontId::proportional(18.0),
+                                egui::Color32::LIGHT_BLUE,
+                            );
+                        });
+                    cancelled = ctx.input(|i| {
+                        i.key_pressed(egui::Key::Escape) || i.viewport().close_requested()
+                    });
+                },
+            );
+            if cancelled || selection.is_some() {
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("snip"),
+                    egui::ViewportCommand::Close,
+                );
+                if let Some(image) = selection.and_then(|rect| capture::crop(screen, rect)) {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.ocr_rx = Some(rx);
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(ocr::recognize(&image));
+                        ctx.request_repaint();
+                    });
+                }
+                self.snip = None;
+                self.snip_texture = None;
+                self.drag_start = None;
             }
         }
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit && self.desktop.is_some() {
