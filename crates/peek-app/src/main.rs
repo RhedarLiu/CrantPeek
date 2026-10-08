@@ -47,6 +47,7 @@ struct Peek {
     desktop: Option<desktop::Desktop>,
     quit: bool,
     visible: bool,
+    initial_hide: bool,
     screenshot_image: Option<peek_network::ImageInput>,
     send_image: bool,
     decide_image: bool,
@@ -100,7 +101,9 @@ impl Peek {
             Ok(d) => (Some(d), status),
             Err(e) => (None, format!("Desktop integration error: {e}")),
         };
+        let initial_hide = config.onboarding_complete && desktop.is_some() && status.is_empty();
         Self {
+            initial_hide,
             draft: config.clone(),
             settings: !config.onboarding_complete,
             config,
@@ -506,6 +509,10 @@ impl Drop for Peek {
 impl eframe::App for Peek {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
+        if std::mem::take(&mut self.initial_hide) {
+            self.visible = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
         let actions: Vec<_> = self
             .desktop
             .as_ref()
