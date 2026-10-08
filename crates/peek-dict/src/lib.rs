@@ -264,6 +264,27 @@ mod tests {
     }
 
     #[test]
+    fn mapped_lookup_matches_owned_and_invalid_files_rejected() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = build(vec![Entry {
+            word: "stream".into(),
+            translation: "流".into(),
+            ..Default::default()
+        }]);
+        file.write_all(&bytes).unwrap();
+        file.as_file().sync_all().unwrap();
+        let mapped = Dict::open(file.path()).unwrap();
+        let owned = Dict::from_bytes(bytes).unwrap();
+        assert_eq!(mapped.lookup("STREAM"), owned.lookup("STREAM"));
+        assert_eq!(mapped.len(), owned.len());
+        let empty = tempfile::NamedTempFile::new().unwrap();
+        assert!(Dict::open(empty.path()).is_err());
+        let mut bad = tempfile::NamedTempFile::new().unwrap();
+        bad.write_all(b"bad dictionary").unwrap();
+        assert!(Dict::open(bad.path()).is_err());
+    }
+    #[test]
     fn case_insensitive_lookup_and_dedup() {
         let d = sample();
         assert_eq!(d.len(), 4);
