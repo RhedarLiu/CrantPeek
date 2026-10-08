@@ -119,6 +119,12 @@ async fn errors_and_redirects_do_not_look_like_success() {
             "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
             "without completion",
         ),
+        (
+            "200 OK",
+            "Content-Type: text/html\r\n",
+            "<html>login</html>",
+            "Expected text/event-stream",
+        ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

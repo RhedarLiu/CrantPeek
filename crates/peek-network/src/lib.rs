@@ -238,6 +238,20 @@ impl Client {
         if !response.status().is_success() {
             return Err(Error::Http(response.status().as_u16()));
         }
+        if !response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                v.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("text/event-stream")
+            })
+        {
+            return Err(Error::Invalid("Expected text/event-stream response".into()));
+        }
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
         loop {
@@ -294,7 +308,32 @@ impl Client {
         if !response.status().is_success() {
             return Err(Error::Http(response.status().as_u16()));
         }
-        let value: Value = tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), r = response.json() => r? };
+        const MAX_DECISION_BYTES: usize = 256 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_DECISION_BYTES as u64)
+        {
+            return Err(Error::Invalid(
+                "Decision response exceeds size limit".into(),
+            ));
+        }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        loop {
+            let next = tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), n = stream.next() => n };
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk = chunk?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_DECISION_BYTES {
+                return Err(Error::Invalid(
+                    "Decision response exceeds size limit".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::Invalid("Malformed decision JSON".into()))?;
         // Cloudflare wraps output in result; direct TypeSafe uses the root.
         let root = value.get("result").unwrap_or(&value);
         let answer = &root["answers"]["task"];
