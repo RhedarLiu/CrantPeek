@@ -87,8 +87,8 @@ impl Peek {
         };
         Self {
             draft: config.clone(),
+            settings: !config.onboarding_complete,
             config,
-            settings: false,
             input: String::new(),
             answer: String::new(),
             followup: String::new(),
@@ -284,6 +284,25 @@ impl Peek {
     }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("设置");
+        if !self.config.onboarding_complete {
+            ui.group(|ui| {
+                ui.heading("欢迎使用 Crant Peek");
+                ui.label("双击 Ctrl：只查询选区；没有选区不弹窗。");
+                ui.label(format!("{}：空白输入；{}：截图", self.config.blank_hotkey, self.config.screenshot_hotkey));
+                ui.label("Esc 或失焦收起；固定后可对照阅读。托盘菜单重新打开或退出。");
+                ui.weak("词典与 OCR 在本地运行。AI 查询文本会发往你配置的回答/决策服务；不自动上传剪贴板或整屏。");
+                if ui.button("了解，开始使用").clicked() {
+                    let mut config = self.config.clone(); config.onboarding_complete = true;
+                    match store::save(&config) { Ok(()) => { self.config = config; self.draft.onboarding_complete = true; }, Err(e) => self.status = e }
+                }
+            });
+        }
+        ui.collapsing("快捷键（保存后重启生效）", |ui| {
+            ui.label("空白浮窗"); ui.text_edit_singleline(&mut self.draft.blank_hotkey);
+            ui.label("截图"); ui.text_edit_singleline(&mut self.draft.screenshot_hotkey);
+            ui.add(egui::Slider::new(&mut self.draft.double_ctrl_ms,150..=800).text("双击 Ctrl 间隔 ms"));
+            ui.weak("示例：Super+Shift+A（macOS Command）、Alt+Shift+A（Windows）。不要与系统或其他应用快捷键冲突。");
+        });
         ui.collapsing("系统权限与使用说明", |ui| {
             for (name, granted) in permissions::status() {
                 ui.label(format!("{name}：{}", if granted { "已授权" } else { "未授权" }));
@@ -338,6 +357,19 @@ impl Peek {
         ui.horizontal(|ui| {
             if ui.button("保存").clicked() {
                 let result = self.draft.validate().map_err(str::to_owned).and_then(|()| {
+                    let blank: global_hotkey::hotkey::HotKey = self
+                        .draft
+                        .blank_hotkey
+                        .parse()
+                        .map_err(|e| format!("空白快捷键无效：{e}"))?;
+                    let screenshot: global_hotkey::hotkey::HotKey = self
+                        .draft
+                        .screenshot_hotkey
+                        .parse()
+                        .map_err(|e| format!("截图快捷键无效：{e}"))?;
+                    if blank.id() == screenshot.id() {
+                        return Err("两个入口不能使用相同快捷键".into());
+                    }
                     if !self.secret_draft.is_empty() {
                         store::save_secret(&self.draft.provider.credential_id, &self.secret_draft)?;
                     }
@@ -351,11 +383,19 @@ impl Peek {
                 });
                 match result {
                     Ok(()) => {
+                        let shortcuts_changed = self.config.blank_hotkey != self.draft.blank_hotkey
+                            || self.config.screenshot_hotkey != self.draft.screenshot_hotkey
+                            || self.config.double_ctrl_ms != self.draft.double_ctrl_ms;
                         self.config = self.draft.clone();
                         self.secret_draft.clear();
                         self.decision_secret_draft.clear();
                         self.settings = false;
-                        self.status = "已保存".into();
+                        self.status = if shortcuts_changed {
+                            "已保存，快捷键修改需重启生效"
+                        } else {
+                            "已保存"
+                        }
+                        .into();
                     }
                     Err(e) => self.status = e,
                 }

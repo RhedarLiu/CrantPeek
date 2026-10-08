@@ -204,6 +204,7 @@ impl Default for DecisionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub onboarding_complete: bool,
     pub decision: DecisionConfig,
     pub schema_version: u32,
     pub provider: Provider,
@@ -223,6 +224,7 @@ impl Default for Config {
             "Alt"
         };
         Self {
+            onboarding_complete: false,
             decision: DecisionConfig::default(),
             schema_version: 1,
             provider: Provider::default(),
