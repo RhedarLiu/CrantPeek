@@ -25,6 +25,42 @@ fn cursor_position() -> Option<(i32, i32)> {
     Some((point.x, point.y))
 }
 
+pub fn popup_position(size: egui::Vec2) -> Option<egui::Pos2> {
+    let (x, y) = cursor_position()?;
+    let monitor = xcap::Monitor::from_point(x, y).ok()?;
+    let scale = monitor.scale_factor().ok()?;
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let origin = egui::pos2(monitor.x().ok()? as f32, monitor.y().ok()? as f32);
+    let cursor = egui::pos2(x as f32, y as f32);
+    // macOS global screen coordinates are points; Windows cursor coordinates are pixels.
+    let divisor = if cfg!(windows) { scale } else { 1.0 };
+    let origin = origin / divisor;
+    let cursor = cursor / divisor;
+    let extent = egui::vec2(
+        monitor.width().ok()? as f32 / scale,
+        monitor.height().ok()? as f32 / scale,
+    );
+    Some(clamp_popup(
+        cursor + egui::vec2(14.0, 14.0),
+        egui::Rect::from_min_size(origin, extent),
+        size,
+    ))
+}
+fn clamp_popup(position: egui::Pos2, bounds: egui::Rect, size: egui::Vec2) -> egui::Pos2 {
+    let margin = 8.0;
+    let min = bounds.min + egui::vec2(margin, margin);
+    let max = egui::pos2(
+        (bounds.max.x - size.x - margin).max(min.x),
+        (bounds.max.y - size.y - margin).max(min.y),
+    );
+    egui::pos2(
+        position.x.clamp(min.x, max.x),
+        position.y.clamp(min.y, max.y),
+    )
+}
+
 pub fn capture() -> Result<Screen, String> {
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
     let monitor = cursor_position()
@@ -89,6 +125,19 @@ pub fn prepare_region(image: image::RgbaImage) -> image::RgbaImage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn popup_stays_on_negative_coordinate_monitor() {
+        let bounds =
+            egui::Rect::from_min_size(egui::pos2(-1920.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let pos = super::clamp_popup(egui::pos2(-10.0, 1050.0), bounds, egui::vec2(480.0, 560.0));
+        assert_eq!(pos, egui::pos2(-488.0, 512.0));
+        let pos = super::clamp_popup(
+            egui::pos2(-2500.0, -100.0),
+            bounds,
+            egui::vec2(480.0, 560.0),
+        );
+        assert_eq!(pos, egui::pos2(-1912.0, 8.0));
+    }
     #[test]
     fn large_regions_shrink_and_transparency_is_composited() {
         let result = super::prepare_region(image::RgbaImage::from_pixel(

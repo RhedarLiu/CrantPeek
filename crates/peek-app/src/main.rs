@@ -673,6 +673,12 @@ impl eframe::App for Peek {
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
+                    let size = ctx
+                        .input(|i| i.viewport().inner_rect.map(|r| r.size()))
+                        .unwrap_or(egui::vec2(480.0, 560.0));
+                    if let Some(position) = capture::popup_position(size) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                    }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
@@ -690,6 +696,12 @@ impl eframe::App for Peek {
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
+                    let size = ctx
+                        .input(|i| i.viewport().inner_rect.map(|r| r.size()))
+                        .unwrap_or(egui::vec2(480.0, 560.0));
+                    if let Some(position) = capture::popup_position(size) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                    }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     self.query(&ctx, false);
