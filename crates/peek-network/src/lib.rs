@@ -160,6 +160,25 @@ pub fn decode_event(protocol: Protocol, data: &str) -> Result<Option<Event>, Err
         return Ok(Some(Event::Failed("Service reported an error".into())));
     }
     let kind = v["type"].as_str().unwrap_or("");
+    if (protocol == Protocol::ChatCompletions
+        && v.pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            == Some("length"))
+        || (protocol == Protocol::Anthropic
+            && kind == "message_delta"
+            && v["delta"]["stop_reason"] == "max_tokens")
+    {
+        return Ok(Some(Event::Failed(
+            "回答达到 token 上限，内容可能不完整；可提高上限后重试".into(),
+        )));
+    }
+    if protocol == Protocol::ChatCompletions
+        && v.pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            == Some("content_filter")
+    {
+        return Ok(Some(Event::Failed("回答被服务内容过滤中止".into())));
+    }
     let text = match protocol {
         Protocol::ChatCompletions => v
             .pointer("/choices/0/delta/content")
@@ -498,6 +517,24 @@ mod tests {
             assert_eq!(body[field][0]["content"][1]["type"], kind);
             assert_eq!(body[field][0]["content"][0]["text"], "describe");
             assert_eq!(messages[0].content, "describe");
+        }
+    }
+    #[test]
+    fn token_limit_stops_are_not_reported_as_complete() {
+        for (protocol, event) in [
+            (
+                Protocol::ChatCompletions,
+                r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+            ),
+            (
+                Protocol::Anthropic,
+                r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+            ),
+        ] {
+            assert!(matches!(
+                decode_event(protocol, event).unwrap(),
+                Some(Event::Failed(_))
+            ));
         }
     }
     #[test]
