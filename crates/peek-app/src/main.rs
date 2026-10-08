@@ -68,6 +68,7 @@ impl Peek {
         // Load CJK fonts from the OS, never bundle private fonts in the repository.
         let candidates = if cfg!(target_os = "macos") {
             vec![
+                "/System/Library/Fonts/Hiragino Sans GB.ttc",
                 "/System/Library/Fonts/PingFang.ttc",
                 "/System/Library/Fonts/STHeiti Light.ttc",
             ]
