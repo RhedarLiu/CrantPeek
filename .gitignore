@@ -1,0 +1,7 @@
+/target/
+.DS_Store
+.env
+.env.*
+*.log
+/preview*/
+/local-assets/

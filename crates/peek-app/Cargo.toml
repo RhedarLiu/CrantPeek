@@ -1,0 +1,21 @@
+[package]
+name = "peek-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+peek-core = { path = "../peek-core" }
+peek-network = { path = "../peek-network" }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
+serde_json.workspace = true
+directories = "6"
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+tokio-util = "0.7"
+global-hotkey = "0.8"
+tray-icon = "0.26.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.23.2"
+core-foundation = "0.9.4"
