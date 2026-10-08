@@ -186,6 +186,14 @@ impl Dict {
         self.count == 0
     }
 
+    fn word_at(&self, index: usize) -> Option<&str> {
+        let table = 8 + index.checked_mul(4)?;
+        let offset =
+            u32::from_le_bytes(self.bytes.get(table..table + 4)?.try_into().ok()?) as usize;
+        let start = (8 + self.count * 4).checked_add(offset)?;
+        let len = u32::from_le_bytes(self.bytes.get(start..start + 4)?.try_into().ok()?) as usize;
+        std::str::from_utf8(self.bytes.get(start + 4..(start + 4).checked_add(len)?)?).ok()
+    }
     fn entry_at(&self, index: usize) -> Option<Entry> {
         let table = 8 + index.checked_mul(4)?;
         let offset =
@@ -217,9 +225,14 @@ impl Dict {
         let (mut lo, mut hi) = (0, self.count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let entry = self.entry_at(mid)?;
-            match key(&entry.word).cmp(&wanted) {
-                std::cmp::Ordering::Equal => return Some(entry),
+            let candidate = self.word_at(mid)?;
+            match candidate
+                .trim()
+                .chars()
+                .flat_map(char::to_lowercase)
+                .cmp(wanted.chars())
+            {
+                std::cmp::Ordering::Equal => return self.entry_at(mid),
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
             }
