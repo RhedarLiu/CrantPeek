@@ -155,6 +155,9 @@ impl Peek {
         peek_core::discard_pending_turn(&mut self.messages);
     }
     fn query(&mut self, ctx: &egui::Context, followup: bool) {
+        // Consume explicit upload intent at entry, including all early-error paths.
+        let send_image = std::mem::take(&mut self.send_image);
+        let decide_image = std::mem::take(&mut self.decide_image);
         let text = if followup {
             self.followup.trim()
         } else {
@@ -213,13 +216,13 @@ impl Peek {
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         let provider = self.config.provider.clone();
-        let image = if self.send_image {
+        let image = if send_image {
             self.screenshot_image.clone()
         } else {
             None
         };
         self.send_image = false;
-        let decision_image = if self.decide_image {
+        let decision_image = if decide_image {
             self.screenshot_image.clone()
         } else {
             None
@@ -657,6 +660,17 @@ impl eframe::App for Peek {
                     }
                     let (tx, rx) = std::sync::mpsc::channel();
                     self.ocr_rx = Some(rx);
+                    self.input.clear();
+                    self.answer.clear();
+                    self.dict_entry = None;
+                    self.messages.clear();
+                    self.route_note.clear();
+                    self.manual_task = false;
+                    self.settings = false;
+                    self.visible = true;
+                    self.status = "本地识字中…可取消".into();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     let ctx = ctx.clone();
                     std::thread::spawn(move || {
                         let _ = tx.send(ocr::recognize(&image));
@@ -891,7 +905,14 @@ impl eframe::App for Peek {
                     }
                 });
             }
-            ui.label(&self.status);
+            ui.horizontal(|ui| {
+                ui.label(&self.status);
+                if self.ocr_rx.is_some() && ui.button("取消识字").clicked() {
+                    self.stop();
+                    self.screenshot_image = None;
+                    self.status = "已取消识字".into();
+                }
+            });
         });
     }
 }
