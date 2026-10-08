@@ -14,5 +14,6 @@ pub mod i18n;
 pub mod instance;
 pub mod ocr;
 pub mod permissions;
+pub mod prefs;
 pub mod selection;
 pub mod store;

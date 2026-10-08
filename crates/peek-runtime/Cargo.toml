@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 peek-core = { path = "../peek-core" }
 peek-network = { path = "../peek-network" }
+serde.workspace = true
 serde_json.workspace = true
 fluent-bundle = "0.16"
 unic-langid = "0.9"

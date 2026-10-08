@@ -24,6 +24,8 @@ const NOTO_SERIF: &[u8] = include_bytes!("../assets/fonts/NotoSerif.ttf");
 
 /// One complete, coherent font bundle selectable as a theme.
 pub struct FontSet {
+    /// Stable id persisted in `ui.json`.
+    pub id: &'static str,
     /// Shown in settings.
     pub name: &'static str,
     /// Latin and UI chrome.
@@ -62,6 +64,7 @@ const SERIF_JP: &str = "Yu Mincho";
 
 /// Default bundle: Inter for Latin, Noto Sans for CJK, JetBrains Mono for code.
 pub const DEFAULT: FontSet = FontSet {
+    id: "default",
     name: "Inter + Noto Sans",
     latin: "Inter",
     sc: "Noto Sans SC",
@@ -74,6 +77,7 @@ pub const DEFAULT: FontSet = FontSet {
 /// Optional serif theme, for long-form reading. Latin and mono are bundled;
 /// the CJK faces come from the OS for now.
 pub const SERIF: FontSet = FontSet {
+    id: "serif",
     name: "Noto Serif（衬线）",
     latin: "Noto Serif",
     sc: SERIF_SC,
@@ -84,6 +88,24 @@ pub const SERIF: FontSet = FontSet {
 };
 
 pub const ALL: &[&FontSet] = &[&DEFAULT, &SERIF];
+
+/// Looks a set up by its persisted id, falling back to the default so an
+/// unknown or stale value can never leave the shell without fonts.
+pub fn by_id(id: &str) -> &'static FontSet {
+    ALL.iter()
+        .find(|set| set.id == id)
+        .copied()
+        .unwrap_or(&DEFAULT)
+}
+
+/// The set the shell starts with. `PEEK_FONT_SET` wins so the offscreen
+/// previews can render a specific bundle without touching the user's choice.
+pub fn initial() -> &'static FontSet {
+    match std::env::var("PEEK_FONT_SET") {
+        Ok(id) => by_id(&id),
+        Err(_) => by_id(&peek_runtime::prefs::load().font_set),
+    }
+}
 
 /// Registers the bundled faces. Must run before the first window is opened,
 /// because GPUI measures text when a view is first laid out.

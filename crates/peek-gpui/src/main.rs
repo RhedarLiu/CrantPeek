@@ -110,10 +110,13 @@ struct Peek {
     busy: bool,
     dictionary_note: String,
 
-    /// Permissions that are not granted yet. The double-tap Ctrl hook and
-    /// selection reading need Accessibility; without it they fail silently, so
-    /// the panel says so instead of appearing broken.
-    missing_permissions: Vec<&'static str>,
+    /// Permission name (already an i18n key) and whether it is granted. The
+    /// double-tap Ctrl hook and selection reading need Accessibility and Input
+    /// Monitoring; without them they fail silently, so the panel says so
+    /// instead of appearing broken.
+    permissions: Vec<(&'static str, bool)>,
+    /// Whether the settings page is showing.
+    settings: bool,
     config: Config,
     client: Client,
     runtime: tokio::runtime::Runtime,
@@ -147,7 +150,7 @@ impl Peek {
             .expect("tokio runtime");
 
         let this = Self {
-            set: &fonts::DEFAULT,
+            set: fonts::initial(),
             _activation: activation,
             input,
             tasks,
@@ -156,11 +159,8 @@ impl Peek {
             status: String::new(),
             busy: false,
             dictionary_note: String::new(),
-            missing_permissions: peek_runtime::permissions::status()
-                .into_iter()
-                .filter(|(_, granted)| !granted)
-                .map(|(name, _)| name)
-                .collect(),
+            permissions: peek_runtime::permissions::status(),
+            settings: peek_runtime::prefs::load().settings_open,
             config,
             client: Client::default(),
             runtime,
@@ -239,6 +239,7 @@ impl Peek {
                     .await;
                 this.update(cx, |peek, cx| {
                     println!("[selftest] query status : {:?}", peek.status);
+                    println!("[selftest] font set     : {}", peek.set.id);
                     println!("[selftest] answer bytes : {}", peek.answer.len());
                     println!("[selftest] busy         : {}", peek.busy);
                     // The dictionary path needs no credentials, so it is checked
@@ -247,7 +248,14 @@ impl Peek {
                         "[selftest] dict note    : {} bytes",
                         peek.dictionary_note.len()
                     );
-                    println!("[selftest] permissions  : {:?}", peek.missing_permissions);
+                    println!(
+                        "[selftest] denied perms : {:?}",
+                        peek.permissions
+                            .iter()
+                            .filter(|(_, granted)| !granted)
+                            .map(|(name, _)| *name)
+                            .collect::<Vec<_>>()
+                    );
                     cx.notify();
                 })
                 .ok();
@@ -287,6 +295,27 @@ impl Peek {
         self.receiver = None;
         self.busy = false;
         peek_core::discard_pending_turn(&mut self.messages);
+    }
+
+    /// Switches the bundled font set, applies it to the theme and persists it.
+    fn choose_font_set(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        let set = fonts::by_id(id);
+        self.set = set;
+        fonts::apply(cx, set);
+        self.persist_prefs();
+        cx.notify();
+    }
+
+    /// Writes the UI-only preferences. Failures are cosmetic, so they are
+    /// reported but never block the interaction.
+    fn persist_prefs(&self) {
+        let prefs = peek_runtime::prefs::UiPrefs {
+            font_set: self.set.id.to_string(),
+            settings_open: self.settings,
+        };
+        if let Err(err) = peek_runtime::prefs::save(&prefs) {
+            eprintln!("saving ui prefs failed: {err}");
+        }
     }
 
     /// Reads the input box and starts a turn, clearing it only if one began.
@@ -469,6 +498,16 @@ impl Render for Peek {
             self.input
                 .update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        if self.settings {
+            self.settings_page(cx).into_any_element()
+        } else {
+            self.query_page(cx).into_any_element()
+        }
+    }
+}
+
+impl Peek {
+    fn query_page(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let set = self.set;
         let fg = theme.foreground;
@@ -500,6 +539,23 @@ impl Render for Peek {
                             .text_size(px(15.))
                             .font_semibold()
                             .child("Crant Peek"),
+                    )
+                    .child(
+                        Button::new("open-settings")
+                            .secondary()
+                            .rounded(px(10.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .child(
+                                Icon::new(gpui_kit::assets::IconName::Settings)
+                                    .size(px(16.))
+                                    .text_color(muted),
+                            )
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.settings = true;
+                                this.persist_prefs();
+                                cx.notify();
+                            })),
                     )
                     .child(
                         Icon::new(gpui_kit::assets::IconName::Close)
@@ -586,25 +642,29 @@ impl Render for Peek {
                         this.child(TextView::markdown("answer", self.answer.clone()))
                     }),
             )
-            .when(!self.missing_permissions.is_empty(), |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .font_family(set.latin)
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .child(format!(
-                            "{}: {}",
-                            i18n::tr("settings-permission-denied"),
-                            // `permissions::status()` already yields localisation keys.
-                            self.missing_permissions
-                                .iter()
-                                .map(|key| i18n::tr(key))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )),
-                )
-            })
+            .when(
+                self.permissions.iter().any(|(_, granted)| !granted),
+                |this| {
+                    this.child(
+                        div()
+                            .w_full()
+                            .font_family(set.latin)
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(format!(
+                                "{}: {}",
+                                i18n::tr("settings-permission-denied"),
+                                // `permissions::status()` already yields localisation keys.
+                                self.permissions
+                                    .iter()
+                                    .filter(|(_, granted)| !granted)
+                                    .map(|(key, _)| i18n::tr(key))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )),
+                    )
+                },
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -618,6 +678,110 @@ impl Render for Peek {
                     // the active set is visible while the panel is still to come.
                     .child(set.name),
             )
+            .into_any_element()
+    }
+
+    /// Settings page. Only the font set is live so far: it is the one item the
+    /// migration is required to expose as a choice, and it is verifiable from
+    /// an offscreen render.
+    fn settings_page(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let set = self.set;
+        let fg = theme.foreground;
+        let bg = theme.background;
+        let muted = theme.muted_foreground;
+
+        v_flex()
+            .size_full()
+            .bg(bg)
+            .text_color(fg)
+            .p(px(20.))
+            .gap(px(14.))
+            .on_key_down(|event, window, _cx| {
+                if event.keystroke.key == "escape" {
+                    native_window::hide(window);
+                }
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        Button::new("settings-back")
+                            .secondary()
+                            .rounded(px(10.))
+                            .h(px(28.))
+                            .px(px(10.))
+                            .label(i18n::tr("header-back"))
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.settings = false;
+                                this.persist_prefs();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family(set.latin)
+                            .text_size(px(15.))
+                            .font_semibold()
+                            .child(i18n::tr("settings-title")),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .font_family(set.latin)
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(i18n::tr("settings-font-set")),
+                    )
+                    .children(fonts::ALL.iter().map(|candidate| {
+                        let id = candidate.id;
+                        let active = id == set.id;
+                        Button::new(id)
+                            .rounded(px(10.))
+                            .h(px(34.))
+                            .px(px(12.))
+                            .when(active, |button| button.primary())
+                            .when(!active, |button| button.secondary())
+                            .label(candidate.name)
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.choose_font_set(id, cx);
+                            }))
+                    })),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .font_family(set.latin)
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(i18n::tr("settings-permissions")),
+                    )
+                    .children(self.permissions.iter().map(|(key, granted)| {
+                        div()
+                            .font_family(set.latin)
+                            .text_size(px(12.))
+                            .child(format!(
+                                "{} — {}",
+                                i18n::tr(key),
+                                i18n::tr(if *granted {
+                                    "settings-permission-granted"
+                                } else {
+                                    "settings-permission-denied"
+                                })
+                            ))
+                    })),
+            )
+            .into_any_element()
     }
 }
 
@@ -688,11 +852,17 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         if !missing.is_empty() {
             eprintln!("bundled fonts MISSING: {}", missing.join(", "));
         }
-        fonts::apply(cx, &fonts::DEFAULT);
+        fonts::apply(cx, fonts::initial());
         let view = cx.new(|cx| Peek::new(window, cx));
+        let settings_page = std::env::var("PEEK_PAGE").as_deref() == Ok("settings");
         view.update(cx, |peek, cx| {
-            peek.answer = SAMPLE_ANSWER.into();
-            peek.status = i18n::tr("status-done");
+            if settings_page {
+                // Not persisted: a preview must not overwrite the real choice.
+                peek.settings = true;
+            } else {
+                peek.answer = SAMPLE_ANSWER.into();
+                peek.status = i18n::tr("status-done");
+            }
             cx.notify();
         });
         cx.new(|cx| Root::new(view, window, cx))
@@ -771,7 +941,7 @@ fn main() -> anyhow::Result<()> {
                 missing.join(", ")
             );
         }
-        fonts::apply(cx, &fonts::DEFAULT);
+        fonts::apply(cx, fonts::initial());
 
         let handle = match gpui_kit::open_window(window_options(), cx, |window, cx| {
             let view = cx.new(|cx| Peek::new(window, cx));

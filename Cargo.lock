@@ -6328,6 +6328,7 @@ dependencies = [
  "objc2-vision",
  "peek-core",
  "peek-network",
+ "serde",
  "serde_json",
  "sys-locale",
  "tempfile",

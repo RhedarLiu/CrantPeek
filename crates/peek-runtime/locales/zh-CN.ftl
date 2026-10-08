@@ -134,6 +134,7 @@ settings-theme-system = 跟随系统
 settings-theme-light = 浅色
 settings-theme-dark = 深色
 settings-zoom = 界面缩放
+settings-font-set = 字体方案
 settings-shortcut-blank = 空白浮窗
 settings-shortcut-screenshot = 截图
 settings-double-ctrl = 双击 Ctrl 间隔（ms）

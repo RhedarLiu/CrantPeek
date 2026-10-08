@@ -113,6 +113,7 @@ settings-theme-system = Follow system
 settings-theme-light = Light
 settings-theme-dark = Dark
 settings-zoom = Interface scale
+settings-font-set = Font set
 settings-shortcut-blank = Blank window
 settings-shortcut-screenshot = Screenshot
 settings-double-ctrl = Double Ctrl interval (ms)
