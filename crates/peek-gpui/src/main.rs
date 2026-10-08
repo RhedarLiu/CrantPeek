@@ -174,6 +174,12 @@ impl Peek {
                     println!("[selftest] query status : {:?}", peek.status);
                     println!("[selftest] answer bytes : {}", peek.answer.len());
                     println!("[selftest] busy         : {}", peek.busy);
+                    // The dictionary path needs no credentials, so it is checked
+                    // for real: `ephemeral` is an ordinary ECDICT headword.
+                    println!(
+                        "[selftest] dict note    : {} bytes",
+                        peek.dictionary_note.len()
+                    );
                     cx.notify();
                 })
                 .ok();
