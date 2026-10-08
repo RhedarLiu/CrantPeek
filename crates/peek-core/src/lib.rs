@@ -20,15 +20,6 @@ impl Task {
         Self::ExplainError,
         Self::Explain,
     ];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Translate => "翻译",
-            Self::Define => "查词",
-            Self::ExplainCode => "代码解释",
-            Self::ExplainError => "报错分析",
-            Self::Explain => "解释",
-        }
-    }
     pub fn styled_instruction(self, target: &str, style: &str) -> String {
         let mut prompt = self.instruction(target);
         if self == Self::Translate {
@@ -217,6 +208,7 @@ impl Default for DecisionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub ui_language: String,
     pub translation_style: String,
     pub theme: String,
     pub zoom: f32,
@@ -241,6 +233,7 @@ impl Default for Config {
             "Alt"
         };
         Self {
+            ui_language: "system".into(),
             translation_style: "natural".into(),
             theme: "system".into(),
             zoom: 1.0,
@@ -265,42 +258,42 @@ impl Config {
             self.translation_style.as_str(),
             "natural" | "literal" | "technical"
         ) {
-            return Err("Invalid translation style");
+            return Err("error-config-style");
         }
         if !matches!(self.theme.as_str(), "system" | "light" | "dark")
             || !self.zoom.is_finite()
             || !(0.8..=1.5).contains(&self.zoom)
         {
-            return Err("Invalid appearance settings");
+            return Err("error-config-appearance");
         }
         if self.schema_version != 1 {
-            return Err("Unsupported configuration version");
+            return Err("error-config-version");
         }
         if !(150..=800).contains(&self.double_ctrl_ms) {
-            return Err("Double Ctrl interval must be 150–800ms");
+            return Err("error-config-double-ctrl");
         }
         if self.blank_hotkey == self.screenshot_hotkey {
-            return Err("Entry shortcuts must differ");
+            return Err("error-config-shortcut-same");
         }
         if self.target_language.trim().is_empty() || self.chinese_target.trim().is_empty() {
-            return Err("Target language cannot be empty");
+            return Err("error-config-language");
         }
         if !(128..=16384).contains(&self.provider.max_output_tokens) {
-            return Err("Output token limit must be 128–16384");
+            return Err("error-config-tokens");
         }
         validate_endpoint(&self.provider.base_url, true)?;
         if self.decision.enabled {
             validate_endpoint(&self.decision.endpoint, true)?;
             if self.decision.model.trim().is_empty() {
-                return Err("Decision model cannot be empty");
+                return Err("error-config-decision-model");
             }
             if !(100..=10000).contains(&self.decision.timeout_ms) {
-                return Err("Decision timeout must be 100–10000ms");
+                return Err("error-config-decision-timeout");
             }
             if !self.decision.min_confidence.is_finite()
                 || !(0.0..=1.0).contains(&self.decision.min_confidence)
             {
-                return Err("Invalid decision confidence threshold");
+                return Err("error-config-decision-threshold");
             }
         }
         Ok(())
@@ -309,18 +302,18 @@ impl Config {
 
 /// Return a parsed endpoint only after transport and credential boundaries are checked.
 pub fn validate_endpoint(value: &str, allow_loopback: bool) -> Result<url::Url, &'static str> {
-    let url = url::Url::parse(value).map_err(|_| "Invalid endpoint URL")?;
+    let url = url::Url::parse(value).map_err(|_| "error-config-endpoint")?;
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
-        return Err("Endpoint cannot contain credentials or fragments");
+        return Err("error-config-endpoint");
     }
-    let host = url.host().ok_or("Endpoint must have a hostname")?;
+    let host = url.host().ok_or("error-config-endpoint")?;
     let loopback = match host {
         url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
         url::Host::Ipv4(ip) => ip.is_loopback(),
         url::Host::Ipv6(ip) => ip.is_loopback(),
     };
     if url.scheme() != "https" && !(url.scheme() == "http" && allow_loopback && loopback) {
-        return Err("Use HTTPS, or HTTP on loopback only");
+        return Err("error-config-endpoint");
     }
     Ok(url)
 }

@@ -17,6 +17,17 @@ pub enum Error {
     #[error("Request cancelled")]
     Cancelled,
 }
+impl Error {
+    /// Stable presentation code. Details are supplied separately by the UI.
+    pub fn message_key(&self) -> &str {
+        match self {
+            Self::Network(_) => "error-network",
+            Self::Http(_) => "error-http",
+            Self::Cancelled => "error-cancelled",
+            Self::Invalid(code) => code,
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Route { task: Task, note: String },
@@ -34,22 +45,22 @@ impl ImageInput {
     pub fn validate_png(&self, max_bytes: usize, max_pixels: u64) -> Result<(), Error> {
         use base64::Engine;
         if self.png_base64.len() > max_bytes.div_ceil(3) * 4 {
-            return Err(Error::Invalid("Image exceeds upload limit".into()));
+            return Err(Error::Invalid("error-image-size".into()));
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.png_base64)
-            .map_err(|_| Error::Invalid("Invalid image base64".into()))?;
+            .map_err(|_| Error::Invalid("error-image-base64".into()))?;
         if bytes.len() > max_bytes
             || bytes.len() < 33
             || &bytes[..8] != b"\x89PNG\r\n\x1a\n"
             || &bytes[12..16] != b"IHDR"
         {
-            return Err(Error::Invalid("Invalid PNG image header".into()));
+            return Err(Error::Invalid("error-image-header".into()));
         }
         let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
         let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
         if width == 0 || height == 0 || u64::from(width) * u64::from(height) > max_pixels {
-            return Err(Error::Invalid("Image exceeds pixel limit".into()));
+            return Err(Error::Invalid("error-image-pixels".into()));
         }
         Ok(())
     }
@@ -61,7 +72,7 @@ pub fn multimodal_body(
     image: &ImageInput,
 ) -> Result<Value, Error> {
     if !provider.vision {
-        return Err(Error::Invalid("Provider image input is not enabled".into()));
+        return Err(Error::Invalid("error-image-disabled".into()));
     }
     image.validate_png(12 * 1024 * 1024, 16_000_000)?;
     let mut body = request_body(provider, messages);
@@ -72,12 +83,12 @@ pub fn multimodal_body(
     };
     let items = body[field]
         .as_array_mut()
-        .ok_or_else(|| Error::Invalid("Missing messages".into()))?;
+        .ok_or_else(|| Error::Invalid("error-message-missing".into()))?;
     let last = items
         .iter_mut()
         .rev()
         .find(|m| m["role"] == "user")
-        .ok_or_else(|| Error::Invalid("Image requires a user message".into()))?;
+        .ok_or_else(|| Error::Invalid("error-image-message".into()))?;
     let text = last["content"].as_str().unwrap_or("").to_owned();
     let url = format!("data:image/png;base64,{}", image.png_base64);
     last["content"] = match provider.protocol {
@@ -125,13 +136,13 @@ impl SseDecoder {
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, Error> {
         self.pending.extend_from_slice(bytes);
         if self.pending.len() > 2 * 1024 * 1024 {
-            return Err(Error::Invalid("SSE buffer exceeds limit".into()));
+            return Err(Error::Invalid("error-sse-buffer".into()));
         }
         let mut events = Vec::new();
         while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
             let raw: Vec<u8> = self.pending.drain(..=end).collect();
             let line = std::str::from_utf8(&raw)
-                .map_err(|_| Error::Invalid("Non-UTF8 SSE".into()))?
+                .map_err(|_| Error::Invalid("error-sse-encoding".into()))?
                 .trim_end_matches(['\r', '\n']);
             if line.is_empty() {
                 if !self.data.is_empty() {
@@ -142,7 +153,7 @@ impl SseDecoder {
                 self.data
                     .push(value.strip_prefix(' ').unwrap_or(value).to_owned());
                 if self.data.iter().map(String::len).sum::<usize>() > 2 * 1024 * 1024 {
-                    return Err(Error::Invalid("SSE event exceeds limit".into()));
+                    return Err(Error::Invalid("error-sse-event".into()));
                 }
             }
         }
@@ -155,9 +166,9 @@ pub fn decode_event(protocol: Protocol, data: &str) -> Result<Option<Event>, Err
         return Ok(Some(Event::Done));
     }
     let v: Value =
-        serde_json::from_str(data).map_err(|_| Error::Invalid("Malformed SSE JSON".into()))?;
+        serde_json::from_str(data).map_err(|_| Error::Invalid("error-sse-json".into()))?;
     if v.get("error").is_some() || v["type"] == "error" {
-        return Ok(Some(Event::Failed("Service reported an error".into())));
+        return Ok(Some(Event::Failed("error-service".into())));
     }
     let kind = v["type"].as_str().unwrap_or("");
     if (protocol == Protocol::ChatCompletions
@@ -168,16 +179,14 @@ pub fn decode_event(protocol: Protocol, data: &str) -> Result<Option<Event>, Err
             && kind == "message_delta"
             && v["delta"]["stop_reason"] == "max_tokens")
     {
-        return Ok(Some(Event::Failed(
-            "回答达到 token 上限，内容可能不完整；可提高上限后重试".into(),
-        )));
+        return Ok(Some(Event::Failed("error-truncated".into())));
     }
     if protocol == Protocol::ChatCompletions
         && v.pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
             == Some("content_filter")
     {
-        return Ok(Some(Event::Failed("回答被服务内容过滤中止".into())));
+        return Ok(Some(Event::Failed("error-content-filter".into())));
     }
     let text = match protocol {
         Protocol::ChatCompletions => v
@@ -200,7 +209,7 @@ pub fn decode_event(protocol: Protocol, data: &str) -> Result<Option<Event>, Err
         return Ok(Some(Event::Done));
     }
     if matches!(kind, "response.failed" | "response.incomplete") {
-        return Ok(Some(Event::Failed("Response failed or incomplete".into())));
+        return Ok(Some(Event::Failed("error-response-incomplete".into())));
     }
     Ok(None)
 }
@@ -293,7 +302,7 @@ impl Client {
                     .eq_ignore_ascii_case("text/event-stream")
             })
         {
-            return Err(Error::Invalid("Expected text/event-stream response".into()));
+            return Err(Error::Invalid("error-sse-type".into()));
         }
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
@@ -301,16 +310,14 @@ impl Client {
         loop {
             let next = tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), next = stream.next() => next };
             let Some(chunk) = next else {
-                return Err(Error::Invalid("Stream ended without completion".into()));
+                return Err(Error::Invalid("error-stream-ended".into()));
             };
             for data in decoder.push(&chunk?)? {
                 if let Some(event) = decode_event(provider.protocol, &data)? {
                     if let Event::Text(text) = &event {
                         output_bytes = output_bytes.saturating_add(text.len());
                         if output_bytes > peek_core::MAX_OUTPUT_BYTES {
-                            return Err(Error::Invalid(
-                                "Generated output exceeds size limit".into(),
-                            ));
+                            return Err(Error::Invalid("error-output-size".into()));
                         }
                     }
                     let terminal = matches!(event, Event::Done | Event::Failed(_));
@@ -365,9 +372,7 @@ impl Client {
             .content_length()
             .is_some_and(|n| n > MAX_DECISION_BYTES as u64)
         {
-            return Err(Error::Invalid(
-                "Decision response exceeds size limit".into(),
-            ));
+            return Err(Error::Invalid("error-decision-size".into()));
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -378,19 +383,17 @@ impl Client {
             };
             let chunk = chunk?;
             if bytes.len().saturating_add(chunk.len()) > MAX_DECISION_BYTES {
-                return Err(Error::Invalid(
-                    "Decision response exceeds size limit".into(),
-                ));
+                return Err(Error::Invalid("error-decision-size".into()));
             }
             bytes.extend_from_slice(&chunk);
         }
         let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| Error::Invalid("Malformed decision JSON".into()))?;
+            .map_err(|_| Error::Invalid("error-decision-json".into()))?;
         // Cloudflare wraps output in result; direct TypeSafe uses the root.
         let root = value.get("result").unwrap_or(&value);
         let answer = &root["answers"]["task"];
         let decision: Decision = serde_json::from_value(answer.clone())
-            .map_err(|_| Error::Invalid("Invalid decision schema".into()))?;
+            .map_err(|_| Error::Invalid("error-decision-schema".into()))?;
         decision.validate()?;
         Ok(decision)
     }
@@ -399,9 +402,7 @@ impl Client {
 /// Cloudflare Clef System One image extension (not supported by text-only Jev).
 pub fn clef_image_body(model: &str, text: &str, image: &ImageInput) -> Result<Value, Error> {
     if !matches!(model, "clef" | "clef-flash") {
-        return Err(Error::Invalid(
-            "Image decisions require clef or clef-flash".into(),
-        ));
+        return Err(Error::Invalid("error-decision-image-model".into()));
     }
     image.validate_png(4 * 1024 * 1024, 16_000_000)?;
     Ok(
@@ -427,23 +428,19 @@ impl Decision {
                 .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
             || (self.probabilities.values().sum::<f64>() - 1.0).abs() > 0.02
         {
-            return Err(Error::Invalid("Invalid decision probabilities".into()));
+            return Err(Error::Invalid("error-decision-probabilities".into()));
         }
         let selected = serde_json::to_value(self.task).unwrap();
         if !self.probabilities.contains_key(selected.as_str().unwrap()) {
-            return Err(Error::Invalid(
-                "Chosen task missing from probabilities".into(),
-            ));
+            return Err(Error::Invalid("error-decision-missing-task".into()));
         }
         for key in self.probabilities.keys() {
             serde_json::from_value::<Task>(Value::String(key.clone()))
-                .map_err(|_| Error::Invalid("Unknown task in probabilities".into()))?;
+                .map_err(|_| Error::Invalid("error-decision-unknown-task".into()))?;
         }
         let chosen = self.probabilities[selected.as_str().unwrap()];
         if self.probabilities.values().any(|p| *p > chosen + 1e-6) {
-            return Err(Error::Invalid(
-                "Chosen task is not the highest-probability task".into(),
-            ));
+            return Err(Error::Invalid("error-decision-inconsistent".into()));
         }
         Ok(())
     }

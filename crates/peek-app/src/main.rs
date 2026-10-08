@@ -1,6 +1,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod capture;
+mod design;
 mod desktop;
+mod i18n;
 mod instance;
 mod ocr;
 mod permissions;
@@ -20,9 +22,13 @@ fn apply_appearance(ctx: &egui::Context, config: &Config) {
     };
     ctx.set_theme(preference);
     ctx.set_zoom_factor(config.zoom);
+    design::apply(ctx);
 }
 
 struct Peek {
+    preview: Option<String>,
+    preview_frames: u32,
+    locale: i18n::I18n,
     config: Config,
     draft: Config,
     settings: bool,
@@ -98,25 +104,62 @@ impl Peek {
                 break;
             }
         }
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
-        let (config, status) = match store::load() {
+        let preview = std::env::var("PEEK_UI_PREVIEW").ok();
+        let (mut config, status) = match if preview.is_some() {
+            Ok(Config::default())
+        } else {
+            store::load()
+        } {
             Ok(c) => (c, String::new()),
-            Err(e) => (Config::default(), format!("Configuration error: {e}")),
+            Err(e) => (
+                Config::default(),
+                i18n::format("status-config-error", &[("error", &i18n::diagnostic(&e))]),
+            ),
         };
+        if preview.is_some() {
+            config.ui_language = std::env::var("PEEK_UI_LANGUAGE").unwrap_or_else(|_| "en".into());
+            config.theme = std::env::var("PEEK_UI_THEME").unwrap_or_else(|_| "light".into());
+            config.onboarding_complete = true;
+        }
+        i18n::set_language(&config.ui_language);
         apply_appearance(&cc.egui_ctx, &config);
-        let desktop = desktop::Desktop::new(&config, cc.egui_ctx.clone());
+        let desktop = if preview.is_some() {
+            None
+        } else {
+            Some(desktop::Desktop::new(&config, cc.egui_ctx.clone()))
+        };
+        let desktop = desktop.unwrap_or_else(|| Err(String::new()));
         let (desktop, status) = match desktop {
             Ok(d) => (Some(d), status),
-            Err(e) => (None, format!("Desktop integration error: {e}")),
+            Err(_) if preview.is_some() => (None, String::new()),
+            Err(e) => (
+                None,
+                i18n::format("status-desktop-error", &[("error", &i18n::diagnostic(&e))]),
+            ),
         };
         let initial_hide = config.onboarding_complete && desktop.is_some() && status.is_empty();
         Self {
+            preview: preview.clone(),
+            preview_frames: 0,
+            locale: i18n::I18n::new(&config.ui_language),
             initial_hide,
             draft: config.clone(),
-            settings: !config.onboarding_complete,
+            settings: !config.onboarding_complete
+                || (preview.is_some()
+                    && std::env::var("PEEK_UI_PAGE").as_deref() == Ok("settings")),
             config,
-            input: String::new(),
-            answer: String::new(),
+            input: if preview.is_some() {
+                i18n::tr("preview-source")
+            } else {
+                String::new()
+            },
+            answer: if preview.is_some() {
+                i18n::tr("preview-answer")
+            } else {
+                String::new()
+            },
             followup: String::new(),
             messages: Vec::new(),
             task: Task::Translate,
@@ -198,7 +241,7 @@ impl Peek {
             return;
         }
         if text.len() > peek_core::MAX_INPUT_BYTES {
-            self.status = "输入超过 64 KiB，请缩短选区或分段查询".into();
+            self.status = i18n::tr("status-input-too-long");
             return;
         }
         self.stop();
@@ -216,7 +259,7 @@ impl Peek {
             }
         };
         if self.config.provider.model.trim().is_empty() {
-            self.status = "请先在设置中填写模型".into();
+            self.status = i18n::tr("status-model-missing");
             return;
         }
         if !followup {
@@ -254,7 +297,7 @@ impl Peek {
         });
         self.followup.clear();
         self.answer.clear();
-        self.status = "生成中…".into();
+        self.status = i18n::tr("status-generating");
         self.busy = true;
         let (tx, rx) = mpsc::channel(128);
         self.receiver = Some(rx);
@@ -300,13 +343,15 @@ impl Peek {
         let fallback_task = self.task;
         let translation_style = self.config.translation_style.clone();
         self.route_note = if use_decision {
-            "正在判断任务…".into()
+            i18n::tr("route-deciding")
         } else {
-            "本地判断 / 手动模式".into()
+            i18n::tr("route-local")
         };
         let ctx = ctx.clone();
         let client = self.client.clone();
+        let ui_language = self.config.ui_language.clone();
         self.runtime.spawn(async move {
+            let locale = i18n::I18n::new(&ui_language);
             if use_decision {
                 let routed = if let Some(ref decision_key) = decision_key {
                     tokio::time::timeout(
@@ -344,10 +389,16 @@ impl Peek {
                 let (task, note) = match routed {
                     Some(Ok(result)) if result.confidence >= decision.min_confidence => (
                         result.task,
-                        format!("{} · 置信度 {:.2}", decision.model, result.confidence),
+                        locale.format(
+                            "route-decided",
+                            &[
+                                ("model", &decision.model),
+                                ("confidence", &format!("{:.2}", result.confidence)),
+                            ],
+                        ),
                     ),
-                    Some(Ok(_)) => (fallback_task, "决策不确定 · 使用本地判断".into()),
-                    _ => (fallback_task, "决策不可用 · 使用本地判断".into()),
+                    Some(Ok(_)) => (fallback_task, locale.text("route-uncertain")),
+                    _ => (fallback_task, locale.text("route-unavailable")),
                 };
                 if cancel.is_cancelled() {
                     return;
@@ -371,6 +422,11 @@ impl Peek {
                 }
             });
             while let Some(event) = net_rx.recv().await {
+                let event = if let Event::Failed(code) = event {
+                    Event::Failed(locale.text(&code))
+                } else {
+                    event
+                };
                 if tx.send(event).await.is_err() {
                     break;
                 }
@@ -378,8 +434,8 @@ impl Peek {
             }
             let failure = match worker.await {
                 Ok(Ok(())) => None,
-                Ok(Err(e)) => Some(e.to_string()),
-                Err(_) => Some("网络任务异常退出，请重试".into()),
+                Ok(Err(e)) => Some(locale.network_error(&e)),
+                Err(_) => Some(locale.text("status-worker-crashed")),
             };
             if let Some(failure) = failure {
                 let _ = tx.send(Event::Failed(failure)).await;
@@ -389,11 +445,11 @@ impl Peek {
     }
     fn test_connection(&mut self, ctx: &egui::Context) {
         if self.draft.provider.model.trim().is_empty() {
-            self.test_status = "请填写模型".into();
+            self.test_status = i18n::tr("status-model-missing");
             return;
         }
         if let Err(e) = self.draft.validate() {
-            self.test_status = e.into();
+            self.test_status = i18n::tr(e);
             return;
         }
         let key = if self.secret_draft.is_empty() {
@@ -414,11 +470,13 @@ impl Peek {
         self.test_cancel = Some(cancel.clone());
         let (tx, rx) = mpsc::channel(16);
         self.test_rx = Some(rx);
-        self.test_status = "测试中（会产生少量 API 用量）…".into();
+        self.test_status = i18n::tr("settings-test-running");
         let client = self.client.clone();
         let provider = self.draft.provider.clone();
         let ctx = ctx.clone();
+        let ui_language = self.config.ui_language.clone();
         self.runtime.spawn(async move {
+            let locale = i18n::I18n::new(&ui_language);
             let (stream_tx, mut stream_rx) = mpsc::channel(16);
             let worker = tokio::spawn(async move {
                 let messages = [Message {
@@ -432,14 +490,19 @@ impl Peek {
                 .await
             });
             while let Some(event) = stream_rx.recv().await {
+                let event = if let Event::Failed(code) = event {
+                    Event::Failed(locale.text(&code))
+                } else {
+                    event
+                };
                 let _ = tx.send(event).await;
                 ctx.request_repaint();
             }
             let failure = match worker.await {
                 Ok(Ok(Ok(()))) => None,
-                Ok(Ok(Err(e))) => Some(e.to_string()),
-                Ok(Err(_)) => Some("连接测试超时".into()),
-                Err(_) => Some("连接测试任务失败".into()),
+                Ok(Ok(Err(e))) => Some(locale.network_error(&e)),
+                Ok(Err(_)) => Some(locale.text("settings-test-timeout")),
+                Err(_) => Some(locale.text("settings-test-crashed")),
             };
             if let Some(e) = failure {
                 let _ = tx.send(Event::Failed(e)).await;
@@ -448,130 +511,240 @@ impl Peek {
         });
     }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("设置");
-        ui.collapsing("外观", |ui| {
-            egui::ComboBox::from_label("主题")
-                .selected_text(&self.draft.theme)
-                .show_ui(ui, |ui| {
-                    for (value, label) in
-                        [("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
-                    {
-                        ui.selectable_value(&mut self.draft.theme, value.into(), label);
-                    }
-                });
-            ui.add(egui::Slider::new(&mut self.draft.zoom, 0.8..=1.5).text("界面缩放"));
-        });
+        ui.heading(i18n::tr("settings-title"));
+        egui::ComboBox::from_id_salt("ui-language")
+            .selected_text(i18n::tr(match self.draft.ui_language.as_str() {
+                "zh-CN" => "language-zh",
+                "en" => "language-en",
+                _ => "settings-language-system",
+            }))
+            .show_ui(ui, |ui| {
+                for (value, key) in [
+                    ("system", "settings-language-system"),
+                    ("zh-CN", "language-zh"),
+                    ("en", "language-en"),
+                ] {
+                    ui.selectable_value(&mut self.draft.ui_language, value.into(), i18n::tr(key));
+                }
+            });
+        egui::CollapsingHeader::new(i18n::tr("settings-section-appearance"))
+            .id_salt("settings-section-appearance")
+            .show(ui, |ui| {
+                egui::ComboBox::from_id_salt("settings-theme")
+                    .selected_text(i18n::tr(match self.draft.theme.as_str() {
+                        "light" => "settings-theme-light",
+                        "dark" => "settings-theme-dark",
+                        _ => "settings-theme-system",
+                    }))
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("system", i18n::tr("settings-theme-system")),
+                            ("light", i18n::tr("settings-theme-light")),
+                            ("dark", i18n::tr("settings-theme-dark")),
+                        ] {
+                            ui.selectable_value(&mut self.draft.theme, value.into(), label);
+                        }
+                    });
+                ui.add(
+                    egui::Slider::new(&mut self.draft.zoom, 0.8..=1.5)
+                        .text(i18n::tr("settings-zoom")),
+                );
+            });
         if !self.config.onboarding_complete {
             ui.group(|ui| {
-                ui.heading("欢迎使用 Crant Peek");
-                ui.label("双击 Ctrl：只查询选区；没有选区不弹窗。");
-                ui.label(format!("{}：空白输入；{}：截图", self.config.blank_hotkey, self.config.screenshot_hotkey));
-                ui.label("Esc 或失焦收起；固定后可对照阅读。托盘菜单重新打开或退出。");
-                ui.weak("词典与 OCR 在本地运行。AI 查询文本会发往你配置的回答/决策服务；不自动上传剪贴板或整屏。");
-                if ui.button("了解，开始使用").clicked() {
-                    let mut config = self.config.clone(); config.onboarding_complete = true;
-                    match store::save(&config) { Ok(()) => { self.config = config; self.draft.onboarding_complete = true; }, Err(e) => self.status = e }
+                ui.heading(i18n::tr("welcome-title"));
+                ui.label(i18n::tr("welcome-selection"));
+                ui.label(i18n::format(
+                    "welcome-shortcuts",
+                    &[
+                        ("blank", &self.config.blank_hotkey),
+                        ("screenshot", &self.config.screenshot_hotkey),
+                    ],
+                ));
+                ui.label(i18n::tr("welcome-dismiss"));
+                ui.weak(i18n::tr("welcome-privacy"));
+                if ui.button(i18n::tr("welcome-start")).clicked() {
+                    let mut config = self.config.clone();
+                    config.onboarding_complete = true;
+                    match store::save(&config) {
+                        Ok(()) => {
+                            self.config = config;
+                            self.draft.onboarding_complete = true;
+                        }
+                        Err(e) => self.status = e,
+                    }
                 }
             });
         }
-        ui.collapsing("快捷键（保存后重启生效）", |ui| {
-            ui.label("空白浮窗"); ui.text_edit_singleline(&mut self.draft.blank_hotkey);
-            ui.label("截图"); ui.text_edit_singleline(&mut self.draft.screenshot_hotkey);
-            ui.add(egui::Slider::new(&mut self.draft.double_ctrl_ms,150..=800).text("双击 Ctrl 间隔 ms"));
-            ui.weak("示例：Super+Shift+A（macOS Command）、Alt+Shift+A（Windows）。不要与系统或其他应用快捷键冲突。");
-        });
-        ui.collapsing("系统权限与使用说明", |ui| {
-            for (name, granted) in permissions::status() {
-                ui.label(format!("{name}：{}", if granted { "已授权" } else { "未授权" }));
-            }
-            ui.weak("双击 Ctrl 只读取选区，无选区不弹窗。应用不支持选区读取时，请用空白浮窗主动粘贴或截图。");
-            if cfg!(windows) { ui.weak("不能读取高权限应用或安全输入。系统 OCR 需要已安装的语言包。"); }
-            ui.weak("macOS 修改权限后可能需要退出并重新启动 Peek；开发构建路径变化也可能需要重新授权。");
-            if ui.button("打开系统隐私设置").clicked()
-                && let Err(e) = permissions::open_settings() { self.status = e; }
-        });
-        ui.label("回答服务（凭据保存在系统安全存储）");
-        egui::ComboBox::from_label("协议")
-            .selected_text(format!("{:?}", self.draft.provider.protocol))
-            .show_ui(ui, |ui| {
-                for p in [
-                    Protocol::ChatCompletions,
-                    Protocol::Responses,
-                    Protocol::Anthropic,
-                ] {
-                    ui.selectable_value(&mut self.draft.provider.protocol, p, format!("{p:?}"));
+        egui::CollapsingHeader::new(i18n::tr("settings-section-shortcuts"))
+            .id_salt("settings-section-shortcuts")
+            .show(ui, |ui| {
+                ui.label(i18n::tr("settings-shortcut-blank"));
+                ui.text_edit_singleline(&mut self.draft.blank_hotkey);
+                ui.label(i18n::tr("settings-shortcut-screenshot"));
+                ui.text_edit_singleline(&mut self.draft.screenshot_hotkey);
+                ui.add(
+                    egui::Slider::new(&mut self.draft.double_ctrl_ms, 150..=800)
+                        .text(i18n::tr("settings-double-ctrl")),
+                );
+                ui.weak(i18n::tr("settings-shortcut-hint"));
+            });
+        egui::CollapsingHeader::new(i18n::tr("settings-permissions"))
+            .id_salt("settings-permissions")
+            .show(ui, |ui| {
+                for (name, granted) in permissions::status() {
+                    ui.label(format!(
+                        "{} · {}",
+                        i18n::tr(name),
+                        if granted {
+                            i18n::tr("settings-permission-granted")
+                        } else {
+                            i18n::tr("settings-permission-denied")
+                        }
+                    ));
+                }
+                ui.weak(i18n::tr("settings-permission-hint"));
+                if cfg!(windows) {
+                    ui.weak(i18n::tr("settings-permission-windows"));
+                }
+                ui.weak(i18n::tr("settings-permission-restart"));
+                if ui.button(i18n::tr("settings-open-privacy")).clicked()
+                    && let Err(e) = permissions::open_settings()
+                {
+                    self.status = e;
                 }
             });
-        ui.label("Base URL（包括 /v1，除非服务要求其他路径）");
-        ui.text_edit_singleline(&mut self.draft.provider.base_url);
-        ui.label("Model");
-        ui.text_edit_singleline(&mut self.draft.provider.model);
-        ui.add(
-            egui::Slider::new(&mut self.draft.provider.max_output_tokens, 128..=16384)
-                .text("回答 token 上限"),
-        );
-        ui.checkbox(
-            &mut self.draft.provider.vision,
-            "该回答模型支持图片输入（手动图片解读时上传框选区域）",
-        );
-        ui.label("API key（留空保留已有凭据）");
-        ui.add(egui::TextEdit::singleline(&mut self.secret_draft).password(true));
+        egui::CollapsingHeader::new(i18n::tr("settings-section-answer"))
+            .id_salt("settings-answer")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ComboBox::from_id_salt("settings-protocol")
+                    .selected_text(i18n::protocol(self.draft.provider.protocol))
+                    .show_ui(ui, |ui| {
+                        for p in [
+                            Protocol::ChatCompletions,
+                            Protocol::Responses,
+                            Protocol::Anthropic,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.draft.provider.protocol,
+                                p,
+                                i18n::protocol(p),
+                            );
+                        }
+                    });
+                ui.label(i18n::tr("settings-base-url"));
+                ui.text_edit_singleline(&mut self.draft.provider.base_url);
+                ui.label(i18n::tr("settings-model"));
+                ui.text_edit_singleline(&mut self.draft.provider.model);
+                ui.add(
+                    egui::Slider::new(&mut self.draft.provider.max_output_tokens, 128..=16384)
+                        .text(i18n::tr("settings-max-tokens")),
+                );
+                ui.checkbox(&mut self.draft.provider.vision, i18n::tr("settings-vision"));
+                ui.label(i18n::tr("settings-api-key"));
+                ui.add(egui::TextEdit::singleline(&mut self.secret_draft).password(true));
+                ui.horizontal(|ui| {
+                    if ui.button(i18n::tr("settings-test")).clicked() {
+                        self.test_connection(ui.ctx());
+                    }
+                    if self.test_rx.is_some()
+                        && ui.button(i18n::tr("settings-test-cancel")).clicked()
+                    {
+                        if let Some(cancel) = self.test_cancel.take() {
+                            cancel.cancel();
+                        }
+                        self.test_rx = None;
+                        self.test_status = i18n::tr("settings-test-cancelled");
+                    }
+                });
+                ui.label(&self.test_status);
+            });
+        egui::CollapsingHeader::new(i18n::tr("settings-section-translation"))
+            .id_salt("settings-translation")
+            .show(ui, |ui| {
+                ui.label(i18n::tr("settings-default-target"));
+                ui.text_edit_singleline(&mut self.draft.target_language);
+                ui.label(i18n::tr("settings-chinese-target"));
+                ui.text_edit_singleline(&mut self.draft.chinese_target);
+                egui::ComboBox::from_id_salt("translation-style")
+                    .selected_text(i18n::tr(match self.draft.translation_style.as_str() {
+                        "literal" => "settings-style-literal",
+                        "technical" => "settings-style-technical",
+                        _ => "settings-style-natural",
+                    }))
+                    .show_ui(ui, |ui| {
+                        for (value, key) in [
+                            ("natural", "settings-style-natural"),
+                            ("literal", "settings-style-literal"),
+                            ("technical", "settings-style-technical"),
+                        ] {
+                            ui.selectable_value(
+                                &mut self.draft.translation_style,
+                                value.into(),
+                                i18n::tr(key),
+                            );
+                        }
+                    });
+            });
+        egui::CollapsingHeader::new(i18n::tr("settings-section-decision"))
+            .id_salt("settings-section-decision")
+            .show(ui, |ui| {
+                ui.checkbox(
+                    &mut self.draft.decision.enabled,
+                    i18n::tr("settings-decision-enable"),
+                );
+                ui.label(i18n::tr("settings-decision-endpoint-hint"));
+                ui.text_edit_singleline(&mut self.draft.decision.endpoint);
+                ui.label(i18n::tr("settings-decision-model"));
+                ui.text_edit_singleline(&mut self.draft.decision.model);
+                ui.label(i18n::tr("settings-decision-key"));
+                ui.add(egui::TextEdit::singleline(&mut self.decision_secret_draft).password(true));
+                ui.add(
+                    egui::Slider::new(&mut self.draft.decision.min_confidence, 0.0..=1.0)
+                        .text(i18n::tr("settings-decision-threshold")),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.draft.decision.timeout_ms, 100..=10000)
+                        .text(i18n::tr("settings-decision-timeout")),
+                );
+                ui.weak(i18n::tr("settings-decision-note"));
+            });
+        egui::CollapsingHeader::new(i18n::tr("settings-section-general"))
+            .id_salt("settings-general")
+            .show(ui, |ui| {
+                ui.checkbox(&mut self.draft.smart_mode, i18n::tr("settings-smart-mode"));
+                ui.checkbox(
+                    &mut self.draft.ocr_auto_query,
+                    i18n::tr("settings-ocr-auto"),
+                );
+                ui.weak(i18n::tr("settings-ocr-auto-hint"));
+                ui.checkbox(
+                    &mut self.draft.hide_on_blur,
+                    i18n::tr("settings-hide-on-blur"),
+                );
+            });
+    }
+    fn settings_footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("测试回答连接（少量 API 用量）").clicked() {
-                self.test_connection(ui.ctx());
-            }
-            if self.test_rx.is_some() && ui.button("取消测试").clicked() {
-                if let Some(cancel) = self.test_cancel.take() {
-                    cancel.cancel();
-                }
-                self.test_rx = None;
-                self.test_status = "已取消连接测试".into();
-            }
-        });
-        ui.label(&self.test_status);
-        ui.label("默认目标语言");
-        ui.text_edit_singleline(&mut self.draft.target_language);
-        ui.label("中文翻译目标");
-        ui.text_edit_singleline(&mut self.draft.chinese_target);
-        ui.collapsing("决策模型（可选）", |ui| {
-            ui.checkbox(&mut self.draft.decision.enabled, "启用专用决策服务");
-            ui.label("Endpoint：完整 URL；TypeSafe 或 Cloudflare 模型路由");
-            ui.text_edit_singleline(&mut self.draft.decision.endpoint);
-            ui.label("决策 Model");
-            ui.text_edit_singleline(&mut self.draft.decision.model);
-            ui.label("决策 API key / Token（留空保留）");
-            ui.add(egui::TextEdit::singleline(&mut self.decision_secret_draft).password(true));
-            ui.add(
-                egui::Slider::new(&mut self.draft.decision.min_confidence, 0.0..=1.0)
-                    .text("采用阈值"),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.draft.decision.timeout_ms, 100..=10000).text("超时 ms"),
-            );
-            ui.weak("只发送当前查询文本。不可用时回退本地判断；图像决策尚未接入。");
-        });
-        ui.checkbox(&mut self.draft.smart_mode, "智能判断模式");
-        ui.checkbox(
-            &mut self.draft.ocr_auto_query,
-            "截图识字后自动查询（识别文字发送到模型）",
-        );
-        ui.weak("关闭自动查询后只本地识字，点击查询/图片按钮才调用外部服务。");
-        ui.checkbox(&mut self.draft.hide_on_blur, "失焦隐藏（取消固定后生效）");
-        ui.horizontal(|ui| {
-            if ui.button("保存").clicked() {
-                let result = self.draft.validate().map_err(str::to_owned).and_then(|()| {
+            if design::primary(ui, i18n::tr("settings-save")).clicked() {
+                let result = self.draft.validate().map_err(i18n::tr).and_then(|()| {
                     let blank: global_hotkey::hotkey::HotKey = self
                         .draft
                         .blank_hotkey
-                        .parse()
-                        .map_err(|e| format!("空白快捷键无效：{e}"))?;
+                        .parse::<global_hotkey::hotkey::HotKey>()
+                        .map_err(|e| {
+                            i18n::format("error-hotkey-blank", &[("detail", &e.to_string())])
+                        })?;
                     let screenshot: global_hotkey::hotkey::HotKey = self
                         .draft
                         .screenshot_hotkey
-                        .parse()
-                        .map_err(|e| format!("截图快捷键无效：{e}"))?;
+                        .parse::<global_hotkey::hotkey::HotKey>()
+                        .map_err(|e| {
+                            i18n::format("error-hotkey-screenshot", &[("detail", &e.to_string())])
+                        })?;
                     if blank.id() == screenshot.id() {
-                        return Err("两个入口不能使用相同快捷键".into());
+                        return Err(i18n::tr("error-hotkey-duplicate"));
                     }
                     if !self.secret_draft.is_empty() {
                         store::save_secret(&self.draft.provider.credential_id, &self.secret_draft)?;
@@ -590,21 +763,25 @@ impl Peek {
                             || self.config.screenshot_hotkey != self.draft.screenshot_hotkey
                             || self.config.double_ctrl_ms != self.draft.double_ctrl_ms;
                         self.config = self.draft.clone();
+                        i18n::set_language(&self.config.ui_language);
+                        if let Some(desktop) = &self.desktop {
+                            desktop.refresh_language();
+                        }
+                        self.locale = i18n::I18n::new(&self.config.ui_language);
                         apply_appearance(ui.ctx(), &self.config);
                         self.secret_draft.clear();
                         self.decision_secret_draft.clear();
                         self.settings = false;
                         self.status = if shortcuts_changed {
-                            "已保存，快捷键修改需重启生效"
+                            i18n::tr("status-saved-restart")
                         } else {
-                            "已保存"
-                        }
-                        .into();
+                            i18n::tr("status-saved")
+                        };
                     }
                     Err(e) => self.status = e,
                 }
             }
-            if ui.button("取消").clicked() {
+            if ui.button(i18n::tr("settings-cancel")).clicked() {
                 self.draft = self.config.clone();
                 self.secret_draft.clear();
                 self.decision_secret_draft.clear();
@@ -624,6 +801,37 @@ impl Drop for Peek {
 impl eframe::App for Peek {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
+        if let Some(path) = &self.preview {
+            self.preview_frames += 1;
+            if self.preview_frames == 3 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            let images = ctx.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|event| {
+                        if let egui::Event::Screenshot { image, .. } = event {
+                            Some(image.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            for image in images {
+                let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                image::save_buffer(
+                    path,
+                    &bytes,
+                    image.size[0] as u32,
+                    image.size[1] as u32,
+                    image::ColorType::Rgba8,
+                )
+                .expect("save UI preview");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            ctx.request_repaint();
+        }
         if std::mem::take(&mut self.initial_hide) {
             self.visible = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -642,12 +850,13 @@ impl eframe::App for Peek {
         for event in test_events {
             match event {
                 Event::Done => {
-                    self.test_status = "连接成功 · 流式响应正常".into();
+                    self.test_status = i18n::tr("settings-test-ok");
                     self.test_rx = None;
                     self.test_cancel = None;
                 }
                 Event::Failed(e) => {
-                    self.test_status = format!("连接失败：{e}");
+                    self.test_status =
+                        i18n::format("settings-test-failed", &[("error", &i18n::diagnostic(&e))]);
                     self.test_rx = None;
                     self.test_cancel = None;
                 }
@@ -679,11 +888,10 @@ impl eframe::App for Peek {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     }
                     self.status = if self.paused {
-                        "快捷入口已暂停（托盘可恢复）"
+                        i18n::tr("status-paused")
                     } else {
-                        "快捷入口已恢复"
-                    }
-                    .into();
+                        i18n::tr("status-resumed")
+                    };
                 }
                 desktop::Action::Quit => {
                     self.quit = true;
@@ -788,7 +996,8 @@ impl eframe::App for Peek {
                     self.snip = Some(screen);
                 }
                 Err(e) => {
-                    self.status = format!("截图失败，请检查屏幕录制权限：{e}");
+                    self.status =
+                        i18n::format("status-capture-failed", &[("error", &i18n::diagnostic(&e))]);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
             }
@@ -807,12 +1016,14 @@ impl eframe::App for Peek {
                     if self.config.ocr_auto_query {
                         self.query(&ctx, false);
                     } else {
-                        self.status =
-                            "本地识字完成 · 可复制原文或手动查询，尚未发送内容到模型".into();
+                        self.status = i18n::tr("status-ocr-local-only");
                     }
                 }
-                Ok(_) => self.status = "未识别到文字，请重选区域".into(),
-                Err(e) => self.status = format!("OCR 失败：{e}"),
+                Ok(_) => self.status = i18n::tr("status-ocr-empty"),
+                Err(e) => {
+                    self.status =
+                        i18n::format("status-ocr-failed", &[("error", &i18n::diagnostic(&e))])
+                }
             }
         }
         if let Some(screen) = &self.snip {
@@ -868,7 +1079,7 @@ impl eframe::App for Peek {
                             ui.painter().text(
                                 egui::pos2(24.0, 24.0),
                                 egui::Align2::LEFT_TOP,
-                                "拖动框选 · Esc 取消",
+                                i18n::tr("snip-hint"),
                                 egui::FontId::proportional(18.0),
                                 egui::Color32::LIGHT_BLUE,
                             );
@@ -910,7 +1121,7 @@ impl eframe::App for Peek {
                     self.visible = true;
                     self.focus_grace_until =
                         std::time::Instant::now() + std::time::Duration::from_millis(350);
-                    self.status = "本地识字中…可取消".into();
+                    self.status = i18n::tr("status-ocr-running");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     let ctx = ctx.clone();
@@ -957,20 +1168,20 @@ impl eframe::App for Peek {
                 Event::Text(text) => {
                     if self.answer.len().saturating_add(text.len()) > peek_core::MAX_OUTPUT_BYTES {
                         self.stop();
-                        self.status = "回答超过 512 KiB，已停止；请缩小问题范围".into();
+                        self.status = i18n::tr("status-output-too-long");
                         break;
                     }
                     self.answer.push_str(&text);
                 }
                 Event::Done => {
                     self.busy = false;
-                    self.status = "完成".into();
+                    self.status = i18n::tr("status-done");
                     self.messages.push(Message {
                         role: "assistant".into(),
                         content: self.answer.clone(),
                     });
                     if peek_core::bound_history(&mut self.messages) {
-                        self.status = "完成 · 已释放较早追问，保留初始问题与最近对话".into();
+                        self.status = i18n::tr("status-done-trimmed");
                     }
                 }
                 Event::Failed(e) => {
@@ -1003,220 +1214,318 @@ impl eframe::App for Peek {
                     .saturating_duration_since(std::time::Instant::now()),
             );
         }
-        egui::CentralPanel::default().show(root, |ui| {
-            ui.horizontal(|ui| {
-                let title = ui.heading("Crant Peek");
-                if title.interact(egui::Sense::drag()).drag_started() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                }
-                ui.checkbox(&mut self.pinned, "固定");
-                if self.paused {
-                    ui.weak("快捷入口已暂停");
-                }
-                if ui.button("设置").clicked() {
-                    self.draft = self.config.clone();
-                    self.settings = true;
-                }
-                if ui.button("×").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            ui.separator();
-            if self.settings {
-                egui::ScrollArea::vertical().show(ui, |ui| self.settings_ui(ui));
-            } else {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.input)
-                        .desired_rows(3)
-                        .hint_text("输入或粘贴内容…"),
-                );
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(root.visuals().panel_fill)
+                    .inner_margin(20),
+            )
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("task")
-                        .selected_text(self.task.label())
-                        .show_ui(ui, |ui| {
-                            for task in Task::ALL {
-                                if ui
-                                    .selectable_value(&mut self.task, task, task.label())
-                                    .changed()
-                                {
-                                    self.manual_task = true;
-                                }
-                            }
-                        });
-                    if self.manual_task && ui.button("恢复智能").clicked() {
-                        self.manual_task = false;
+                    let title = ui.heading(self.locale.text("app-name"));
+                    if title.interact(egui::Sense::drag()).drag_started() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
-                    if ui.button("查询").clicked()
-                        || ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
-                    {
-                        self.query(&ctx, false);
-                    }
-                    if self.busy && ui.button("停止").clicked() {
-                        self.stop();
-                        self.status = "已停止".into();
-                    }
-                    if ui.button("复制").clicked() {
-                        let text = if self.answer.is_empty() {
-                            self.dict_entry
-                                .as_ref()
-                                .map(|e| e.translation.clone())
-                                .unwrap_or_default()
-                        } else {
-                            self.answer.clone()
-                        };
-                        ctx.copy_text(text);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.input.is_empty(), egui::Button::new("复制原文"))
-                        .clicked()
-                    {
-                        ctx.copy_text(self.input.clone());
-                        self.status = "已复制原文".into();
-                    }
-                    if ui.button("清空会话").clicked() {
-                        self.stop();
-                        self.input.clear();
-                        self.answer.clear();
-                        self.followup.clear();
-                        self.messages.clear();
-                        self.dict_entry = None;
-                        self.screenshot_image = None;
-                        self.send_image = false;
-                        self.decide_image = false;
-                        self.manual_task = false;
-                        self.route_note.clear();
-                        self.status = "已清空当前会话".into();
-                    }
-                });
-                if self.screenshot_image.is_some() {
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add_enabled(
-                                self.config.provider.vision && !self.busy,
-                                egui::Button::new("图片解读（上传选区）"),
-                            )
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if design::icon(ui, egui_phosphor::regular::X, i18n::tr("header-close"))
                             .clicked()
                         {
-                            if self.input.trim().is_empty() {
-                                self.input = "请解释截图中的内容。".into();
-                            }
-                            self.task = Task::Explain;
-                            self.manual_task = true;
-                            self.send_image = true;
-                            self.query(&ctx, false);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if ui
-                            .add_enabled(
-                                self.config.decision.enabled
-                                    && matches!(
-                                        self.config.decision.model.as_str(),
-                                        "clef" | "clef-flash"
-                                    )
-                                    && !self.busy,
-                                egui::Button::new("Clef 判断截图（上传选区）"),
-                            )
-                            .clicked()
-                        {
-                            if self.input.trim().is_empty() {
-                                self.input = "请判断截图需要什么阅读辅助。".into();
-                            }
-                            self.manual_task = false;
-                            self.decide_image = true;
-                            self.query(&ctx, false);
-                        }
-                        if ui.button("丢弃图片").clicked() {
-                            self.screenshot_image = None;
-                        }
-                    });
-                    ui.weak(format!(
-                        "Clef 按钮仅发送到决策服务：{}",
-                        self.config.decision.endpoint
-                    ));
-                    ui.weak(format!(
-                        "图片解读按钮发送到 {}；后续追问默认只发文字",
-                        self.config.provider.base_url
-                    ));
-                }
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_label("当前目标语言")
-                        .selected_text(if self.target_override.is_empty() {
-                            "自动"
-                        } else {
-                            &self.target_override
-                        })
-                        .show_ui(ui, |ui| {
-                            for (value, label) in [
-                                ("", "自动"),
-                                ("Chinese", "中文"),
-                                ("English", "英文"),
-                                ("Japanese", "日文"),
-                            ] {
-                                ui.selectable_value(&mut self.target_override, value.into(), label);
-                            }
-                        });
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.target_override)
-                            .desired_width(100.0)
-                            .hint_text("自定义语言"),
-                    );
-                });
-                ui.weak(&self.route_note);
-                egui::ScrollArea::vertical()
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        if let Some(entry) = &self.dict_entry {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.heading(&entry.word);
-                                if !entry.phonetic.is_empty() {
-                                    ui.label(format!("/{}/", entry.phonetic));
-                                }
-                                ui.weak("离线词典");
-                            });
-                            ui.add(egui::Label::new(&entry.translation).selectable(true).wrap());
-                            let forms = entry.forms();
-                            if !forms.is_empty() {
-                                let line: Vec<String> =
-                                    forms.iter().map(|(k, v)| format!("{k} {v}")).collect();
-                                ui.weak(line.join("  ·  "));
-                            }
-                            if let Some(lemma) = entry.lemma() {
-                                ui.weak(format!("原形：{lemma}"));
-                            }
-                            ui.separator();
-                        }
-                        ui.add(egui::Label::new(&self.answer).selectable(true).wrap());
-                    });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let input = ui
-                        .add(egui::TextEdit::singleline(&mut self.followup).hint_text("继续追问…"));
-                    let enter = input.lost_focus()
-                        && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.command);
-                    if (ui
-                        .add_enabled(
-                            !self.messages.is_empty() && !self.busy,
-                            egui::Button::new("发送"),
+                        if design::icon(
+                            ui,
+                            if self.settings {
+                                egui_phosphor::regular::ARROW_LEFT
+                            } else {
+                                egui_phosphor::regular::GEAR
+                            },
+                            i18n::tr(if self.settings {
+                                "header-back"
+                            } else {
+                                "header-settings"
+                            }),
                         )
                         .clicked()
-                        || enter)
-                        && !self.messages.is_empty()
-                        && !self.busy
-                    {
-                        self.query(&ctx, true);
+                        {
+                            if self.settings {
+                                self.settings = false;
+                            } else {
+                                self.draft = self.config.clone();
+                                self.settings = true;
+                            }
+                        }
+                        if design::icon(
+                            ui,
+                            egui_phosphor::regular::PUSH_PIN,
+                            i18n::tr(if self.pinned {
+                                "header-unpin"
+                            } else {
+                                "header-pin"
+                            }),
+                        )
+                        .clicked()
+                        {
+                            self.pinned = !self.pinned;
+                        }
+                    });
+                });
+                ui.separator();
+                if self.settings {
+                    let content_height = (ui.available_height() - 92.0).max(80.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(content_height)
+                        .show(ui, |ui| {
+                            design::card(ui).show(ui, |ui| {
+                                ui.set_min_width((ui.available_width() - 2.0).max(100.0));
+                                ui.spacing_mut().item_spacing.y = 7.0;
+                                self.settings_ui(ui);
+                            });
+                        });
+                    ui.separator();
+                    self.settings_footer(ui);
+                } else {
+                    design::card(ui).show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.input)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(3)
+                                .frame(egui::Frame::NONE)
+                                .hint_text(i18n::tr("query-placeholder")),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        egui::ComboBox::from_id_salt("task")
+                            .selected_text(self.locale.task(self.task))
+                            .show_ui(ui, |ui| {
+                                for task in Task::ALL {
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.task,
+                                            task,
+                                            self.locale.task(task),
+                                        )
+                                        .changed()
+                                    {
+                                        self.manual_task = true;
+                                    }
+                                }
+                            });
+                        if self.manual_task && ui.button(i18n::tr("query-restore-smart")).clicked()
+                        {
+                            self.manual_task = false;
+                        }
+                        if design::primary(ui, i18n::tr("query-run")).clicked()
+                            || ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
+                        {
+                            self.query(&ctx, false);
+                        }
+                        if self.busy && ui.button(i18n::tr("query-stop")).clicked() {
+                            self.stop();
+                            self.status = i18n::tr("status-stopped");
+                        }
+                        if design::icon(ui, egui_phosphor::regular::COPY, i18n::tr("query-copy"))
+                            .clicked()
+                        {
+                            let text = if self.answer.is_empty() {
+                                self.dict_entry
+                                    .as_ref()
+                                    .map(|e| e.translation.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                self.answer.clone()
+                            };
+                            ctx.copy_text(text);
+                        }
+                        if design::icon(
+                            ui,
+                            egui_phosphor::regular::TEXT_T,
+                            i18n::tr("query-copy-source"),
+                        )
+                        .clicked()
+                            && !self.input.is_empty()
+                        {
+                            ctx.copy_text(self.input.clone());
+                            self.status = i18n::tr("status-copied-source");
+                        }
+                        if design::icon(ui, egui_phosphor::regular::TRASH, i18n::tr("query-clear"))
+                            .clicked()
+                        {
+                            self.stop();
+                            self.input.clear();
+                            self.answer.clear();
+                            self.followup.clear();
+                            self.messages.clear();
+                            self.dict_entry = None;
+                            self.screenshot_image = None;
+                            self.send_image = false;
+                            self.decide_image = false;
+                            self.manual_task = false;
+                            self.route_note.clear();
+                            self.status = i18n::tr("status-cleared");
+                        }
+                    });
+                    if self.screenshot_image.is_some() {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add_enabled(
+                                    self.config.provider.vision && !self.busy,
+                                    egui::Button::new(i18n::tr("snip-explain")),
+                                )
+                                .clicked()
+                            {
+                                if self.input.trim().is_empty() {
+                                    self.input = i18n::tr("snip-explain-default");
+                                }
+                                self.task = Task::Explain;
+                                self.manual_task = true;
+                                self.send_image = true;
+                                self.query(&ctx, false);
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.config.decision.enabled
+                                        && matches!(
+                                            self.config.decision.model.as_str(),
+                                            "clef" | "clef-flash"
+                                        )
+                                        && !self.busy,
+                                    egui::Button::new(i18n::tr("snip-decide")),
+                                )
+                                .clicked()
+                            {
+                                if self.input.trim().is_empty() {
+                                    self.input = i18n::tr("snip-decide-default");
+                                }
+                                self.manual_task = false;
+                                self.decide_image = true;
+                                self.query(&ctx, false);
+                            }
+                            if ui.button(i18n::tr("snip-discard")).clicked() {
+                                self.screenshot_image = None;
+                            }
+                        });
+                        ui.weak(i18n::format(
+                            "snip-decide-target",
+                            &[("endpoint", &self.config.decision.endpoint)],
+                        ));
+                        ui.weak(i18n::format(
+                            "snip-explain-target",
+                            &[("endpoint", &self.config.provider.base_url)],
+                        ));
+                    }
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("query-target")
+                            .selected_text(if self.target_override.is_empty() {
+                                i18n::tr("query-target-auto")
+                            } else {
+                                self.target_override.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                for (value, label) in [
+                                    ("", i18n::tr("query-target-auto")),
+                                    ("Chinese", i18n::tr("language-zh")),
+                                    ("English", i18n::tr("language-en")),
+                                    ("Japanese", i18n::tr("language-ja")),
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.target_override,
+                                        value.into(),
+                                        label,
+                                    );
+                                }
+                            });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.target_override)
+                                .desired_width(100.0)
+                                .hint_text(i18n::tr("query-target-custom")),
+                        );
+                    });
+                    ui.weak(&self.route_note);
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            if let Some(entry) = &self.dict_entry {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.heading(&entry.word);
+                                    if !entry.phonetic.is_empty() {
+                                        ui.label(format!("/{}/", entry.phonetic));
+                                    }
+                                    ui.weak(i18n::tr("dict-badge"));
+                                });
+                                ui.add(
+                                    egui::Label::new(&entry.translation).selectable(true).wrap(),
+                                );
+                                let forms = entry.forms();
+                                if !forms.is_empty() {
+                                    let line: Vec<String> = forms
+                                        .iter()
+                                        .map(|(k, v)| format!("{} {v}", i18n::tr(k)))
+                                        .collect();
+                                    ui.weak(line.join("  ·  "));
+                                }
+                                if let Some(lemma) = entry.lemma() {
+                                    ui.weak(i18n::format("dict-lemma", &[("lemma", lemma)]));
+                                }
+                                ui.separator();
+                            }
+                            if !self.answer.is_empty() {
+                                design::card(ui).show(ui, |ui| {
+                                    ui.weak(i18n::tr("query-section-answer"));
+                                    ui.add(egui::Label::new(&self.answer).selectable(true).wrap());
+                                });
+                            } else if self.dict_entry.is_none() && !self.busy {
+                                ui.add_space(24.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.heading(i18n::tr("query-empty-title"));
+                                    ui.label(i18n::format(
+                                        "query-empty-hint",
+                                        &[(
+                                            "submit",
+                                            if cfg!(target_os = "macos") {
+                                                "⌘ Enter"
+                                            } else {
+                                                "Ctrl Enter"
+                                            },
+                                        )],
+                                    ));
+                                });
+                                ui.add_space(24.0);
+                            }
+                        });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - 84.0).max(80.0);
+                        let input = ui.add_sized(
+                            [width, 36.0],
+                            egui::TextEdit::singleline(&mut self.followup)
+                                .hint_text(i18n::tr("query-followup-placeholder")),
+                        );
+                        let enter = input.lost_focus()
+                            && ctx
+                                .input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.command);
+                        if (ui
+                            .add_enabled(
+                                !self.messages.is_empty() && !self.busy,
+                                egui::Button::new(i18n::tr("query-send")),
+                            )
+                            .clicked()
+                            || enter)
+                            && !self.messages.is_empty()
+                            && !self.busy
+                        {
+                            self.query(&ctx, true);
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.label(&self.status);
+                    if self.ocr_rx.is_some() && ui.button(i18n::tr("snip-cancel-ocr")).clicked() {
+                        self.stop();
+                        self.screenshot_image = None;
+                        self.status = i18n::tr("status-ocr-cancelled");
                     }
                 });
-            }
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                if self.ocr_rx.is_some() && ui.button("取消识字").clicked() {
-                    self.stop();
-                    self.screenshot_image = None;
-                    self.status = "已取消识字".into();
-                }
             });
-        });
     }
 }
 fn main() -> eframe::Result {
@@ -1226,12 +1535,12 @@ fn main() -> eframe::Result {
         Ok(Some(lock)) => Some(lock),
         Ok(None) => return Ok(()),
         Err(e) => {
-            eprintln!("Cannot acquire application instance lock: {e}");
+            eprintln!("{}", i18n::format("error-instance", &[("detail", &e)]));
             return Ok(());
         }
     };
     eframe::run_native(
-        "Crant Peek",
+        &i18n::tr("app-name"),
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([480.0, 560.0])

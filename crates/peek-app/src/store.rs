@@ -4,7 +4,7 @@ use std::path::PathBuf;
 pub fn config_path() -> Result<PathBuf, String> {
     directories::ProjectDirs::from("dev", "Crant", "CrantPeek")
         .map(|d| d.config_dir().join("config.json"))
-        .ok_or_else(|| "Cannot locate configuration directory".into())
+        .ok_or_else(|| crate::i18n::tr("error-config-directory"))
 }
 /// Where the offline dictionary may live: next to the config, then the dev build output.
 pub fn dictionary_candidates() -> Vec<PathBuf> {
@@ -30,15 +30,17 @@ pub fn load() -> Result<Config, String> {
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let config: Config = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    config.validate().map_err(str::to_owned)?;
+    config.validate().map_err(crate::i18n::tr)?;
     Ok(config)
 }
 pub fn save(config: &Config) -> Result<(), String> {
     save_to(config, &config_path()?)
 }
 fn save_to(config: &Config, path: &std::path::Path) -> Result<(), String> {
-    config.validate().map_err(str::to_owned)?;
-    let parent = path.parent().ok_or("Invalid config path")?;
+    config.validate().map_err(crate::i18n::tr)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| crate::i18n::tr("error-config-directory"))?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     // Unique file in the same directory: atomic cross-platform replace, auto-cleaned on failure.
     let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
@@ -51,15 +53,15 @@ fn save_to(config: &Config, path: &std::path::Path) -> Result<(), String> {
 }
 pub fn secret(id: &str) -> Result<String, String> {
     keyring::Entry::new("CrantPeek", id)
-        .map_err(|_| "Cannot open system credential store")?
+        .map_err(|_| crate::i18n::tr("error-keychain-open"))?
         .get_password()
-        .map_err(|_| "API key not configured; open settings".into())
+        .map_err(|_| crate::i18n::tr("error-key-missing"))
 }
 pub fn save_secret(id: &str, value: &str) -> Result<(), String> {
     keyring::Entry::new("CrantPeek", id)
-        .map_err(|_| "Cannot open system credential store")?
+        .map_err(|_| crate::i18n::tr("error-keychain-open"))?
         .set_password(value)
-        .map_err(|_| "Cannot save credential in system store".into())
+        .map_err(|_| crate::i18n::tr("error-keychain-save"))
 }
 #[cfg(test)]
 mod tests {

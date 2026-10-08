@@ -117,13 +117,13 @@ async fn errors_and_redirects_do_not_look_like_success() {
             "200 OK",
             "Content-Type: text/event-stream\r\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
-            "without completion",
+            "error-stream-ended",
         ),
         (
             "200 OK",
             "Content-Type: text/html\r\n",
             "<html>login</html>",
-            "Expected text/event-stream",
+            "error-sse-type",
         ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

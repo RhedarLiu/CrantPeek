@@ -20,26 +20,36 @@ pub struct Desktop {
     _manager: GlobalHotKeyManager,
     _tray: TrayIcon,
     pub events: Receiver<Action>,
+    items: [MenuItem; 5],
 }
 impl Desktop {
+    pub fn refresh_language(&self) {
+        for (item, key) in self.items.iter().zip([
+            "tray-open",
+            "tray-screenshot",
+            "tray-settings",
+            "tray-pause",
+            "tray-quit",
+        ]) {
+            item.set_text(crate::i18n::tr(key));
+        }
+    }
     pub fn new(config: &Config, ctx: egui::Context) -> Result<Self, String> {
         let manager = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
-        let blank: HotKey = config
-            .blank_hotkey
-            .parse()
-            .map_err(|e| format!("Invalid blank shortcut: {e}"))?;
-        let screenshot: HotKey = config
-            .screenshot_hotkey
-            .parse()
-            .map_err(|e| format!("Invalid screenshot shortcut: {e}"))?;
+        let blank: HotKey = config.blank_hotkey.parse::<HotKey>().map_err(|e| {
+            crate::i18n::format("error-hotkey-blank", &[("detail", &e.to_string())])
+        })?;
+        let screenshot: HotKey = config.screenshot_hotkey.parse::<HotKey>().map_err(|e| {
+            crate::i18n::format("error-hotkey-screenshot", &[("detail", &e.to_string())])
+        })?;
         manager.register(blank).map_err(|e| e.to_string())?;
         manager.register(screenshot).map_err(|e| e.to_string())?;
         let menu = Menu::new();
-        let open = MenuItem::new("打开空白 Peek", true, None);
-        let snip = MenuItem::new("截图", true, None);
-        let settings = MenuItem::new("设置", true, None);
-        let pause = MenuItem::new("暂停 / 恢复快捷入口", true, None);
-        let quit = MenuItem::new("退出", true, None);
+        let open = MenuItem::new(crate::i18n::tr("tray-open"), true, None);
+        let snip = MenuItem::new(crate::i18n::tr("tray-screenshot"), true, None);
+        let settings = MenuItem::new(crate::i18n::tr("tray-settings"), true, None);
+        let pause = MenuItem::new(crate::i18n::tr("tray-pause"), true, None);
+        let quit = MenuItem::new(crate::i18n::tr("tray-quit"), true, None);
         menu.append_items(&[&open, &snip, &settings, &pause, &quit])
             .map_err(|e| e.to_string())?;
         let mut pixels = vec![0_u8; 16 * 16 * 4];
@@ -51,7 +61,7 @@ impl Desktop {
         }
         let icon = Icon::from_rgba(pixels, 16, 16).map_err(|e| e.to_string())?;
         let tray = TrayIconBuilder::new()
-            .with_tooltip("Crant Peek")
+            .with_tooltip(crate::i18n::tr("tray-tooltip"))
             .with_icon(icon)
             .with_menu(Box::new(menu))
             .build()
@@ -76,6 +86,13 @@ impl Desktop {
                 hot_ctx.request_repaint();
             }
         }));
+        let items = [
+            open.clone(),
+            snip.clone(),
+            settings.clone(),
+            pause.clone(),
+            quit.clone(),
+        ];
         let open = open.id().clone();
         let snip = snip.id().clone();
         let settings = settings.id().clone();
@@ -104,6 +121,7 @@ impl Desktop {
             _manager: manager,
             _tray: tray,
             events: rx,
+            items,
         })
     }
 }

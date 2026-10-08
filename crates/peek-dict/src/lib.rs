@@ -36,20 +36,20 @@ impl Entry {
             .find_map(|item| item.strip_prefix("0:"))
             .filter(|l| !l.is_empty())
     }
-    /// Human-readable word forms, e.g. [("过去式","gave"), …]; the lemma item is excluded.
+    /// Human-readable word forms, e.g. [("form-past","gave"), …]; the lemma item is excluded.
     pub fn forms(&self) -> Vec<(&'static str, &str)> {
         self.exchange
             .split('/')
             .filter_map(|item| {
                 let (kind, value) = item.split_once(':')?;
                 let label = match kind {
-                    "p" => "过去式",
-                    "d" => "过去分词",
-                    "i" => "现在分词",
-                    "3" => "第三人称单数",
-                    "r" => "比较级",
-                    "t" => "最高级",
-                    "s" => "复数",
+                    "p" => "form-past",
+                    "d" => "form-past-participle",
+                    "i" => "form-present-participle",
+                    "3" => "form-third-person",
+                    "r" => "form-comparative",
+                    "t" => "form-superlative",
+                    "s" => "form-plural",
                     _ => return None,
                 };
                 (!value.is_empty()).then_some((label, value))

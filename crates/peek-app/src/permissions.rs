@@ -9,9 +9,12 @@ pub fn status() -> Vec<(&'static str, bool)> {
     }
     unsafe {
         vec![
-            ("辅助功能（读取选区）", AXIsProcessTrusted()),
-            ("输入监控（双击 Ctrl）", CGPreflightListenEventAccess()),
-            ("屏幕录制（截图）", CGPreflightScreenCaptureAccess()),
+            ("settings-permission-accessibility", AXIsProcessTrusted()),
+            ("settings-permission-input", CGPreflightListenEventAccess()),
+            (
+                "settings-permission-screen",
+                CGPreflightScreenCaptureAccess(),
+            ),
         ]
     }
 }
@@ -23,7 +26,7 @@ pub fn open_settings() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .success()
         .then_some(())
-        .ok_or_else(|| "无法打开系统设置".into())
+        .ok_or_else(|| crate::i18n::tr("settings-open-privacy-failed"))
 }
 #[cfg(windows)]
 pub fn status() -> Vec<(&'static str, bool)> {

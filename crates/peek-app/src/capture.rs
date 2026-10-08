@@ -73,7 +73,7 @@ pub fn capture() -> Result<Screen, String> {
                 .into_iter()
                 .find(|m| m.is_primary().unwrap_or(false))
         })
-        .ok_or("No display available")?;
+        .ok_or("error-no-display")?;
     Ok(Screen {
         pixels: monitor.capture_image().map_err(|e| e.to_string())?,
         origin: [

@@ -67,7 +67,7 @@ pub fn recognize(image: &image::RgbaImage) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     let engine = OcrEngine::TryCreateFromUserProfileLanguages()
-        .map_err(|e| format!("Install an OCR language pack: {e}"))?;
+        .map_err(|_| "error-ocr-language-pack".to_owned())?;
     let result = engine
         .RecognizeAsync(&bitmap)
         .map_err(|e| e.to_string())?
