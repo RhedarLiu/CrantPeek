@@ -25,6 +25,53 @@ pub enum Event {
     Failed(String),
 }
 
+/// Image data is explicit and transient, never part of persisted messages.
+#[derive(Debug, Clone)]
+pub struct ImageInput {
+    pub png_base64: String,
+}
+
+pub fn multimodal_body(
+    provider: &Provider,
+    messages: &[Message],
+    image: &ImageInput,
+) -> Result<Value, Error> {
+    if !provider.vision {
+        return Err(Error::Invalid("Provider image input is not enabled".into()));
+    }
+    if image.png_base64.len() > 16 * 1024 * 1024 {
+        return Err(Error::Invalid("Image exceeds upload limit".into()));
+    }
+    let mut body = request_body(provider, messages);
+    let field = if provider.protocol == Protocol::Responses {
+        "input"
+    } else {
+        "messages"
+    };
+    let items = body[field]
+        .as_array_mut()
+        .ok_or_else(|| Error::Invalid("Missing messages".into()))?;
+    let last = items
+        .iter_mut()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .ok_or_else(|| Error::Invalid("Image requires a user message".into()))?;
+    let text = last["content"].as_str().unwrap_or("").to_owned();
+    let url = format!("data:image/png;base64,{}", image.png_base64);
+    last["content"] = match provider.protocol {
+        Protocol::ChatCompletions => {
+            json!([{ "type":"text", "text":text }, { "type":"image_url", "image_url": { "url":url } }])
+        }
+        Protocol::Responses => {
+            json!([{ "type":"input_text", "text":text }, { "type":"input_image", "image_url":url }])
+        }
+        Protocol::Anthropic => {
+            json!([{ "type":"text", "text":text }, { "type":"image", "source":{ "type":"base64", "media_type":"image/png", "data":image.png_base64 } }])
+        }
+    };
+    Ok(body)
+}
+
 pub fn request_body(provider: &Provider, messages: &[Message]) -> Value {
     match provider.protocol {
         Protocol::ChatCompletions => {
@@ -140,13 +187,44 @@ impl Client {
         tx: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(), Error> {
+        self.stream_body(provider, key, request_body(provider, messages), tx, cancel)
+            .await
+    }
+
+    pub async fn stream_image(
+        &self,
+        provider: &Provider,
+        key: &str,
+        messages: &[Message],
+        image: &ImageInput,
+        tx: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(), Error> {
+        self.stream_body(
+            provider,
+            key,
+            multimodal_body(provider, messages, image)?,
+            tx,
+            cancel,
+        )
+        .await
+    }
+
+    async fn stream_body(
+        &self,
+        provider: &Provider,
+        key: &str,
+        body: Value,
+        tx: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(), Error> {
         let suffix = match provider.protocol {
             Protocol::ChatCompletions => "chat/completions",
             Protocol::Responses => "responses",
             Protocol::Anthropic => "messages",
         };
         let url = format!("{}/{suffix}", provider.base_url.trim_end_matches('/'));
-        let mut request = self.http.post(url).json(&request_body(provider, messages));
+        let mut request = self.http.post(url).json(&body);
         if provider.protocol == Protocol::Anthropic {
             request = request
                 .header("x-api-key", key)
@@ -234,6 +312,30 @@ impl Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn image_format_is_protocol_specific_and_explicit() {
+        let messages = vec![Message {
+            role: "user".into(),
+            content: "describe".into(),
+        }];
+        let image = ImageInput {
+            png_base64: "test-data".into(),
+        };
+        let mut provider = Provider::default();
+        assert!(multimodal_body(&provider, &messages, &image).is_err());
+        provider.vision = true;
+        for (protocol, field, kind) in [
+            (Protocol::ChatCompletions, "messages", "image_url"),
+            (Protocol::Responses, "input", "input_image"),
+            (Protocol::Anthropic, "messages", "image"),
+        ] {
+            provider.protocol = protocol;
+            let body = multimodal_body(&provider, &messages, &image).unwrap();
+            assert_eq!(body[field][0]["content"][1]["type"], kind);
+            assert_eq!(body[field][0]["content"][0]["text"], "describe");
+            assert_eq!(messages[0].content, "describe");
+        }
+    }
     #[test]
     fn sse_survives_every_chunk_boundary() {
         let input = "event: delta\r\ndata: {\"delta\":\"你好\"}\r\n\r\ndata: [DONE]\n\n";
