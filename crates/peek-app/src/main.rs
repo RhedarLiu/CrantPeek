@@ -38,6 +38,9 @@ struct Peek {
     route_note: String,
     runtime: tokio::runtime::Runtime,
     client: Client,
+    test_rx: Option<mpsc::Receiver<Event>>,
+    test_cancel: Option<CancellationToken>,
+    test_status: String,
     receiver: Option<mpsc::Receiver<Event>>,
     cancel: Option<CancellationToken>,
     busy: bool,
@@ -125,6 +128,9 @@ impl Peek {
                 .build()
                 .expect("async runtime"),
             client: Client::default(),
+            test_rx: None,
+            test_cancel: None,
+            test_status: String::new(),
             receiver: None,
             cancel: None,
             busy: false,
@@ -354,6 +360,66 @@ impl Peek {
             }
         });
     }
+    fn test_connection(&mut self, ctx: &egui::Context) {
+        if self.draft.provider.model.trim().is_empty() {
+            self.test_status = "请填写模型".into();
+            return;
+        }
+        if let Err(e) = self.draft.validate() {
+            self.test_status = e.into();
+            return;
+        }
+        let key = if self.secret_draft.is_empty() {
+            match store::secret(&self.draft.provider.credential_id) {
+                Ok(key) => key,
+                Err(e) => {
+                    self.test_status = e;
+                    return;
+                }
+            }
+        } else {
+            self.secret_draft.clone()
+        };
+        if let Some(cancel) = self.test_cancel.take() {
+            cancel.cancel();
+        }
+        let cancel = CancellationToken::new();
+        self.test_cancel = Some(cancel.clone());
+        let (tx, rx) = mpsc::channel(16);
+        self.test_rx = Some(rx);
+        self.test_status = "测试中（会产生少量 API 用量）…".into();
+        let client = self.client.clone();
+        let provider = self.draft.provider.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            let (stream_tx, mut stream_rx) = mpsc::channel(16);
+            let worker = tokio::spawn(async move {
+                let messages = [Message {
+                    role: "user".into(),
+                    content: "Reply only OK.".into(),
+                }];
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    client.stream(&provider, &key, &messages, stream_tx, cancel),
+                )
+                .await
+            });
+            while let Some(event) = stream_rx.recv().await {
+                let _ = tx.send(event).await;
+                ctx.request_repaint();
+            }
+            let failure = match worker.await {
+                Ok(Ok(Ok(()))) => None,
+                Ok(Ok(Err(e))) => Some(e.to_string()),
+                Ok(Err(_)) => Some("连接测试超时".into()),
+                Err(_) => Some("连接测试任务失败".into()),
+            };
+            if let Some(e) = failure {
+                let _ = tx.send(Event::Failed(e)).await;
+                ctx.request_repaint();
+            }
+        });
+    }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("设置");
         ui.collapsing("外观", |ui| {
@@ -419,6 +485,19 @@ impl Peek {
         );
         ui.label("API key（留空保留已有凭据）");
         ui.add(egui::TextEdit::singleline(&mut self.secret_draft).password(true));
+        ui.horizontal(|ui| {
+            if ui.button("测试回答连接（少量 API 用量）").clicked() {
+                self.test_connection(ui.ctx());
+            }
+            if self.test_rx.is_some() && ui.button("取消测试").clicked() {
+                if let Some(cancel) = self.test_cancel.take() {
+                    cancel.cancel();
+                }
+                self.test_rx = None;
+                self.test_status = "已取消连接测试".into();
+            }
+        });
+        ui.label(&self.test_status);
         ui.label("默认目标语言");
         ui.text_edit_singleline(&mut self.draft.target_language);
         ui.label("中文翻译目标");
@@ -505,6 +584,9 @@ impl Peek {
 }
 impl Drop for Peek {
     fn drop(&mut self) {
+        if let Some(cancel) = self.test_cancel.take() {
+            cancel.cancel();
+        }
         self.stop();
     }
 }
@@ -514,6 +596,32 @@ impl eframe::App for Peek {
         if std::mem::take(&mut self.initial_hide) {
             self.visible = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        let test_events: Vec<_> = self
+            .test_rx
+            .as_mut()
+            .map(|rx| {
+                let mut events = Vec::new();
+                while let Ok(e) = rx.try_recv() {
+                    events.push(e);
+                }
+                events
+            })
+            .unwrap_or_default();
+        for event in test_events {
+            match event {
+                Event::Done => {
+                    self.test_status = "连接成功 · 流式响应正常".into();
+                    self.test_rx = None;
+                    self.test_cancel = None;
+                }
+                Event::Failed(e) => {
+                    self.test_status = format!("连接失败：{e}");
+                    self.test_rx = None;
+                    self.test_cancel = None;
+                }
+                _ => {}
+            }
         }
         let actions: Vec<_> = self
             .desktop
