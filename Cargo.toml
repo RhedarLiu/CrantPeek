@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/peek-core", "crates/peek-network", "crates/peek-dict", "crates/peek-app"]
+members = ["crates/peek-core", "crates/peek-network", "crates/peek-dict", "crates/peek-runtime", "crates/peek-app", "crates/peek-gpui"]
 # UI framework spikes are throwaway, standalone workspaces. Excluded so a
 # `cargo init`/`cargo new` inside spikes/ can never be adopted as a member
 # (that previously produced "multiple workspace roots" and broke the build).
@@ -20,3 +20,16 @@ thiserror = "2"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# GPUI debug builds render very slowly; gpui-kit's install docs recommend
+# optimising the hot dependencies even in the dev profile.
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }

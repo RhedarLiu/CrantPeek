@@ -2,15 +2,15 @@
 mod capture;
 mod design;
 mod desktop;
-mod i18n;
-mod instance;
 mod ocr;
-mod permissions;
 mod selection;
-mod store;
+
+// Shared, GUI-toolkit-agnostic runtime. Re-exported at the crate root so the
+// existing `crate::i18n::…` / `store::…` call sites keep working unchanged.
 use eframe::egui;
 use peek_core::{Config, Message, Protocol, Task, local_route};
 use peek_network::{Client, Event};
+pub(crate) use peek_runtime::{i18n, instance, permissions, store};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

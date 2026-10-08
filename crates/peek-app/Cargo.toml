@@ -8,17 +8,11 @@ license.workspace = true
 peek-core = { path = "../peek-core" }
 peek-network = { path = "../peek-network" }
 peek-dict = { path = "../peek-dict" }
+peek-runtime = { path = "../peek-runtime" }
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
 serde_json.workspace = true
-fluent-bundle = "0.16"
-unic-langid = "0.9"
-sys-locale = "0.3"
 egui-phosphor = "0.14"
-directories = "6"
-tempfile = "3"
-fs2 = "0.4"
 base64 = "0.22"
-keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tokio-util = "0.7"
 global-hotkey = "0.8"

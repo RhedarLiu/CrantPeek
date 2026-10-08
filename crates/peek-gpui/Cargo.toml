@@ -1,0 +1,23 @@
+[package]
+name = "peek-gpui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+peek-core = { path = "../peek-core" }
+gpui-kit = { version = "0.7.1", features = ["test-support"] }
+anyhow = "1"
+raw-window-handle = "0.6"
+global-hotkey = "0.8"
+tray-icon = "0.26.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

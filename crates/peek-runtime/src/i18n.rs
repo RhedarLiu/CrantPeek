@@ -145,8 +145,10 @@ mod tests {
     fn all_app_resource_references_exist() {
         let available = keys(EN);
         let sources = [
-            include_str!("main.rs"),
-            include_str!("desktop.rs"),
+            // This module lives in `peek-runtime`; the view layer it audits is
+            // still `peek-app` until the GPUI shell reaches parity.
+            include_str!("../../peek-app/src/main.rs"),
+            include_str!("../../peek-app/src/desktop.rs"),
             include_str!("permissions.rs"),
             include_str!("store.rs"),
             include_str!("../../peek-core/src/lib.rs"),
