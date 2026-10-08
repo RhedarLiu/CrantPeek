@@ -143,19 +143,20 @@ impl Peek {
         }
         self.receiver = None;
         self.busy = false;
+        peek_core::discard_pending_turn(&mut self.messages);
     }
     fn query(&mut self, ctx: &egui::Context, followup: bool) {
-        self.stop();
         let text = if followup {
             self.followup.trim()
         } else {
             self.input.trim()
         }
         .to_owned();
-        let text = text.as_str();
         if text.is_empty() {
             return;
         }
+        self.stop();
+        let text = text.as_str();
         if !followup {
             // Offline dictionary first: instant, and independent of any API key or network.
             self.answer.clear();
@@ -377,6 +378,7 @@ impl eframe::App for Peek {
                     self.input.clear();
                     self.answer.clear();
                     self.dict_entry = None;
+                    self.route_note.clear();
                     self.followup.clear();
                     self.messages.clear();
                     self.settings = false;
@@ -390,6 +392,7 @@ impl eframe::App for Peek {
                     self.input = text;
                     self.answer.clear();
                     self.dict_entry = None;
+                    self.route_note.clear();
                     self.followup.clear();
                     self.messages.clear();
                     self.settings = false;
@@ -576,6 +579,7 @@ impl eframe::App for Peek {
                     });
                 }
                 Event::Failed(e) => {
+                    peek_core::discard_pending_turn(&mut self.messages);
                     self.busy = false;
                     self.status = e;
                 }

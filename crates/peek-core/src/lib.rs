@@ -282,8 +282,29 @@ pub struct Message {
     pub content: String,
 }
 
+/// An unfinished generation must not leave an orphan user turn in future follow-ups.
+pub fn discard_pending_turn(messages: &mut Vec<Message>) {
+    if messages.last().is_some_and(|m| m.role == "user") {
+        messages.pop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unfinished_turn_is_removed_but_completed_history_stays() {
+        use super::*;
+        let m = |role: &str| Message {
+            role: role.into(),
+            content: "test".into(),
+        };
+        let mut messages = vec![m("system"), m("user"), m("assistant"), m("user")];
+        discard_pending_turn(&mut messages);
+        assert_eq!(messages.len(), 3);
+        discard_pending_turn(&mut messages);
+        assert_eq!(messages.len(), 3);
+    }
+
     use super::*;
     #[test]
     fn selection_is_silent_when_empty() {
