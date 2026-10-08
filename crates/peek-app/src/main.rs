@@ -164,6 +164,10 @@ impl Peek {
         if text.is_empty() {
             return;
         }
+        if text.len() > peek_core::MAX_INPUT_BYTES {
+            self.status = "输入超过 64 KiB，请缩短选区或分段查询".into();
+            return;
+        }
         self.stop();
         let text = text.as_str();
         if !followup {
@@ -691,7 +695,14 @@ impl eframe::App for Peek {
                         system.content = task.instruction(&target);
                     }
                 }
-                Event::Text(text) => self.answer.push_str(&text),
+                Event::Text(text) => {
+                    if self.answer.len().saturating_add(text.len()) > peek_core::MAX_OUTPUT_BYTES {
+                        self.stop();
+                        self.status = "回答超过 512 KiB，已停止；请缩小问题范围".into();
+                        break;
+                    }
+                    self.answer.push_str(&text);
+                }
                 Event::Done => {
                     self.busy = false;
                     self.status = "完成".into();
@@ -699,6 +710,9 @@ impl eframe::App for Peek {
                         role: "assistant".into(),
                         content: self.answer.clone(),
                     });
+                    if peek_core::bound_history(&mut self.messages) {
+                        self.status = "完成 · 已释放较早追问，保留初始问题与最近对话".into();
+                    }
                 }
                 Event::Failed(e) => {
                     peek_core::discard_pending_turn(&mut self.messages);

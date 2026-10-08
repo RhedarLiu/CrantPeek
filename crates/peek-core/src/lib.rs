@@ -302,8 +302,66 @@ pub fn discard_pending_turn(messages: &mut Vec<Message>) {
     }
 }
 
+pub const MAX_INPUT_BYTES: usize = 64 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 512 * 1024;
+/// Keep system + initial query and recent complete pairs. Never split a turn pair.
+pub fn bound_history(messages: &mut Vec<Message>) -> bool {
+    let mut removed = false;
+    while messages.len() > 4
+        && (messages.len() > 22
+            || messages.iter().map(|m| m.content.len()).sum::<usize>() > 256 * 1024)
+    {
+        // Index 2 is the first assistant reply; remove it and the following user turn
+        // only when leaving that reply is not needed by the retained initial question.
+        // Keep the initial user/assistant pair, remove oldest subsequent complete pair.
+        if messages.len() < 6 {
+            break;
+        }
+        messages.drain(3..5);
+        removed = true;
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversation_history_is_bounded_and_initial_query_kept() {
+        use super::*;
+        let mut messages = vec![
+            Message {
+                role: "system".into(),
+                content: "rules".into(),
+            },
+            Message {
+                role: "user".into(),
+                content: "original".into(),
+            },
+            Message {
+                role: "assistant".into(),
+                content: "first answer".into(),
+            },
+        ];
+        for i in 0..20 {
+            messages.push(Message {
+                role: "user".into(),
+                content: format!("q{i}"),
+            });
+            messages.push(Message {
+                role: "assistant".into(),
+                content: format!("a{i}"),
+            });
+        }
+        assert!(bound_history(&mut messages));
+        assert!(messages.len() <= 22);
+        assert_eq!(messages[1].content, "original");
+        assert_eq!(messages.last().unwrap().content, "a19");
+        for pair in messages[3..].chunks(2) {
+            assert_eq!(pair[0].role, "user");
+            assert_eq!(pair[1].role, "assistant");
+        }
+    }
+
     #[test]
     fn endpoints_reject_credentials_and_plaintext_remote_hosts() {
         for value in [
