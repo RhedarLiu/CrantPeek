@@ -24,6 +24,15 @@ pub fn capture() -> Result<Screen, String> {
 }
 /// Convert logical UI coordinates into clamped image pixels; reject tiny selections.
 pub fn crop(screen: &Screen, rect: egui::Rect) -> Option<image::RgbaImage> {
+    if !screen.scale.is_finite()
+        || screen.scale <= 0.0
+        || !rect.min.x.is_finite()
+        || !rect.min.y.is_finite()
+        || !rect.max.x.is_finite()
+        || !rect.max.y.is_finite()
+    {
+        return None;
+    }
     let w = screen.pixels.width();
     let h = screen.pixels.height();
     let x = (rect.min.x * screen.scale).floor().max(0.0).min(w as f32) as u32;

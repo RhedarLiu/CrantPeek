@@ -128,6 +128,12 @@ impl Peek {
         self.dictionary.as_ref()?.lookup(text)
     }
     fn stop(&mut self) {
+        // Dropping receivers invalidates late capture/OCR results without reopening the UI.
+        self.capture_rx = None;
+        self.ocr_rx = None;
+        self.snip = None;
+        self.snip_texture = None;
+        self.drag_start = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }
@@ -310,6 +316,7 @@ impl eframe::App for Peek {
                     self.query(&ctx, false);
                 }
                 desktop::Action::Settings => {
+                    self.stop();
                     self.draft = self.config.clone();
                     self.settings = true;
                     self.visible = true;
@@ -411,7 +418,7 @@ impl eframe::App for Peek {
                                     egui::StrokeKind::Inside,
                                 );
                                 if response.drag_stopped() {
-                                    selection = Some(r);
+                                    selection = Some(r.translate(-rect.min.to_vec2()));
                                 }
                             }
                             ui.painter().text(
@@ -432,7 +439,9 @@ impl eframe::App for Peek {
                     egui::ViewportId::from_hash_of("snip"),
                     egui::ViewportCommand::Close,
                 );
-                if let Some(image) = selection.and_then(|rect| capture::crop(screen, rect)) {
+                if !cancelled
+                    && let Some(image) = selection.and_then(|rect| capture::crop(screen, rect))
+                {
                     let (tx, rx) = std::sync::mpsc::channel();
                     self.ocr_rx = Some(rx);
                     let ctx = ctx.clone();
