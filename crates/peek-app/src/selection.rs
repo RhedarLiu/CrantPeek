@@ -55,7 +55,7 @@ pub fn read() -> Option<String> {
         peek_core::entry_text(peek_core::Entry::Selection, Some(&text))
     }
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn read() -> Option<String> {
     None
 }
@@ -157,7 +157,106 @@ pub fn listen(
         }
     });
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod win {
+    use super::DoubleCtrl;
+    use std::sync::{Mutex, OnceLock, mpsc::Sender};
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG,
+        SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+        WM_SYSKEYUP,
+    };
+
+    struct Shared {
+        state: DoubleCtrl,
+        interval: std::time::Duration,
+        tx: Sender<crate::desktop::Action>,
+        ctx: eframe::egui::Context,
+    }
+    static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
+
+    pub fn read() -> Option<String> {
+        unsafe {
+            // Each worker thread initialises COM once; failure of a repeat call is harmless.
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+            let element = automation.GetFocusedElement().ok()?;
+            let pattern: IUIAutomationTextPattern =
+                element.GetCurrentPatternAs(UIA_TextPatternId).ok()?;
+            let ranges = pattern.GetSelection().ok()?;
+            let mut text = String::new();
+            for i in 0..ranges.Length().ok()?.min(8) {
+                let part = ranges.GetElement(i).ok()?.GetText(100_000).ok()?;
+                text.push_str(&part.to_string());
+            }
+            peek_core::entry_text(peek_core::Entry::Selection, Some(&text))
+        }
+    }
+
+    unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0
+            && let Some(shared) = SHARED.get()
+        {
+            let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            let message = wparam.0 as u32;
+            let is_ctrl = info.vkCode == 0xA2 || info.vkCode == 0xA3; // VK_LCONTROL / VK_RCONTROL
+            let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+            let up = message == WM_KEYUP || message == WM_SYSKEYUP;
+            if let Ok(mut s) = shared.lock() {
+                if !is_ctrl && down {
+                    s.state.interrupt();
+                } else if is_ctrl && (down || up) {
+                    let interval = s.interval;
+                    if s.state
+                        .transition(down, std::time::Instant::now(), interval)
+                    {
+                        let tx = s.tx.clone();
+                        let ctx = s.ctx.clone();
+                        // Read off the hook thread: UI Automation must never block input.
+                        std::thread::spawn(move || {
+                            if let Some(text) = read() {
+                                let _ = tx.send(crate::desktop::Action::Selection(text));
+                                ctx.request_repaint();
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        unsafe { CallNextHookEx(None::<HHOOK>, code, wparam, lparam) }
+    }
+
+    pub fn listen(interval: u64, tx: Sender<crate::desktop::Action>, ctx: eframe::egui::Context) {
+        let _ = SHARED.set(Mutex::new(Shared {
+            state: DoubleCtrl::default(),
+            interval: std::time::Duration::from_millis(interval),
+            tx,
+            ctx,
+        }));
+        std::thread::spawn(|| unsafe {
+            if SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0).is_err() {
+                return;
+            }
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        });
+    }
+}
+#[cfg(windows)]
+pub use win::listen;
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn listen(
     _interval: u64,
     _tx: std::sync::mpsc::Sender<crate::desktop::Action>,
