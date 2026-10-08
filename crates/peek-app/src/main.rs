@@ -27,6 +27,7 @@ struct Peek {
     decision_secret_draft: String,
     route_note: String,
     runtime: tokio::runtime::Runtime,
+    client: Client,
     receiver: Option<mpsc::Receiver<Event>>,
     cancel: Option<CancellationToken>,
     busy: bool,
@@ -108,6 +109,7 @@ impl Peek {
                 .enable_all()
                 .build()
                 .expect("async runtime"),
+            client: Client::default(),
             receiver: None,
             cancel: None,
             busy: false,
@@ -254,13 +256,13 @@ impl Peek {
             "本地判断 / 手动模式".into()
         };
         let ctx = ctx.clone();
+        let client = self.client.clone();
         self.runtime.spawn(async move {
             if use_decision {
                 let routed = if let Some(ref decision_key) = decision_key {
                     tokio::time::timeout(
                         std::time::Duration::from_millis(decision.timeout_ms),
                         async {
-                            let client = Client::default();
                             if let Some(image) = &decision_image {
                                 client
                                     .decide_image(
@@ -309,7 +311,6 @@ impl Peek {
             }
             let (net_tx, mut net_rx) = mpsc::channel(32);
             let worker = tokio::spawn(async move {
-                let client = Client::default();
                 if let Some(image) = image {
                     client
                         .stream_image(&provider, &key, &messages, &image, net_tx, cancel)
@@ -326,8 +327,13 @@ impl Peek {
                 }
                 ctx.request_repaint();
             }
-            if let Ok(Err(e)) = worker.await {
-                let _ = tx.send(Event::Failed(e.to_string())).await;
+            let failure = match worker.await {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(_) => Some("网络任务异常退出，请重试".into()),
+            };
+            if let Some(failure) = failure {
+                let _ = tx.send(Event::Failed(failure)).await;
                 ctx.request_repaint();
             }
         });
