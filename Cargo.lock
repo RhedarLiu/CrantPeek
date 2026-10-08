@@ -6287,7 +6287,12 @@ dependencies = [
  "image",
  "objc2 0.6.5",
  "peek-core",
+ "peek-dict",
+ "peek-network",
+ "peek-runtime",
  "raw-window-handle",
+ "tokio",
+ "tokio-util",
  "tray-icon",
  "windows 0.62.2",
 ]

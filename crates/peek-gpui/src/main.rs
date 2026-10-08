@@ -3,15 +3,16 @@
 //! Tray-resident, floating-first: no main window, the peek panel is created
 //! hidden at startup and summoned by a global hotkey. This crate replaces the
 //! egui/eframe UI layer (`peek-app`) while `peek-core`, `peek-network` and
-//! `peek-dict` stay unchanged.
+//! `peek-dict` stay unchanged; shared config/keychain/i18n live in
+//! `peek-runtime`.
 //!
 //! Ordering note: the tray icon and the hotkey manager are installed *inside*
 //! the `Application::run` callback, not before it. Creating them earlier makes
 //! muda build a plain `NSApplication`, after which `MacPlatform::run` panics
-//! with "Ivar platform not found on class NSApplication". This is measured in
+//! with "Ivar platform not found on class NSApplication". Measured in
 //! `spikes/gpui-kit/lifecycle-probe-evidence.txt`.
 //!
-//! Modes (mirroring `peek-app`'s `PEEK_UI_PREVIEW` convention):
+//! Modes:
 //!   PEEK_SELFTEST=1   show the panel, verify visibility, hide it, quit
 
 mod fonts;
@@ -19,8 +20,13 @@ mod native_window;
 
 use std::time::Duration;
 
-use gpui_kit::base::{Root, StyledExt as _};
+use gpui_kit::base::{IndexPath, Root, StyledExt as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
+use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
@@ -29,17 +35,83 @@ use tray_icon::Icon as TrayIconImage;
 use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
+use peek_core::{Config, Message, Task, effective_target, local_route};
+use peek_network::{Client, Event};
+use peek_runtime::{i18n, store};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
 /// Poll interval for the tray/hotkey channels. Both crates deliver events on
 /// their own channels rather than through GPUI, so they are drained on a timer.
 const POLL: Duration = Duration::from_millis(60);
+/// How often streamed answer text is moved from the network channel into the view.
+const DRAIN: Duration = Duration::from_millis(30);
 
-const LA: &str = "The best tools respect your attention.";
-const ZH: &str = "需要时出现，看完即走。读取选区并翻译。";
+/// Grace period after a programmatic show during which focus loss is ignored.
+///
+/// `activate_window()` is followed by an activation notification; if the app
+/// is not yet frontmost (e.g. it was summoned while another app still holds
+/// focus) `is_window_active()` reads false at that moment. Without this grace
+/// period the panel would hide itself the instant it appeared — measured as a
+/// flaky `visible after show: false` in `PEEK_SELFTEST`.
+const FOCUS_GRACE: Duration = Duration::from_millis(500);
+
+thread_local! {
+    /// When the panel was last shown. Everything here runs on GPUI's main
+    /// thread, so a thread-local is enough.
+    static SHOWN_AT: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Shows the panel and records when, so focus loss is ignored briefly.
+fn show_panel(window: &mut Window) {
+    native_window::show(window);
+    SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
+}
+
+/// Whether the panel was shown recently enough to ignore a focus loss.
+fn shown_recently() -> bool {
+    SHOWN_AT.with(|cell| {
+        cell.get()
+            .is_some_and(|shown| shown.elapsed() < FOCUS_GRACE)
+    })
+}
+
+/// Task order in the dropdown, paired with their localisation keys.
+const TASK_ORDER: &[Task] = &[
+    Task::Translate,
+    Task::Define,
+    Task::ExplainCode,
+    Task::ExplainError,
+    Task::Explain,
+];
+const TASK_KEYS: &[&str] = &[
+    "task-translate",
+    "task-define",
+    "task-explain-code",
+    "task-explain-error",
+    "task-explain",
+];
 
 struct Peek {
     set: &'static fonts::FontSet,
     /// Kept alive so the activation observer stays subscribed.
     _activation: Subscription,
+
+    input: Entity<TextareaState>,
+    tasks: Entity<SelectState<Vec<SharedString>>>,
+
+    answer: String,
+    status: String,
+    busy: bool,
+    dictionary_note: String,
+
+    config: Config,
+    client: Client,
+    runtime: tokio::runtime::Runtime,
+    messages: Vec<Message>,
+    receiver: Option<mpsc::Receiver<Event>>,
+    cancel: Option<CancellationToken>,
 }
 
 impl Peek {
@@ -47,13 +119,270 @@ impl Peek {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
         let activation = cx.observe_window_activation(window, |_this, window, _cx| {
-            if !window.is_window_active() {
+            if !window.is_window_active() && !shown_recently() {
                 native_window::hide(window);
             }
         });
-        Self {
+
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 5));
+
+        let config = store::load().unwrap_or_default();
+        i18n::set_language(&config.ui_language);
+
+        let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
+        let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx));
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        let this = Self {
             set: &fonts::DEFAULT,
             _activation: activation,
+            input,
+            tasks,
+            answer: String::new(),
+            status: String::new(),
+            busy: false,
+            dictionary_note: String::new(),
+            config,
+            client: Client::default(),
+            runtime,
+            messages: Vec::new(),
+            receiver: None,
+            cancel: None,
+        };
+
+        // `PEEK_SELFTEST` also drives one query turn, so the whole pipeline
+        // (config load → credential lookup → localised status → view notify)
+        // is exercised without a click. It stops at the network call when no
+        // credential is configured, which is reported as-is.
+        if std::env::var("PEEK_SELFTEST").is_ok() {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(900))
+                    .await;
+                this.update(cx, |peek, cx| {
+                    peek.begin_turn("ephemeral".into(), cx);
+                })
+                .ok();
+                cx.background_executor()
+                    .timer(Duration::from_millis(1600))
+                    .await;
+                this.update(cx, |peek, cx| {
+                    println!("[selftest] query status : {:?}", peek.status);
+                    println!("[selftest] answer bytes : {}", peek.answer.len());
+                    println!("[selftest] busy         : {}", peek.busy);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+
+        this
+    }
+
+    /// The task chosen in the dropdown.
+    fn selected_task(&self, cx: &App) -> Task {
+        self.tasks
+            .read(cx)
+            .selected_index(cx)
+            .and_then(|index| TASK_ORDER.get(index.row))
+            .copied()
+            .unwrap_or(Task::Translate)
+    }
+
+    /// Offline dictionary first: instant, and independent of any API key.
+    fn lookup_word(&mut self, text: &str) -> Option<peek_dict::Entry> {
+        if text.chars().count() > 40 || text.split_whitespace().count() != 1 {
+            return None;
+        }
+        store::dictionary_candidates()
+            .into_iter()
+            .find_map(|path| peek_dict::Dict::open(&path).ok())
+            .and_then(|dict| dict.lookup(text))
+    }
+
+    /// Cancels any in-flight turn and drops the unanswered tail.
+    fn stop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.cancel();
+        }
+        self.receiver = None;
+        self.busy = false;
+        peek_core::discard_pending_turn(&mut self.messages);
+    }
+
+    /// Reads the input box and starts a turn, clearing it only if one began.
+    fn start_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().trim().to_owned();
+        if self.begin_turn(text, cx) {
+            self.input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+        }
+    }
+
+    /// Builds the prompt and starts the network turn. Returns whether a turn
+    /// actually started. Split out of `start_query` so `PEEK_SELFTEST` can
+    /// drive the whole pipeline without a window or a click.
+    fn begin_turn(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        if text.len() > peek_core::MAX_INPUT_BYTES {
+            self.status = i18n::tr("status-input-too-long");
+            cx.notify();
+            return false;
+        }
+
+        self.stop();
+        self.answer.clear();
+        self.dictionary_note.clear();
+        if let Some(entry) = self.lookup_word(&text) {
+            self.dictionary_note = dictionary_text(&entry);
+        }
+
+        let key = match store::secret(&self.config.provider.credential_id) {
+            Ok(key) => key,
+            Err(err) => {
+                self.status = err;
+                cx.notify();
+                return false;
+            }
+        };
+        if self.config.provider.model.trim().is_empty() {
+            self.status = i18n::tr("status-model-missing");
+            cx.notify();
+            return false;
+        }
+
+        let route = local_route(
+            &text,
+            &self.config.target_language,
+            &self.config.chinese_target,
+        );
+        let task = if self.config.smart_mode {
+            route.task
+        } else {
+            self.selected_task(cx)
+        };
+        self.messages = vec![Message {
+            role: "system".into(),
+            content: task.styled_instruction(
+                effective_target(&route.target, ""),
+                &self.config.translation_style,
+            ),
+        }];
+        self.messages.push(Message {
+            role: "user".into(),
+            content: text.clone(),
+        });
+
+        self.status = i18n::tr("status-generating");
+        self.busy = true;
+        let (tx, rx) = mpsc::channel(128);
+        self.receiver = Some(rx);
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+
+        let provider = self.config.provider.clone();
+        let messages = self.messages.clone();
+        let client = self.client.clone();
+        let ui_language = self.config.ui_language.clone();
+        self.runtime.spawn(async move {
+            let locale = i18n::I18n::new(&ui_language);
+            let (net_tx, mut net_rx) = mpsc::channel(32);
+            let worker = tokio::spawn(async move {
+                client
+                    .stream(&provider, &key, &messages, net_tx, cancel)
+                    .await
+            });
+            while let Some(event) = net_rx.recv().await {
+                // Error payloads travel as stable codes; localise them here,
+                // off the UI thread.
+                let event = match event {
+                    Event::Failed(code) => Event::Failed(locale.text(&code)),
+                    other => other,
+                };
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+            let failure = match worker.await {
+                Ok(Ok(())) => None,
+                Ok(Err(err)) => Some(locale.network_error(&err)),
+                Err(_) => Some(locale.text("status-worker-crashed")),
+            };
+            if let Some(failure) = failure {
+                let _ = tx.send(Event::Failed(failure)).await;
+            }
+        });
+
+        // Move streamed events into the view on the GPUI side: tokio owns the
+        // network task, and an `Entity` cannot cross into it.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(DRAIN).await;
+                let finished = this
+                    .update(cx, |peek, cx| {
+                        let mut events = Vec::new();
+                        let mut finished = false;
+                        match peek.receiver.as_mut() {
+                            Some(receiver) => loop {
+                                match receiver.try_recv() {
+                                    Ok(event) => events.push(event),
+                                    Err(mpsc::error::TryRecvError::Empty) => break,
+                                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                                        finished = true;
+                                        break;
+                                    }
+                                }
+                            },
+                            None => finished = true,
+                        }
+                        if !events.is_empty() {
+                            peek.apply_events(events);
+                            cx.notify();
+                        }
+                        if finished {
+                            peek.receiver = None;
+                            peek.busy = false;
+                        }
+                        finished
+                    })
+                    .unwrap_or(true);
+                if finished {
+                    return;
+                }
+            }
+        })
+        .detach();
+        true
+    }
+
+    fn apply_events(&mut self, events: Vec<Event>) {
+        for event in events {
+            match event {
+                Event::Route { note, .. } => self.status = note,
+                Event::Text(delta) => {
+                    if self.answer.len() + delta.len() > peek_core::MAX_OUTPUT_BYTES {
+                        self.status = i18n::tr("status-output-too-long");
+                        self.stop();
+                        break;
+                    }
+                    self.answer.push_str(&delta);
+                }
+                Event::Done => {
+                    self.status = i18n::tr("status-done");
+                    self.busy = false;
+                }
+                Event::Failed(message) => {
+                    self.status = message;
+                    self.busy = false;
+                }
+            }
         }
     }
 }
@@ -93,99 +422,197 @@ impl Render for Peek {
                             .child("Crant Peek"),
                     )
                     .child(
-                        Icon::new(gpui_kit::assets::IconName::Settings)
-                            .size(px(16.))
-                            .text_color(muted),
-                    )
-                    .child(
                         Icon::new(gpui_kit::assets::IconName::Close)
                             .size(px(16.))
                             .text_color(muted),
                     ),
             )
+            // Source input.
             .child(
                 div()
                     .w_full()
                     .border_1()
                     .border_color(border)
                     .rounded(px(16.))
-                    .p(px(16.))
-                    .child(div().font_family(set.latin).text_size(px(14.)).child(LA)),
+                    .p(px(14.))
+                    .child(
+                        Textarea::new(&self.input)
+                            .w_full()
+                            .h(px(78.))
+                            .appearance(false)
+                            .bordered(false),
+                    ),
             )
+            // Task dropdown plus the primary action.
             .child(
                 h_flex()
                     .w_full()
                     .items_center()
                     .gap(px(10.))
                     .child(
-                        div()
-                            .font_family(set.latin)
-                            .text_size(px(13.))
-                            .border_1()
-                            .border_color(border)
-                            .rounded(px(10.))
-                            .px(px(12.))
-                            .py(px(6.))
-                            .child("Translate  ▾"),
+                        Select::new(&self.tasks)
+                            .id("task")
+                            .w(px(170.))
+                            .rounded(px(10.)),
                     )
                     .child(
-                        div()
-                            .font_family(set.latin)
-                            .text_size(px(13.))
-                            .bg(fg)
-                            .text_color(bg)
+                        Button::new("look-up")
+                            .primary()
                             .rounded(px(999.))
-                            .px(px(14.))
-                            .py(px(7.))
-                            .child("Look up"),
+                            .h(px(34.))
+                            .px(px(16.))
+                            .label(i18n::tr("query-run"))
+                            .loading(self.busy)
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.start_query(window, cx);
+                            })),
                     ),
             )
+            // Offline dictionary result, when the input was a single word.
+            .when(!self.dictionary_note.is_empty(), |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .border_1()
+                        .border_color(border)
+                        .rounded(px(14.))
+                        .p(px(14.))
+                        .font_family(set.sc)
+                        .text_size(px(13.))
+                        .child(self.dictionary_note.clone()),
+                )
+            })
+            // Markdown answer.
             .child(
-                v_flex()
+                div()
+                    .id("answer")
                     .w_full()
+                    .flex_1()
                     .border_1()
                     .border_color(border)
                     .rounded(px(16.))
                     .p(px(16.))
-                    .gap(px(7.))
-                    .child(
-                        div()
-                            .font_family(set.latin)
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child("AI answer"),
-                    )
-                    .child(div().font_family(set.latin).text_size(px(14.)).child(LA))
-                    .child(div().font_family(set.sc).text_size(px(14.)).child(ZH))
-                    .child(
-                        div()
-                            .font_family(set.mono)
-                            .text_size(px(12.))
-                            .text_color(muted)
-                            .child("error[E0308]: mismatched types"),
-                    ),
+                    .overflow_y_scroll()
+                    .when(self.answer.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .font_family(set.latin)
+                                .text_size(px(13.))
+                                .text_color(muted)
+                                .child(i18n::tr("query-empty-title")),
+                        )
+                    })
+                    .when(!self.answer.is_empty(), |this| {
+                        this.child(TextView::markdown("answer", self.answer.clone()))
+                    }),
             )
             .child(
-                div()
+                h_flex()
+                    .w_full()
+                    .gap(px(8.))
                     .font_family(set.latin)
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(format!("font set: {}   ·   Esc 隐藏", set.name)),
+                    .child(self.status.clone())
+                    .child(div().flex_1())
+                    // Also the label the settings panel will offer; shown here so
+                    // the active set is visible while the panel is still to come.
+                    .child(set.name),
             )
     }
 }
 
-/// Quits for real.
-///
-/// `App::quit()` only asks the platform to terminate asynchronously — on macOS
-/// it dispatches `NSApplication terminate:` onto the main queue. Measured: the
-/// process survived it (still resident 70s later) together with a stale
-/// menu-bar icon, because the tray icon is intentionally leaked. Since this app
-/// is tray-resident, a quit that leaves the process alive is worse than one
-/// that skips destructors, so the exit is explicit.
-fn quit_now(cx: &mut App) {
-    cx.quit();
-    std::process::exit(0);
+/// Renders a dictionary hit the way the egui shell did: headword, phonetic,
+/// translation, word forms and lemma. `peek_dict::Entry` and `peek_core::Entry`
+/// are distinct types, so the text is assembled here.
+fn dictionary_text(entry: &peek_dict::Entry) -> String {
+    let mut out = String::new();
+    out.push_str(&entry.word);
+    if !entry.phonetic.is_empty() {
+        out.push_str(&format!("   /{}/", entry.phonetic));
+    }
+    if !entry.translation.is_empty() {
+        out.push('\n');
+        out.push_str(&entry.translation);
+    }
+    let forms = entry.forms();
+    if !forms.is_empty() {
+        let line: Vec<String> = forms
+            .iter()
+            .map(|(key, value)| format!("{} {value}", i18n::tr(key)))
+            .collect();
+        out.push('\n');
+        out.push_str(&line.join("  ·  "));
+    }
+    if let Some(lemma) = entry.lemma() {
+        out.push('\n');
+        out.push_str(&i18n::format("dict-lemma", &[("lemma", lemma)]));
+    }
+    out
+}
+
+/// Sample answer for the offscreen preview. Exercises the Markdown renderer
+/// with the scripts this app actually handles.
+const SAMPLE_ANSWER: &str = r#"## 需要时出现，看完即走
+
+**Crant Peek** 是一个*浮窗式*阅读助手：选中文字、双击 Ctrl 即可查词或翻译。
+
+- 离线词典优先，毫秒级返回
+- AI 回答按 Markdown 渲染
+- `Esc` 或失焦即隐藏
+
+```rust
+fn main() {
+    let x: u32 = 42;
+}
+```
+
+> 日文示例：エラーを解析します。直線と骨格、今日の海。
+"#;
+
+/// Renders the panel offscreen to a PNG, the GPUI counterpart of the egui
+/// shell's `PEEK_UI_PREVIEW`. No window is shown, so this is safe to run
+/// unattended and gives the Markdown answer a visual check without credentials.
+fn render_preview(path: &str) -> anyhow::Result<()> {
+    let mut cx = gpui_kit::HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        std::sync::Arc::new(gpui_kit::assets::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+
+    let window = cx.open_window(size(px(480.), px(560.)), |window, cx| {
+        gpui_kit::init(cx);
+        if let Err(err) = fonts::register(cx) {
+            eprintln!("font registration failed: {err}");
+        }
+        let missing = fonts::missing(cx);
+        if !missing.is_empty() {
+            eprintln!("bundled fonts MISSING: {}", missing.join(", "));
+        }
+        fonts::apply(cx, &fonts::DEFAULT);
+        let view = cx.new(|cx| Peek::new(window, cx));
+        view.update(cx, |peek, cx| {
+            peek.answer = SAMPLE_ANSWER.into();
+            peek.status = i18n::tr("status-done");
+            cx.notify();
+        });
+        cx.new(|cx| Root::new(view, window, cx))
+    })?;
+
+    cx.run_until_parked();
+    let image = cx.capture_screenshot(window.into())?;
+    let out = std::path::PathBuf::from(path);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    image.save(&out)?;
+    println!(
+        "wrote {} ({}x{})",
+        out.display(),
+        image.width(),
+        image.height()
+    );
+    Ok(())
 }
 
 fn window_options() -> WindowOptions {
@@ -210,8 +637,25 @@ fn window_options() -> WindowOptions {
     }
 }
 
+/// Quits for real.
+///
+/// `App::quit()` only asks the platform to terminate asynchronously — on macOS
+/// it dispatches `NSApplication terminate:` onto the main queue. Measured: the
+/// process survived it (still resident 70s later) together with a stale
+/// menu-bar icon, because the tray icon is intentionally leaked. Since this app
+/// is tray-resident, a quit that leaves the process alive is worse than one
+/// that skips destructors, so the exit is explicit.
+fn quit_now(cx: &mut App) {
+    cx.quit();
+    std::process::exit(0);
+}
+
 fn main() -> anyhow::Result<()> {
     let selftest = std::env::var("PEEK_SELFTEST").is_ok();
+
+    if let Ok(path) = std::env::var("PEEK_RENDER") {
+        return render_preview(&path);
+    }
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
@@ -244,15 +688,15 @@ fn main() -> anyhow::Result<()> {
 
         // Tray icon — installed here, see the ordering note at the top.
         let menu = Menu::new();
-        let show_item = MenuItem::new("显示 Peek", true, None);
-        let quit_item = MenuItem::new("退出", true, None);
+        let show_item = MenuItem::new(i18n::tr("tray-open"), true, None);
+        let quit_item = MenuItem::new(i18n::tr("tray-quit"), true, None);
         let show_id = show_item.id().clone();
         let quit_id = quit_item.id().clone();
         let _ = menu.append(&show_item);
         let _ = menu.append(&quit_item);
         match TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("Crant Peek")
+            .with_tooltip(i18n::tr("tray-tooltip"))
             .with_icon(
                 TrayIconImage::from_rgba(vec![0x28, 0x28, 0x2c, 0xff], 1, 1)
                     .expect("1x1 tray icon"),
@@ -280,8 +724,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Automated check of the show/hide path, so the native shim does not
-        // depend on a human pressing the hotkey. Briefly shows one 480x560
-        // window and exits on its own.
+        // depend on a human pressing the hotkey.
         if selftest {
             cx.spawn(async move |cx| {
                 cx.background_executor()
@@ -292,7 +735,7 @@ fn main() -> anyhow::Result<()> {
                     .unwrap_or(false);
                 println!("[selftest] visible at startup : {before}  <- want false");
 
-                cx.update_window(handle, |_, window, _| native_window::show(window))
+                cx.update_window(handle, |_, window, _| show_panel(window))
                     .ok();
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
@@ -304,8 +747,10 @@ fn main() -> anyhow::Result<()> {
 
                 cx.update_window(handle, |_, window, _| native_window::hide(window))
                     .ok();
+                // Long enough for the query-pipeline check spawned in
+                // `Peek::new` to finish before the process exits.
                 cx.background_executor()
-                    .timer(Duration::from_millis(400))
+                    .timer(Duration::from_millis(3200))
                     .await;
                 let hidden = cx
                     .update_window(handle, |_, window, _| native_window::is_visible(window))
@@ -348,8 +793,7 @@ fn main() -> anyhow::Result<()> {
                         let _ =
                             cx.update_window(handle, |_, window, _| native_window::hide(window));
                     } else {
-                        let _ =
-                            cx.update_window(handle, |_, window, _| native_window::show(window));
+                        let _ = cx.update_window(handle, |_, window, _| show_panel(window));
                     }
                 }
 
