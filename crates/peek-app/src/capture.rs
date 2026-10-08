@@ -6,13 +6,35 @@ pub struct Screen {
     pub origin: [f32; 2],
     pub scale: f32,
 }
+#[cfg(target_os = "macos")]
+fn cursor_position() -> Option<(i32, i32)> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let event =
+        CGEvent::new(CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?).ok()?;
+    let point = event.location();
+    Some((point.x as i32, point.y as i32))
+}
+#[cfg(windows)]
+fn cursor_position() -> Option<(i32, i32)> {
+    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+    let mut point = POINT::default();
+    unsafe {
+        GetCursorPos(&mut point).ok()?;
+    }
+    Some((point.x, point.y))
+}
+
 pub fn capture() -> Result<Screen, String> {
     let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
-    // Initial implementation uses primary display; secondary-display selection is pending.
-    let monitor = monitors
-        .into_iter()
-        .find(|m| m.is_primary().unwrap_or(false))
-        .ok_or("No primary display")?;
+    let monitor = cursor_position()
+        .and_then(|(x, y)| xcap::Monitor::from_point(x, y).ok())
+        .or_else(|| {
+            monitors
+                .into_iter()
+                .find(|m| m.is_primary().unwrap_or(false))
+        })
+        .ok_or("No display available")?;
     Ok(Screen {
         pixels: monitor.capture_image().map_err(|e| e.to_string())?,
         origin: [
@@ -47,6 +69,36 @@ pub fn crop(screen: &Screen, rect: egui::Rect) -> Option<image::RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_selection_and_scale_rejected() {
+        let mut screen = Screen {
+            pixels: image::RgbaImage::new(10, 10),
+            origin: [0.0, 0.0],
+            scale: 1.0,
+        };
+        assert!(
+            crop(
+                &screen,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(f32::NAN, 5.0))
+            )
+            .is_none()
+        );
+        assert!(
+            crop(
+                &screen,
+                egui::Rect::from_min_max(egui::pos2(5.0, 5.0), egui::pos2(1.0, 1.0))
+            )
+            .is_none()
+        );
+        screen.scale = 0.0;
+        assert!(
+            crop(
+                &screen,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(5.0, 5.0))
+            )
+            .is_none()
+        );
+    }
     #[test]
     fn crop_scaled_and_clamped() {
         let screen = Screen {
