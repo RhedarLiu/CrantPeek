@@ -305,6 +305,16 @@ impl Decision {
                 "Chosen task missing from probabilities".into(),
             ));
         }
+        for key in self.probabilities.keys() {
+            serde_json::from_value::<Task>(Value::String(key.clone()))
+                .map_err(|_| Error::Invalid("Unknown task in probabilities".into()))?;
+        }
+        let chosen = self.probabilities[selected.as_str().unwrap()];
+        if self.probabilities.values().any(|p| *p > chosen + 1e-6) {
+            return Err(Error::Invalid(
+                "Chosen task is not the highest-probability task".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -312,6 +322,19 @@ impl Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inconsistent_decision_is_rejected() {
+        for probabilities in [
+            json!({"translate":0.2,"explain_error":0.8}),
+            json!({"translate":0.8,"execute":0.2}),
+        ] {
+            let decision: Decision = serde_json::from_value(
+                json!({"choice":"translate","confidence":0.9,"probabilities":probabilities}),
+            )
+            .unwrap();
+            assert!(decision.validate().is_err());
+        }
+    }
     #[test]
     fn image_format_is_protocol_specific_and_explicit() {
         let messages = vec![Message {
