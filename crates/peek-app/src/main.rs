@@ -817,6 +817,29 @@ impl eframe::App for Peek {
                         ctx.copy_text(text);
                     }
                 });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.input.is_empty(), egui::Button::new("复制原文"))
+                        .clicked()
+                    {
+                        ctx.copy_text(self.input.clone());
+                        self.status = "已复制原文".into();
+                    }
+                    if ui.button("清空会话").clicked() {
+                        self.stop();
+                        self.input.clear();
+                        self.answer.clear();
+                        self.followup.clear();
+                        self.messages.clear();
+                        self.dict_entry = None;
+                        self.screenshot_image = None;
+                        self.send_image = false;
+                        self.decide_image = false;
+                        self.manual_task = false;
+                        self.route_note.clear();
+                        self.status = "已清空当前会话".into();
+                    }
+                });
                 if self.screenshot_image.is_some() {
                     ui.horizontal_wrapped(|ui| {
                         if ui
