@@ -32,6 +32,7 @@ struct Peek {
     messages: Vec<Message>,
     task: Task,
     manual_task: bool,
+    target_override: String,
     pinned: bool,
     status: String,
     secret_draft: String,
@@ -120,6 +121,7 @@ impl Peek {
             messages: Vec::new(),
             task: Task::Translate,
             manual_task: false,
+            target_override: String::new(),
             pinned: false,
             status,
             secret_draft: String::new(),
@@ -228,7 +230,13 @@ impl Peek {
             }
             self.messages = vec![Message {
                 role: "system".into(),
-                content: self.task.instruction(&route.target),
+                content: self
+                    .task
+                    .instruction(if self.target_override.trim().is_empty() {
+                        &route.target
+                    } else {
+                        &self.target_override
+                    }),
             }];
         }
         self.messages.push(Message {
@@ -275,6 +283,11 @@ impl Peek {
             &self.config.chinese_target,
         )
         .target;
+        let target = if self.target_override.trim().is_empty() {
+            target
+        } else {
+            self.target_override.clone()
+        };
         let fallback_task = self.task;
         self.route_note = if use_decision {
             "正在判断任务…".into()
@@ -673,6 +686,7 @@ impl eframe::App for Peek {
                     self.messages.clear();
                     self.manual_task = false;
                     self.screenshot_image = None;
+                    self.target_override.clear();
                     self.send_image = false;
                     self.settings = false;
                     self.status.clear();
@@ -698,6 +712,7 @@ impl eframe::App for Peek {
                     self.messages.clear();
                     self.manual_task = false;
                     self.screenshot_image = None;
+                    self.target_override.clear();
                     self.send_image = false;
                     self.settings = false;
                     self.status.clear();
@@ -727,6 +742,7 @@ impl eframe::App for Peek {
                 desktop::Action::Screenshot => {
                     self.stop();
                     self.screenshot_image = None;
+                    self.target_override.clear();
                     self.send_image = false;
                     self.visible = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -918,7 +934,12 @@ impl eframe::App for Peek {
                             &self.config.chinese_target,
                         )
                         .target;
-                        system.content = task.instruction(&target);
+                        system.content =
+                            task.instruction(if self.target_override.trim().is_empty() {
+                                &target
+                            } else {
+                                &self.target_override
+                            });
                     }
                 }
                 Event::Text(text) => {
@@ -1106,6 +1127,29 @@ impl eframe::App for Peek {
                         self.config.provider.base_url
                     ));
                 }
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_label("当前目标语言")
+                        .selected_text(if self.target_override.is_empty() {
+                            "自动"
+                        } else {
+                            &self.target_override
+                        })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in [
+                                ("", "自动"),
+                                ("Chinese", "中文"),
+                                ("English", "英文"),
+                                ("Japanese", "日文"),
+                            ] {
+                                ui.selectable_value(&mut self.target_override, value.into(), label);
+                            }
+                        });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.target_override)
+                            .desired_width(100.0)
+                            .hint_text("自定义语言"),
+                    );
+                });
                 ui.weak(&self.route_note);
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
