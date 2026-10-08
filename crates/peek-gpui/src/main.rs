@@ -37,6 +37,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
 use peek_core::{Config, Message, Task, effective_target, local_route};
 use peek_network::{Client, Event};
+use peek_runtime::action::Action;
 use peek_runtime::{i18n, store};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -102,10 +103,17 @@ struct Peek {
     tasks: Entity<SelectState<Vec<SharedString>>>,
 
     answer: String,
+    /// Selection text to place in the input box on the next frame. The hook
+    /// reports off the UI thread, where no `Window` is available to set it.
+    pending_input: Option<String>,
     status: String,
     busy: bool,
     dictionary_note: String,
 
+    /// Permissions that are not granted yet. The double-tap Ctrl hook and
+    /// selection reading need Accessibility; without it they fail silently, so
+    /// the panel says so instead of appearing broken.
+    missing_permissions: Vec<&'static str>,
     config: Config,
     client: Client,
     runtime: tokio::runtime::Runtime,
@@ -128,6 +136,7 @@ impl Peek {
 
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
+        let double_ctrl_ms = config.double_ctrl_ms;
 
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
         let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx));
@@ -143,9 +152,15 @@ impl Peek {
             input,
             tasks,
             answer: String::new(),
+            pending_input: None,
             status: String::new(),
             busy: false,
             dictionary_note: String::new(),
+            missing_permissions: peek_runtime::permissions::status()
+                .into_iter()
+                .filter(|(_, granted)| !granted)
+                .map(|(name, _)| name)
+                .collect(),
             config,
             client: Client::default(),
             runtime,
@@ -154,11 +169,63 @@ impl Peek {
             cancel: None,
         };
 
+        // Double-tap Ctrl: the hook and selection reader live in
+        // `peek-runtime` and are toolkit agnostic. They report through a
+        // channel this view drains on a timer, so no UI context crosses the
+        // platform thread boundary.
+        let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
+        let selftest_wake = action_tx.clone();
+        peek_runtime::selection::listen(
+            double_ctrl_ms,
+            action_tx,
+            // This view polls the channel, so the wake callback is a no-op.
+            std::sync::Arc::new(|| {}),
+        );
+        let panel_handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(POLL).await;
+                while let Ok(action) = action_rx.try_recv() {
+                    match action {
+                        Action::Selection(text) => {
+                            println!("[hook] selection action: {} chars", text.chars().count());
+                            // Show first so the panel is on screen while the
+                            // answer streams in.
+                            let _ =
+                                cx.update_window(panel_handle, |_, window, _| show_panel(window));
+                            this.update(cx, |peek, cx| {
+                                peek.pending_input = Some(text.clone());
+                                peek.begin_turn(text, cx);
+                            })
+                            .ok();
+                        }
+                        Action::Blank => {
+                            let _ =
+                                cx.update_window(panel_handle, |_, window, _| show_panel(window));
+                        }
+                        Action::Quit => {
+                            cx.update(quit_now);
+                            return;
+                        }
+                        // Screenshot, settings and pause are not ported yet.
+                        Action::Screenshot | Action::Settings | Action::TogglePause => {}
+                    }
+                }
+            }
+        })
+        .detach();
+
         // `PEEK_SELFTEST` also drives one query turn, so the whole pipeline
         // (config load → credential lookup → localised status → view notify)
         // is exercised without a click. It stops at the network call when no
         // credential is configured, which is reported as-is.
         if std::env::var("PEEK_SELFTEST").is_ok() {
+            // Feed the hook's own channel, so the selection path (show + query)
+            // is exercised without synthesising a real double-tap Ctrl.
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(700));
+                let _ = selftest_wake.send(Action::Selection("ephemeral".into()));
+            });
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(900))
@@ -180,6 +247,7 @@ impl Peek {
                         "[selftest] dict note    : {} bytes",
                         peek.dictionary_note.len()
                     );
+                    println!("[selftest] permissions  : {:?}", peek.missing_permissions);
                     cx.notify();
                 })
                 .ok();
@@ -394,7 +462,13 @@ impl Peek {
 }
 
 impl Render for Peek {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A selection arrives off the UI thread, so it is applied here where a
+        // `Window` is available.
+        if let Some(text) = self.pending_input.take() {
+            self.input
+                .update(cx, |state, cx| state.set_value(text, window, cx));
+        }
         let theme = cx.theme();
         let set = self.set;
         let fg = theme.foreground;
@@ -512,6 +586,25 @@ impl Render for Peek {
                         this.child(TextView::markdown("answer", self.answer.clone()))
                     }),
             )
+            .when(!self.missing_permissions.is_empty(), |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .font_family(set.latin)
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child(format!(
+                            "{}: {}",
+                            i18n::tr("settings-permission-denied"),
+                            // `permissions::status()` already yields localisation keys.
+                            self.missing_permissions
+                                .iter()
+                                .map(|key| i18n::tr(key))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                )
+            })
             .child(
                 h_flex()
                     .w_full()
