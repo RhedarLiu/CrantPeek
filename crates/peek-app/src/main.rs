@@ -36,6 +36,8 @@ struct Peek {
     desktop: Option<desktop::Desktop>,
     quit: bool,
     visible: bool,
+    screenshot_image: Option<peek_network::ImageInput>,
+    send_image: bool,
     snip: Option<capture::Screen>,
     snip_texture: Option<egui::TextureHandle>,
     drag_start: Option<egui::Pos2>,
@@ -114,6 +116,8 @@ impl Peek {
             desktop,
             quit: false,
             visible: true,
+            screenshot_image: None,
+            send_image: false,
             snip: None,
             snip_texture: None,
             drag_start: None,
@@ -203,6 +207,12 @@ impl Peek {
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         let provider = self.config.provider.clone();
+        let image = if self.send_image {
+            self.screenshot_image.clone()
+        } else {
+            None
+        };
+        self.send_image = false;
         let mut messages = self.messages.clone();
         let decision = self.config.decision.clone();
         let use_decision = !followup
@@ -266,9 +276,16 @@ impl Peek {
             }
             let (net_tx, mut net_rx) = mpsc::channel(32);
             let worker = tokio::spawn(async move {
-                Client::default()
-                    .stream(&provider, &key, &messages, net_tx, cancel)
-                    .await
+                let client = Client::default();
+                if let Some(image) = image {
+                    client
+                        .stream_image(&provider, &key, &messages, &image, net_tx, cancel)
+                        .await
+                } else {
+                    client
+                        .stream(&provider, &key, &messages, net_tx, cancel)
+                        .await
+                }
             });
             while let Some(event) = net_rx.recv().await {
                 if tx.send(event).await.is_err() {
@@ -329,6 +346,10 @@ impl Peek {
         ui.text_edit_singleline(&mut self.draft.provider.base_url);
         ui.label("Model");
         ui.text_edit_singleline(&mut self.draft.provider.model);
+        ui.checkbox(
+            &mut self.draft.provider.vision,
+            "该回答模型支持图片输入（手动图片解读时上传框选区域）",
+        );
         ui.label("API key（留空保留已有凭据）");
         ui.add(egui::TextEdit::singleline(&mut self.secret_draft).password(true));
         ui.label("默认目标语言");
@@ -438,6 +459,8 @@ impl eframe::App for Peek {
                     self.followup.clear();
                     self.messages.clear();
                     self.manual_task = false;
+                    self.screenshot_image = None;
+                    self.send_image = false;
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
@@ -453,6 +476,8 @@ impl eframe::App for Peek {
                     self.followup.clear();
                     self.messages.clear();
                     self.manual_task = false;
+                    self.screenshot_image = None;
+                    self.send_image = false;
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
@@ -470,6 +495,8 @@ impl eframe::App for Peek {
                 }
                 desktop::Action::Screenshot => {
                     self.stop();
+                    self.screenshot_image = None;
+                    self.send_image = false;
                     self.visible = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     let (tx, rx) = std::sync::mpsc::channel();
@@ -587,6 +614,17 @@ impl eframe::App for Peek {
                 if !cancelled
                     && let Some(image) = selection.and_then(|rect| capture::crop(screen, rect))
                 {
+                    let mut png = std::io::Cursor::new(Vec::new());
+                    if image::DynamicImage::ImageRgba8(image.clone())
+                        .write_to(&mut png, image::ImageFormat::Png)
+                        .is_ok()
+                    {
+                        use base64::Engine;
+                        self.screenshot_image = Some(peek_network::ImageInput {
+                            png_base64: base64::engine::general_purpose::STANDARD
+                                .encode(png.get_ref()),
+                        });
+                    }
                     let (tx, rx) = std::sync::mpsc::channel();
                     self.ocr_rx = Some(rx);
                     let ctx = ctx.clone();
@@ -696,6 +734,8 @@ impl eframe::App for Peek {
                         });
                     if self.manual_task && ui.button("恢复智能").clicked() {
                         self.manual_task = false;
+                        self.screenshot_image = None;
+                        self.send_image = false;
                     }
                     if ui.button("查询").clicked()
                         || ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
@@ -718,6 +758,32 @@ impl eframe::App for Peek {
                         ctx.copy_text(text);
                     }
                 });
+                if self.screenshot_image.is_some() {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(
+                                self.config.provider.vision && !self.busy,
+                                egui::Button::new("图片解读（上传选区）"),
+                            )
+                            .clicked()
+                        {
+                            if self.input.trim().is_empty() {
+                                self.input = "请解释截图中的内容。".into();
+                            }
+                            self.task = Task::Explain;
+                            self.manual_task = true;
+                            self.send_image = true;
+                            self.query(&ctx, false);
+                        }
+                        if ui.button("丢弃图片").clicked() {
+                            self.screenshot_image = None;
+                        }
+                    });
+                    ui.weak(format!(
+                        "图片仅在点击解读后发送到 {}；后续追问默认只发文字",
+                        self.config.provider.base_url
+                    ));
+                }
                 ui.weak(&self.route_note);
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
