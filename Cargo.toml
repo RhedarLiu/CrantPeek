@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/peek-core", "crates/peek-network", "crates/peek-app"]
+members = ["crates/peek-core", "crates/peek-network", "crates/peek-dict", "crates/peek-app"]
 resolver = "2"
 
 [workspace.package]

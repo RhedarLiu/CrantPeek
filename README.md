@@ -2,20 +2,46 @@
 
 需要时出现，看完即走。Windows / macOS 上的 Rust 浮窗查词与 AI 阅读助手，非 Web UI，MIT 开源。
 
-## 当前状态
+**开发中的原型，不是完整产品。** 下面的状态区分“已验证”“只编译过”“还没做”，请以此为准。
 
-开发中。初版 egui 桌面应用已在 macOS 编译并完成进程启动冒烟检查（没有崩溃输出，未进行视觉/交互验收）。手动输入、模式选择、流式回答、追问、取消、复制、设置与系统凭据存储已接线。已加入全局空白浮窗快捷键和托盘菜单，可从菜单重新打开窗口；失焦/关闭默认隐藏，菜单提供退出。截图快捷键目前仅显示开发中提示，不是已完成截图功能。macOS 已加入双击 Ctrl 监听（CGEventTap，仅监听）与通过辅助功能 API 读取选区：无选区/读取失败静默，不回退剪贴板；双击判定有单元测试，Ctrl+C 等组合键会打断。13 项测试通过，Clippy 严格检查通过。**该取词路径尚未在真实应用中实机验证**：需要在“系统设置 → 隐私与安全性”授予辅助功能和输入监控权限，权限引导 UI 还没做；Electron/浏览器等应用的辅助功能支持因应用而异。Windows 端已写好双击 Ctrl（低级键盘钩子，钩子线程不阻塞输入）与 UI Automation 选区读取，并通过 `x86_64-pc-windows-msvc` 目标的 clippy 检查；**这只证明能编译，从未在 Windows 上运行过**，需要你的实机测试。为了能在 Mac 上交叉检查，TLS 改用系统原生实现（Windows 为 SChannel）。词典、截图/OCR、决策客户端接入 UI、真实模型调用尚待完成。不要把原型当完整产品。
+## 入口
 
-启动开发原型：
+- 双击 Ctrl：仅查询可读取的选区，无选区保持静默（不回退剪贴板）。
+- macOS ⌘⇧A：空白浮窗，不自动带入选区/剪贴板。
+- macOS ⌘⇧D：截图入口（目前只显示“开发中”）。
+- Windows 空白/截图组合键暂用 Alt+Shift+A / D，产品默认尚待确认。
+
+## 状态
+
+| 功能 | 状态 |
+| --- | --- |
+| 三类回答接口（OpenAI Chat / Responses、Anthropic）流式、取消 | 已实现；本地 HTTP 集成测试通过；**未对真实服务验证** |
+| 浮窗、设置、追问、复制、托盘、全局空白浮窗快捷键 | 已实现；macOS 启动冒烟通过；**视觉与交互未验收** |
+| 凭据存系统钥匙串，配置文件不含密钥 | 已实现 |
+| 离线词典（ECDICT，约 40 万词条） | 已实现并用真实数据测试：加载约 11ms，单次查询约 2µs；**未在 UI 中目测** |
+| macOS 双击 Ctrl + 辅助功能读取选区 | 已写好、单元测试覆盖双击判定；**从未在真实应用实机验证**；需授予辅助功能、输入监控权限，权限引导 UI 未做 |
+| Windows 双击 Ctrl（低级钩子）+ UI Automation 读取选区 | 已写好，通过 Windows 目标 clippy；**只证明能编译，从未运行过** |
+| 决策模型（Jev / Clef）客户端 | 网络层与响应校验已实现；**尚未接入 UI，也未对真实服务验证** |
+| 截图、OCR、多模态 | **未实现** |
+| 空白/截图快捷键冲突检测、权限引导、首次使用引导 | **未实现** |
+
+## 运行
 
 ```sh
 cargo run -p peek-app
 ```
 
-- 双击 Ctrl：仅查询可读取的选区，无选区保持静默。
-- macOS Command+Shift+A：空白浮窗，不自动带入选区/剪贴板。
-- macOS Command+Shift+D：截图入口。
-- Windows 空白/截图组合键当前代码使用 Alt+Shift+A / D 作为临时默认值，产品默认尚待确认。
+### 离线词典
+
+词库不随仓库提交（约 30 MB）。数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)（MIT）：
+
+```sh
+mkdir -p local-assets
+git clone --depth 1 https://github.com/skywind3000/ECDICT.git local-assets/ecdict
+cargo run --release -p peek-dict --bin build-dict -- local-assets/ecdict/ecdict.csv local-assets/ecdict.pkd
+```
+
+应用依次查找配置目录下的 `ecdict.pkd` 和 `local-assets/ecdict.pkd`，找不到则不显示词典卡片，其余功能不受影响。
 
 ## 开发验证
 
@@ -23,6 +49,7 @@ cargo run -p peek-app
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p peek-app --target x86_64-pc-windows-msvc -- -D warnings   # Windows 交叉检查
 ```
 
 ## 文档
@@ -30,6 +57,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 - [用户体验说明](USER_GUIDE.md)
 - [产品规划](PRODUCT_PLAN.md)
 
-不把编译通过等同于系统级功能可用。Windows 钩子、权限、多屏截图等需要 Windows 实机验证；macOS 同样需要权限与应用兼容性测试。
+编译通过不等于系统级功能可用。Windows 钩子、权限、多屏截图等需要 Windows 实机验证；macOS 同样需要权限与应用兼容性测试。
 
-不在仓库里存放 API key、私有查询或截图。
+仓库中不存放 API key、私有查询或截图。

@@ -1,0 +1,13 @@
+[package]
+name = "peek-dict"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+csv = "1"
+thiserror.workspace = true
+
+[[bin]]
+name = "build-dict"
+path = "src/bin/build_dict.rs"

@@ -24,6 +24,9 @@ struct Peek {
     receiver: Option<mpsc::Receiver<Event>>,
     cancel: Option<CancellationToken>,
     busy: bool,
+    dictionary: Option<peek_dict::Dict>,
+    dictionary_missing: bool,
+    dict_entry: Option<peek_dict::Entry>,
     desktop: Option<desktop::Desktop>,
     quit: bool,
     visible: bool,
@@ -91,10 +94,26 @@ impl Peek {
             receiver: None,
             cancel: None,
             busy: false,
+            dictionary: None,
+            dictionary_missing: false,
+            dict_entry: None,
             desktop,
             quit: false,
             visible: true,
         }
+    }
+    /// Single words/short tokens only; loads the dictionary file lazily on first use.
+    fn lookup_word(&mut self, text: &str) -> Option<peek_dict::Entry> {
+        if text.chars().count() > 40 || text.split_whitespace().count() != 1 {
+            return None;
+        }
+        if self.dictionary.is_none() && !self.dictionary_missing {
+            self.dictionary = store::dictionary_candidates()
+                .into_iter()
+                .find_map(|path| peek_dict::Dict::open(&path).ok());
+            self.dictionary_missing = self.dictionary.is_none();
+        }
+        self.dictionary.as_ref()?.lookup(text)
     }
     fn stop(&mut self) {
         if let Some(cancel) = self.cancel.take() {
@@ -109,9 +128,16 @@ impl Peek {
             self.followup.trim()
         } else {
             self.input.trim()
-        };
+        }
+        .to_owned();
+        let text = text.as_str();
         if text.is_empty() {
             return;
+        }
+        if !followup {
+            // Offline dictionary first: instant, and independent of any API key or network.
+            self.answer.clear();
+            self.dict_entry = self.lookup_word(text);
         }
         let key = match store::secret(&self.config.provider.credential_id) {
             Ok(k) => k,
@@ -248,6 +274,7 @@ impl eframe::App for Peek {
                     self.stop();
                     self.input.clear();
                     self.answer.clear();
+                    self.dict_entry = None;
                     self.followup.clear();
                     self.messages.clear();
                     self.settings = false;
@@ -260,6 +287,7 @@ impl eframe::App for Peek {
                     self.stop();
                     self.input = text;
                     self.answer.clear();
+                    self.dict_entry = None;
                     self.followup.clear();
                     self.messages.clear();
                     self.settings = false;
@@ -375,6 +403,26 @@ impl eframe::App for Peek {
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
+                        if let Some(entry) = &self.dict_entry {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.heading(&entry.word);
+                                if !entry.phonetic.is_empty() {
+                                    ui.label(format!("/{}/", entry.phonetic));
+                                }
+                                ui.weak("离线词典");
+                            });
+                            ui.add(egui::Label::new(&entry.translation).selectable(true).wrap());
+                            let forms = entry.forms();
+                            if !forms.is_empty() {
+                                let line: Vec<String> =
+                                    forms.iter().map(|(k, v)| format!("{k} {v}")).collect();
+                                ui.weak(line.join("  ·  "));
+                            }
+                            if let Some(lemma) = entry.lemma() {
+                                ui.weak(format!("原形：{lemma}"));
+                            }
+                            ui.separator();
+                        }
                         ui.add(egui::Label::new(&self.answer).selectable(true).wrap());
                     });
                 ui.separator();

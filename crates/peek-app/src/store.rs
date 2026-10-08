@@ -6,6 +6,17 @@ pub fn config_path() -> Result<PathBuf, String> {
         .map(|d| d.config_dir().join("config.json"))
         .ok_or_else(|| "Cannot locate configuration directory".into())
 }
+/// Where the offline dictionary may live: next to the config, then the dev build output.
+pub fn dictionary_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(config) = config_path()
+        && let Some(dir) = config.parent()
+    {
+        paths.push(dir.join("ecdict.pkd"));
+    }
+    paths.push(PathBuf::from("local-assets/ecdict.pkd"));
+    paths
+}
 pub fn load() -> Result<Config, String> {
     let path = config_path()?;
     if !path.exists() {
