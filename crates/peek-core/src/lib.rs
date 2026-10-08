@@ -217,6 +217,7 @@ pub struct Config {
     pub double_ctrl_ms: u64,
     pub hide_on_blur: bool,
     pub smart_mode: bool,
+    pub ocr_auto_query: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -239,6 +240,7 @@ impl Default for Config {
             double_ctrl_ms: 350,
             hide_on_blur: true,
             smart_mode: true,
+            ocr_auto_query: true,
         }
     }
 }

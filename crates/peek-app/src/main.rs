@@ -436,6 +436,11 @@ impl Peek {
             ui.weak("只发送当前查询文本。不可用时回退本地判断；图像决策尚未接入。");
         });
         ui.checkbox(&mut self.draft.smart_mode, "智能判断模式");
+        ui.checkbox(
+            &mut self.draft.ocr_auto_query,
+            "截图识字后自动查询（识别文字发送到模型）",
+        );
+        ui.weak("关闭自动查询后只本地识字，点击查询/图片按钮才调用外部服务。");
         ui.checkbox(&mut self.draft.hide_on_blur, "失焦隐藏（取消固定后生效）");
         ui.horizontal(|ui| {
             if ui.button("保存").clicked() {
@@ -604,7 +609,12 @@ impl eframe::App for Peek {
             match result {
                 Ok(text) if !text.trim().is_empty() => {
                     self.input = text;
-                    self.query(&ctx, false);
+                    if self.config.ocr_auto_query {
+                        self.query(&ctx, false);
+                    } else {
+                        self.status =
+                            "本地识字完成 · 可复制原文或手动查询，尚未发送内容到模型".into();
+                    }
                 }
                 Ok(_) => self.status = "未识别到文字，请重选区域".into(),
                 Err(e) => self.status = format!("OCR 失败：{e}"),
