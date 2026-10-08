@@ -29,6 +29,17 @@ impl Task {
             Self::Explain => "解释",
         }
     }
+    pub fn styled_instruction(self, target: &str, style: &str) -> String {
+        let mut prompt = self.instruction(target);
+        if self == Self::Translate {
+            prompt.push_str(match style {
+                "literal"=>"\nUse a faithful, close-to-source translation without adding interpretation.",
+                "technical"=>"\nUse precise technical-documentation terminology. Preserve APIs, commands, identifiers and code.",
+                _=>"\nUse natural, fluent phrasing while preserving the original meaning.",
+            });
+        }
+        prompt
+    }
     pub fn instruction(self, target: &str) -> String {
         let rule = match self {
             Self::Translate => {
@@ -206,6 +217,7 @@ impl Default for DecisionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub translation_style: String,
     pub theme: String,
     pub zoom: f32,
     pub onboarding_complete: bool,
@@ -229,6 +241,7 @@ impl Default for Config {
             "Alt"
         };
         Self {
+            translation_style: "natural".into(),
             theme: "system".into(),
             zoom: 1.0,
             onboarding_complete: false,
@@ -248,6 +261,12 @@ impl Default for Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if !matches!(
+            self.translation_style.as_str(),
+            "natural" | "literal" | "technical"
+        ) {
+            return Err("Invalid translation style");
+        }
         if !matches!(self.theme.as_str(), "system" | "light" | "dark")
             || !self.zoom.is_finite()
             || !(0.8..=1.5).contains(&self.zoom)

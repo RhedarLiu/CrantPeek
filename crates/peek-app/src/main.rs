@@ -230,10 +230,10 @@ impl Peek {
             }
             self.messages = vec![Message {
                 role: "system".into(),
-                content: self.task.instruction(peek_core::effective_target(
-                    &route.target,
-                    &self.target_override,
-                )),
+                content: self.task.styled_instruction(
+                    peek_core::effective_target(&route.target, &self.target_override),
+                    &self.config.translation_style,
+                ),
             }];
         }
         if followup && let Some(system) = self.messages.first_mut() {
@@ -243,10 +243,10 @@ impl Peek {
                 &self.config.chinese_target,
             )
             .target;
-            system.content = self.task.instruction(peek_core::effective_target(
-                &automatic,
-                &self.target_override,
-            ));
+            system.content = self.task.styled_instruction(
+                peek_core::effective_target(&automatic, &self.target_override),
+                &self.config.translation_style,
+            );
         }
         self.messages.push(Message {
             role: "user".into(),
@@ -298,6 +298,7 @@ impl Peek {
             self.target_override.clone()
         };
         let fallback_task = self.task;
+        let translation_style = self.config.translation_style.clone();
         self.route_note = if use_decision {
             "正在判断任务…".into()
         } else {
@@ -351,7 +352,7 @@ impl Peek {
                 if cancel.is_cancelled() {
                     return;
                 }
-                messages[0].content = task.instruction(&target);
+                messages[0].content = task.styled_instruction(&target, &translation_style);
                 if tx.send(Event::Route { task, note }).await.is_err() {
                     return;
                 }
@@ -947,12 +948,10 @@ impl eframe::App for Peek {
                             &self.config.chinese_target,
                         )
                         .target;
-                        system.content =
-                            task.instruction(if self.target_override.trim().is_empty() {
-                                &target
-                            } else {
-                                &self.target_override
-                            });
+                        system.content = task.styled_instruction(
+                            peek_core::effective_target(&target, &self.target_override),
+                            &self.config.translation_style,
+                        );
                     }
                 }
                 Event::Text(text) => {
