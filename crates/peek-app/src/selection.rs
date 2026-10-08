@@ -65,6 +65,7 @@ pub fn read() -> Option<String> {
 pub struct DoubleCtrl {
     down: bool,
     interrupted: bool,
+    press_started: Option<std::time::Instant>,
     last_release: Option<std::time::Instant>,
 }
 impl DoubleCtrl {
@@ -83,10 +84,15 @@ impl DoubleCtrl {
         }
         self.down = down;
         if down {
+            self.press_started = Some(now);
             self.interrupted = false;
             return false;
         }
-        if self.interrupted {
+        let held_too_long = self
+            .press_started
+            .take()
+            .is_none_or(|start| now.saturating_duration_since(start) > interval);
+        if self.interrupted || held_too_long {
             self.last_release = None;
             return false;
         }
@@ -271,6 +277,18 @@ pub fn listen(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_hold_and_slow_double_press_do_not_trigger() {
+        let mut d = DoubleCtrl::default();
+        let t = std::time::Instant::now();
+        let w = std::time::Duration::from_millis(350);
+        assert!(!d.transition(true, t, w));
+        assert!(!d.transition(false, t + w * 2, w));
+        assert!(!d.transition(true, t + w * 2 + w / 4, w));
+        assert!(!d.transition(false, t + w * 2 + w / 4, w));
+        assert!(!d.transition(true, t + w * 4, w));
+        assert!(!d.transition(false, t + w * 4, w));
+    }
     #[test]
     fn two_complete_taps_only() {
         let mut d = DoubleCtrl::default();
