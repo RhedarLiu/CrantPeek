@@ -505,6 +505,10 @@ impl Peek {
         ui.text_edit_singleline(&mut self.draft.provider.base_url);
         ui.label("Model");
         ui.text_edit_singleline(&mut self.draft.provider.model);
+        ui.add(
+            egui::Slider::new(&mut self.draft.provider.max_output_tokens, 128..=16384)
+                .text("回答 token 上限"),
+        );
         ui.checkbox(
             &mut self.draft.provider.vision,
             "该回答模型支持图片输入（手动图片解读时上传框选区域）",

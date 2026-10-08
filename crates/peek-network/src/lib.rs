@@ -97,9 +97,11 @@ pub fn multimodal_body(
 pub fn request_body(provider: &Provider, messages: &[Message]) -> Value {
     match provider.protocol {
         Protocol::ChatCompletions => {
-            json!({"model": provider.model, "messages": messages, "stream": true})
+            json!({"model": provider.model, "messages": messages, "max_tokens":provider.max_output_tokens, "stream": true})
         }
-        Protocol::Responses => json!({"model": provider.model, "input": messages, "stream": true}),
+        Protocol::Responses => {
+            json!({"model": provider.model, "input": messages, "max_output_tokens":provider.max_output_tokens, "stream": true})
+        }
         Protocol::Anthropic => {
             let system = messages
                 .iter()
@@ -108,7 +110,7 @@ pub fn request_body(provider: &Provider, messages: &[Message]) -> Value {
                 .collect::<Vec<_>>()
                 .join("\n");
             let input: Vec<_> = messages.iter().filter(|m| m.role != "system").collect();
-            json!({"model": provider.model, "system": system, "messages": input, "max_tokens": 2048, "stream": true})
+            json!({"model": provider.model, "system": system, "messages": input, "max_tokens": provider.max_output_tokens, "stream": true})
         }
     }
 }
@@ -496,6 +498,27 @@ mod tests {
             assert_eq!(body[field][0]["content"][1]["type"], kind);
             assert_eq!(body[field][0]["content"][0]["text"], "describe");
             assert_eq!(messages[0].content, "describe");
+        }
+    }
+    #[test]
+    fn all_protocols_send_configured_output_limit() {
+        for protocol in [
+            Protocol::ChatCompletions,
+            Protocol::Responses,
+            Protocol::Anthropic,
+        ] {
+            let provider = Provider {
+                protocol,
+                max_output_tokens: 512,
+                ..Provider::default()
+            };
+            let body = request_body(&provider, &[]);
+            let field = if protocol == Protocol::Responses {
+                "max_output_tokens"
+            } else {
+                "max_tokens"
+            };
+            assert_eq!(body[field], 512);
         }
     }
     #[test]

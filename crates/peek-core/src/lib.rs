@@ -163,6 +163,7 @@ pub struct Provider {
     /// Reference only. The secret itself must not be serialized into config.
     pub credential_id: String,
     pub vision: bool,
+    pub max_output_tokens: u32,
 }
 impl Default for Provider {
     fn default() -> Self {
@@ -173,6 +174,7 @@ impl Default for Provider {
             model: String::new(),
             credential_id: "answer-default".into(),
             vision: false,
+            max_output_tokens: 2048,
         }
     }
 }
@@ -263,6 +265,9 @@ impl Config {
         }
         if self.target_language.trim().is_empty() || self.chinese_target.trim().is_empty() {
             return Err("Target language cannot be empty");
+        }
+        if !(128..=16384).contains(&self.provider.max_output_tokens) {
+            return Err("Output token limit must be 128–16384");
         }
         validate_endpoint(&self.provider.base_url, true)?;
         if self.decision.enabled {
