@@ -39,10 +39,19 @@ pub fn recognize(image: &image::RgbaImage) -> Result<String, String> {
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::DataWriter;
-    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
     unsafe {
-        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        RoInitialize(RO_INIT_MULTITHREADED).map_err(|e| e.to_string())?;
     }
+    struct Apartment;
+    impl Drop for Apartment {
+        fn drop(&mut self) {
+            unsafe {
+                RoUninitialize();
+            }
+        }
+    }
+    let _apartment = Apartment;
     let mut bytes = image.as_raw().clone();
     for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);

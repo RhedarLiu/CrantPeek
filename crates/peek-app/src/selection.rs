@@ -174,14 +174,15 @@ mod win {
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
     };
     use windows::Win32::UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG,
-        SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
-        WM_SYSKEYUP,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN,
+        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
 
     struct Shared {
@@ -194,8 +195,16 @@ mod win {
 
     pub fn read() -> Option<String> {
         unsafe {
-            // Each worker thread initialises COM once; failure of a repeat call is harmless.
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            CoInitializeEx(None, COINIT_MULTITHREADED).ok().ok()?;
+            struct ComGuard;
+            impl Drop for ComGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        CoUninitialize();
+                    }
+                }
+            }
+            let _com = ComGuard;
             let automation: IUIAutomation =
                 CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
             let element = automation.GetFocusedElement().ok()?;
@@ -252,14 +261,15 @@ mod win {
             ctx,
         }));
         std::thread::spawn(|| unsafe {
-            if SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0).is_err() {
+            let Ok(handle) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) else {
                 return;
-            }
+            };
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            let _ = UnhookWindowsHookEx(handle);
         });
     }
 }
