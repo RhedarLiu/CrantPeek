@@ -46,6 +46,64 @@ async fn streams_from_local_http_service() {
 }
 
 #[tokio::test]
+async fn responses_and_anthropic_complete_over_http() {
+    use peek_core::Protocol;
+    for (protocol, path, body) in [
+        (
+            Protocol::Responses,
+            "/v1/responses",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.completed\"}\n\n",
+        ),
+        (
+            Protocol::Anthropic,
+            "/v1/messages",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 8192];
+            let n = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..n]).to_lowercase();
+            assert!(request.starts_with(&format!("post {path}")));
+            if protocol == Protocol::Anthropic {
+                assert!(request.contains("x-api-key: test-secret"));
+                assert!(request.contains("anthropic-version: 2023-06-01"));
+                assert!(!request.contains("authorization:"));
+            } else {
+                assert!(request.contains("authorization: bearer test-secret"));
+            }
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        });
+        let provider = Provider {
+            protocol,
+            base_url: format!("http://{address}/v1"),
+            model: "test".into(),
+            ..Provider::default()
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        Client::default()
+            .stream(
+                &provider,
+                "test-secret",
+                &[Message {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                tx,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rx.recv().await, Some(Event::Text("hello".into())));
+        assert_eq!(rx.recv().await, Some(Event::Done));
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn errors_and_redirects_do_not_look_like_success() {
     for (status, extra, body, expected) in [
         ("429 Too Many Requests", "", "", "HTTP 429"),
