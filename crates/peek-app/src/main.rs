@@ -794,8 +794,8 @@ impl eframe::App for Peek {
                     egui::Area::new(egui::Id::new("snip-area"))
                         .fixed_pos(egui::Pos2::ZERO)
                         .show(ctx, |ui| {
-                            let (rect, response) =
-                                ui.allocate_exact_size(size, egui::Sense::drag());
+                            let (rect, response) = ui
+                                .allocate_exact_size(size / ctx.zoom_factor(), egui::Sense::drag());
                             ui.painter().image(
                                 texture,
                                 rect,
@@ -816,7 +816,11 @@ impl eframe::App for Peek {
                                     egui::StrokeKind::Inside,
                                 );
                                 if response.drag_stopped() {
-                                    selection = Some(r.translate(-rect.min.to_vec2()));
+                                    selection = Some(capture::selection_to_logical(
+                                        r.translate(-rect.min.to_vec2()),
+                                        rect.size(),
+                                        size,
+                                    ));
                                 }
                             }
                             ui.painter().text(

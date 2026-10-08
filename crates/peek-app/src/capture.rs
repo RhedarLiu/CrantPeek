@@ -80,6 +80,19 @@ pub fn capture() -> Result<Screen, String> {
         scale: monitor.scale_factor().map_err(|e| e.to_string())?,
     })
 }
+/// Convert coordinates inside a rendered screenshot back to display logical coordinates.
+/// Accounts for egui zoom independently of OS DPI, and keeps both axes proportional.
+pub fn selection_to_logical(
+    rect: egui::Rect,
+    rendered: egui::Vec2,
+    logical: egui::Vec2,
+) -> egui::Rect {
+    let ratio = logical / rendered;
+    egui::Rect::from_min_max(
+        egui::pos2(rect.min.x * ratio.x, rect.min.y * ratio.y),
+        egui::pos2(rect.max.x * ratio.x, rect.max.y * ratio.y),
+    )
+}
 /// Convert logical UI coordinates into clamped image pixels; reject tiny selections.
 pub fn crop(screen: &Screen, rect: egui::Rect) -> Option<image::RgbaImage> {
     if !screen.scale.is_finite()
@@ -125,6 +138,18 @@ pub fn prepare_region(image: image::RgbaImage) -> image::RgbaImage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selection_respects_interface_zoom_before_pixel_crop() {
+        let logical = egui::vec2(1000.0, 500.0);
+        let rendered = logical / 1.5;
+        let rect = super::selection_to_logical(
+            egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(300.0, 150.0)),
+            rendered,
+            logical,
+        );
+        assert!((rect.min.x - 150.0).abs() < 0.001);
+        assert!((rect.max.y - 225.0).abs() < 0.001);
+    }
     #[test]
     fn popup_stays_on_negative_coordinate_monitor() {
         let bounds =
