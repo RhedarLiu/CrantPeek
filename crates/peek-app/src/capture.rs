@@ -35,18 +35,21 @@ pub fn popup_position(size: egui::Vec2) -> Option<egui::Pos2> {
     let origin = egui::pos2(monitor.x().ok()? as f32, monitor.y().ok()? as f32);
     let cursor = egui::pos2(x as f32, y as f32);
     // macOS global screen coordinates are points; Windows cursor coordinates are pixels.
-    let divisor = if cfg!(windows) { scale } else { 1.0 };
+    let divisor = coordinate_divisor(cfg!(windows), scale);
     let origin = origin / divisor;
     let cursor = cursor / divisor;
     let extent = egui::vec2(
-        monitor.width().ok()? as f32 / scale,
-        monitor.height().ok()? as f32 / scale,
+        monitor.width().ok()? as f32 / divisor,
+        monitor.height().ok()? as f32 / divisor,
     );
     Some(clamp_popup(
         cursor + egui::vec2(14.0, 14.0),
         egui::Rect::from_min_size(origin, extent),
         size,
     ))
+}
+fn coordinate_divisor(physical_coordinates: bool, scale: f32) -> f32 {
+    if physical_coordinates { scale } else { 1.0 }
 }
 fn clamp_popup(position: egui::Pos2, bounds: egui::Rect, size: egui::Vec2) -> egui::Pos2 {
     let margin = 8.0;
@@ -138,6 +141,15 @@ pub fn prepare_region(image: image::RgbaImage) -> image::RgbaImage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retina_logical_bounds_are_not_scaled_twice() {
+        let extent = egui::vec2(1440.0, 900.0);
+        assert_eq!(extent / super::coordinate_divisor(false, 2.0), extent);
+        assert_eq!(
+            egui::vec2(2880.0, 1800.0) / super::coordinate_divisor(true, 2.0),
+            extent
+        );
+    }
     #[test]
     fn selection_respects_interface_zoom_before_pixel_crop() {
         let logical = egui::vec2(1000.0, 500.0);
