@@ -3102,6 +3102,7 @@ dependencies = [
  "peek-dict",
  "peek-network",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tray-icon",

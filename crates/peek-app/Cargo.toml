@@ -11,6 +11,7 @@ peek-dict = { path = "../peek-dict" }
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
 serde_json.workspace = true
 directories = "6"
+tempfile = "3"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 tokio-util = "0.7"
