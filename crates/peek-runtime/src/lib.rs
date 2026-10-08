@@ -10,6 +10,7 @@
 //! migration; this crate is the seam between them and whichever UI is in use.
 
 pub mod action;
+pub mod capture;
 pub mod i18n;
 pub mod instance;
 pub mod ocr;

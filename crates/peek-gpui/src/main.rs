@@ -17,6 +17,7 @@
 
 mod fonts;
 mod native_window;
+mod snip;
 
 use std::time::Duration;
 
@@ -175,6 +176,10 @@ impl Peek {
         // platform thread boundary.
         let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
         let selftest_wake = action_tx.clone();
+        let snip_test_wake = action_tx.clone();
+        // Kept for the screenshot overlay, which reports recognised text back
+        // through the same channel.
+        let snip_tx = action_tx.clone();
         peek_runtime::selection::listen(
             double_ctrl_ms,
             action_tx,
@@ -182,6 +187,7 @@ impl Peek {
             std::sync::Arc::new(|| {}),
         );
         let panel_handle = window.window_handle();
+        let snip_selftest = std::env::var("PEEK_SNIP_SELFTEST").is_ok();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
@@ -207,8 +213,55 @@ impl Peek {
                             cx.update(quit_now);
                             return;
                         }
-                        // Screenshot, settings and pause are not ported yet.
-                        Action::Screenshot | Action::Settings | Action::TogglePause => {}
+                        Action::Screenshot => {
+                            // The overlay captures on release, so this only
+                            // opens the selection window.
+                            let tx = snip_tx.clone();
+                            let opened = cx.update(|app| snip::open(app, tx));
+                            match opened {
+                                Some((handle, bounds)) => {
+                                    println!(
+                                        "[snip] overlay open: origin=({:.0},{:.0}) size={:.0}x{:.0}",
+                                        bounds.min[0],
+                                        bounds.min[1],
+                                        bounds.width(),
+                                        bounds.height()
+                                    );
+                                    if snip_selftest {
+                                        // No mouse in a self test, so close it
+                                        // on a timer instead of leaving a
+                                        // full-screen overlay up.
+                                        cx.update(|app| {
+                                            app.spawn(async move |cx| {
+                                                cx.background_executor()
+                                                    .timer(Duration::from_millis(1200))
+                                                    .await;
+                                                let closed = cx
+                                                    .update_window(handle, |_, window, _| {
+                                                        window.remove_window()
+                                                    })
+                                                    .is_ok();
+                                                println!("[snip] overlay closed: {closed}");
+                                                cx.update(quit_now);
+                                            })
+                                        })
+                                        .detach();
+                                    }
+                                }
+                                None => println!("[snip] overlay NOT opened (no monitor bounds)"),
+                            }
+                        }
+                        Action::Recognized(text) => {
+                            let _ = cx
+                                .update_window(panel_handle, |_, window, _| show_panel(window));
+                            this.update(cx, |peek, cx| {
+                                peek.pending_input = Some(text.clone());
+                                peek.begin_turn(text, cx);
+                            })
+                            .ok();
+                        }
+                        // Settings and pause are not ported yet.
+                        Action::Settings | Action::TogglePause => {}
                     }
                 }
             }
@@ -219,6 +272,25 @@ impl Peek {
         // (config load → credential lookup → localised status → view notify)
         // is exercised without a click. It stops at the network call when no
         // credential is configured, which is reported as-is.
+        // `PEEK_SNIP_SELFTEST` drives the overlay through the same action
+        // channel the hotkey uses. It takes no screenshot, so it needs no
+        // permission, and a watchdog guarantees the process can never leave a
+        // full-screen window behind.
+        if std::env::var("PEEK_SNIP_SELFTEST").is_ok() {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(10));
+                eprintln!("[snip] watchdog fired — exiting");
+                std::process::exit(0);
+            });
+            for line in peek_runtime::capture::monitor_report() {
+                eprintln!("[capture] {line}");
+            }
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                let _ = snip_test_wake.send(Action::Screenshot);
+            });
+        }
+
         if std::env::var("PEEK_SELFTEST").is_ok() {
             // Feed the hook's own channel, so the selection path (show + query)
             // is exercised without synthesising a real double-tap Ctrl.
@@ -924,6 +996,18 @@ fn main() -> anyhow::Result<()> {
 
     if let Ok(path) = std::env::var("PEEK_RENDER") {
         return render_preview(&path);
+    }
+
+    // Monitor diagnostic: creates and shows no window.
+    if std::env::var("PEEK_MONITOR_REPORT").is_ok() {
+        println!(
+            "cursor monitor bounds: {:?}",
+            peek_runtime::capture::monitor_bounds()
+        );
+        for line in peek_runtime::capture::monitor_report() {
+            println!("{line}");
+        }
+        return Ok(());
     }
 
     gpui_kit::application().run(move |cx| {

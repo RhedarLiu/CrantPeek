@@ -1,5 +1,4 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-mod capture;
 mod design;
 mod desktop;
 
@@ -8,7 +7,7 @@ mod desktop;
 use eframe::egui;
 use peek_core::{Config, Message, Protocol, Task, local_route};
 use peek_network::{Client, Event};
-pub(crate) use peek_runtime::{i18n, instance, ocr, permissions, selection, store};
+pub(crate) use peek_runtime::{capture, i18n, instance, ocr, permissions, selection, store};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -878,6 +877,9 @@ impl eframe::App for Peek {
                 continue;
             }
             match action {
+                // Produced by the GPUI overlay; the egui shell has its own
+                // capture path and does not consume it.
+                desktop::Action::Recognized(_) => {}
                 desktop::Action::TogglePause => {
                     self.paused = !self.paused;
                     if self.paused {
@@ -916,8 +918,10 @@ impl eframe::App for Peek {
                     let size = ctx
                         .input(|i| i.viewport().inner_rect.map(|r| r.size()))
                         .unwrap_or(egui::vec2(480.0, 560.0));
-                    if let Some(position) = capture::popup_position(size) {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                    if let Some(point) = capture::popup_position([size.x, size.y]) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                            point[0], point[1],
+                        )));
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -942,8 +946,10 @@ impl eframe::App for Peek {
                     let size = ctx
                         .input(|i| i.viewport().inner_rect.map(|r| r.size()))
                         .unwrap_or(egui::vec2(480.0, 560.0));
-                    if let Some(position) = capture::popup_position(size) {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                    if let Some(point) = capture::popup_position([size.x, size.y]) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                            point[0], point[1],
+                        )));
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1067,10 +1073,14 @@ impl eframe::App for Peek {
                                     egui::StrokeKind::Inside,
                                 );
                                 if response.drag_stopped() {
+                                    let dragged = r.translate(-rect.min.to_vec2());
                                     selection = Some(capture::selection_to_logical(
-                                        r.translate(-rect.min.to_vec2()),
-                                        rect.size(),
-                                        size,
+                                        capture::Rect::from_min_max(
+                                            [dragged.min.x, dragged.min.y],
+                                            [dragged.max.x, dragged.max.y],
+                                        ),
+                                        [rect.size().x, rect.size().y],
+                                        [size.x, size.y],
                                     ));
                                 }
                             }

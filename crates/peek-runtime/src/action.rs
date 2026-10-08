@@ -11,6 +11,8 @@ pub enum Action {
     Selection(String),
     /// Start the screenshot translation flow.
     Screenshot,
+    /// Text recognised from a screenshot region, ready to be queried.
+    Recognized(String),
     Settings,
     TogglePause,
     Quit,

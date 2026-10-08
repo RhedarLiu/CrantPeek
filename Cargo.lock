@@ -6335,6 +6335,7 @@ dependencies = [
  "tokio",
  "unic-langid",
  "windows 0.62.2",
+ "xcap",
 ]
 
 [[package]]
