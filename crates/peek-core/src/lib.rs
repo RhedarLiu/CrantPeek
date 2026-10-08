@@ -314,6 +314,14 @@ pub fn discard_pending_turn(messages: &mut Vec<Message>) {
     }
 }
 
+pub fn effective_target<'a>(automatic: &'a str, explicit: &'a str) -> &'a str {
+    if explicit.trim().is_empty() {
+        automatic
+    } else {
+        explicit.trim()
+    }
+}
+
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 /// Keep system + initial query and recent complete pairs. Never split a turn pair.
@@ -337,6 +345,11 @@ pub fn bound_history(messages: &mut Vec<Message>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_target_overrides_automatic_and_whitespace_does_not() {
+        assert_eq!(super::effective_target("Chinese", " Japanese "), "Japanese");
+        assert_eq!(super::effective_target("English", " \n "), "English");
+    }
     #[test]
     fn conversation_history_is_bounded_and_initial_query_kept() {
         use super::*;

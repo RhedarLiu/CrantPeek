@@ -230,14 +230,23 @@ impl Peek {
             }
             self.messages = vec![Message {
                 role: "system".into(),
-                content: self
-                    .task
-                    .instruction(if self.target_override.trim().is_empty() {
-                        &route.target
-                    } else {
-                        &self.target_override
-                    }),
+                content: self.task.instruction(peek_core::effective_target(
+                    &route.target,
+                    &self.target_override,
+                )),
             }];
+        }
+        if followup && let Some(system) = self.messages.first_mut() {
+            let automatic = local_route(
+                &self.input,
+                &self.config.target_language,
+                &self.config.chinese_target,
+            )
+            .target;
+            system.content = self.task.instruction(peek_core::effective_target(
+                &automatic,
+                &self.target_override,
+            ));
         }
         self.messages.push(Message {
             role: "user".into(),
