@@ -52,6 +52,7 @@ struct Peek {
     quit: bool,
     paused: bool,
     visible: bool,
+    focus_grace_until: std::time::Instant,
     initial_hide: bool,
     screenshot_image: Option<peek_network::ImageInput>,
     send_image: bool,
@@ -143,6 +144,7 @@ impl Peek {
             quit: false,
             paused: false,
             visible: true,
+            focus_grace_until: std::time::Instant::now() + std::time::Duration::from_millis(350),
             screenshot_image: None,
             send_image: false,
             decide_image: false,
@@ -675,6 +677,8 @@ impl eframe::App for Peek {
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
+                    self.focus_grace_until =
+                        std::time::Instant::now() + std::time::Duration::from_millis(350);
                     let size = ctx
                         .input(|i| i.viewport().inner_rect.map(|r| r.size()))
                         .unwrap_or(egui::vec2(480.0, 560.0));
@@ -698,6 +702,8 @@ impl eframe::App for Peek {
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
+                    self.focus_grace_until =
+                        std::time::Instant::now() + std::time::Duration::from_millis(350);
                     let size = ctx
                         .input(|i| i.viewport().inner_rect.map(|r| r.size()))
                         .unwrap_or(egui::vec2(480.0, 560.0));
@@ -713,6 +719,8 @@ impl eframe::App for Peek {
                     self.draft = self.config.clone();
                     self.settings = true;
                     self.visible = true;
+                    self.focus_grace_until =
+                        std::time::Instant::now() + std::time::Duration::from_millis(350);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
@@ -758,6 +766,8 @@ impl eframe::App for Peek {
         if let Some(result) = self.ocr_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.ocr_rx = None;
             self.visible = true;
+            self.focus_grace_until =
+                std::time::Instant::now() + std::time::Duration::from_millis(350);
             self.settings = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -868,6 +878,8 @@ impl eframe::App for Peek {
                     self.manual_task = false;
                     self.settings = false;
                     self.visible = true;
+                    self.focus_grace_until =
+                        std::time::Instant::now() + std::time::Duration::from_millis(350);
                     self.status = "本地识字中…可取消".into();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -937,6 +949,7 @@ impl eframe::App for Peek {
         }
         if self.desktop.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.stop();
+            self.visible = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         if self.desktop.is_some()
@@ -944,10 +957,18 @@ impl eframe::App for Peek {
             && !self.pinned
             && self.config.hide_on_blur
             && !self.settings
+            && std::time::Instant::now() >= self.focus_grace_until
             && ctx.input(|i| i.viewport().focused == Some(false))
         {
             self.stop();
+            self.visible = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        if self.visible && std::time::Instant::now() < self.focus_grace_until {
+            ctx.request_repaint_after(
+                self.focus_grace_until
+                    .saturating_duration_since(std::time::Instant::now()),
+            );
         }
         egui::CentralPanel::default().show(root, |ui| {
             ui.horizontal(|ui| {
