@@ -252,16 +252,9 @@ impl Config {
         if self.target_language.trim().is_empty() || self.chinese_target.trim().is_empty() {
             return Err("Target language cannot be empty");
         }
-        if !(self.provider.base_url.starts_with("https://")
-            || self.provider.base_url.starts_with("http://localhost:")
-            || self.provider.base_url.starts_with("http://127.0.0.1:"))
-        {
-            return Err("Use HTTPS, or HTTP on loopback only");
-        }
+        validate_endpoint(&self.provider.base_url, true)?;
         if self.decision.enabled {
-            if !self.decision.endpoint.starts_with("https://") {
-                return Err("Decision endpoint must use HTTPS");
-            }
+            validate_endpoint(&self.decision.endpoint, true)?;
             if self.decision.model.trim().is_empty() {
                 return Err("Decision model cannot be empty");
             }
@@ -276,6 +269,24 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Return a parsed endpoint only after transport and credential boundaries are checked.
+pub fn validate_endpoint(value: &str, allow_loopback: bool) -> Result<url::Url, &'static str> {
+    let url = url::Url::parse(value).map_err(|_| "Invalid endpoint URL")?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err("Endpoint cannot contain credentials or fragments");
+    }
+    let host = url.host().ok_or("Endpoint must have a hostname")?;
+    let loopback = match host {
+        url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    };
+    if url.scheme() != "https" && !(url.scheme() == "http" && allow_loopback && loopback) {
+        return Err("Use HTTPS, or HTTP on loopback only");
+    }
+    Ok(url)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +304,27 @@ pub fn discard_pending_turn(messages: &mut Vec<Message>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn endpoints_reject_credentials_and_plaintext_remote_hosts() {
+        for value in [
+            "https://",
+            "http://example.com:80",
+            "https://user:secret@example.com",
+            "https://example.com/#key",
+            "file:///tmp/api",
+            "http://localhost.evil:80",
+        ] {
+            assert!(super::validate_endpoint(value, true).is_err(), "{value}");
+        }
+        for value in [
+            "https://api.example.com/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(super::validate_endpoint(value, true).is_ok(), "{value}");
+        }
+    }
     #[test]
     fn unfinished_turn_is_removed_but_completed_history_stays() {
         use super::*;

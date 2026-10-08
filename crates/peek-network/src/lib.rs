@@ -218,6 +218,8 @@ impl Client {
         tx: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(), Error> {
+        peek_core::validate_endpoint(&provider.base_url, true)
+            .map_err(|e| Error::Invalid(e.into()))?;
         let suffix = match provider.protocol {
             Protocol::ChatCompletions => "chat/completions",
             Protocol::Responses => "responses",
@@ -287,6 +289,7 @@ impl Client {
         body: Value,
         cancel: CancellationToken,
     ) -> Result<Decision, Error> {
+        peek_core::validate_endpoint(endpoint, true).map_err(|e| Error::Invalid(e.into()))?;
         let response = tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), r = self.http.post(endpoint).bearer_auth(key).json(&body).send() => r? };
         if !response.status().is_success() {
             return Err(Error::Http(response.status().as_u16()));
