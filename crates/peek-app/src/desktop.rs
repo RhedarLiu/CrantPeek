@@ -7,15 +7,8 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 
-#[derive(Debug)]
-pub enum Action {
-    Blank,
-    Selection(String),
-    Screenshot,
-    Settings,
-    TogglePause,
-    Quit,
-}
+// The event type is shared with the GPUI shell.
+pub use peek_runtime::action::Action;
 pub struct Desktop {
     _manager: GlobalHotKeyManager,
     _tray: TrayIcon,
@@ -67,7 +60,11 @@ impl Desktop {
             .build()
             .map_err(|e| e.to_string())?;
         let (tx, rx) = mpsc::channel();
-        crate::selection::listen(config.double_ctrl_ms, tx.clone(), ctx.clone());
+        // The listener is toolkit-agnostic now: it signals through `wake`
+        // instead of holding an egui context.
+        let wake_ctx = ctx.clone();
+        let wake: crate::selection::Wake = std::sync::Arc::new(move || wake_ctx.request_repaint());
+        crate::selection::listen(config.double_ctrl_ms, tx.clone(), wake);
         let hot_tx = tx.clone();
         let hot_ctx = ctx.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {

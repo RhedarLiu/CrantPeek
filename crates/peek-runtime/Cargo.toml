@@ -15,6 +15,26 @@ directories = "6"
 tempfile = "3"
 fs2 = "0.4"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.23.2"
+core-foundation = "0.9.4"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-vision = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+    "Media_Ocr", "Graphics_Imaging", "Storage_Streams", "Foundation", "Globalization",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

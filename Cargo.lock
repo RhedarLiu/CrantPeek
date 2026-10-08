@@ -6316,10 +6316,16 @@ dependencies = [
 name = "peek-runtime"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.9.4",
+ "core-graphics 0.23.2",
  "directories",
  "fluent-bundle",
  "fs2",
+ "image",
  "keyring",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-vision",
  "peek-core",
  "peek-network",
  "serde_json",
@@ -6327,6 +6333,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unic-langid",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -1,6 +1,5 @@
 //! OCR a deliberately blank white image without capturing the user's screen.
-#[path = "../src/ocr.rs"]
-mod ocr;
+use peek_runtime::ocr;
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let image = if let Some(path) = args.first() {

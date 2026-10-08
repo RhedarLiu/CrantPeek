@@ -60,6 +60,10 @@ pub fn read() -> Option<String> {
     None
 }
 
+/// Called after an action is queued so the host UI can wake itself. Pass a
+/// no-op when the host polls the channel on a timer instead.
+pub type Wake = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+
 /// Fires only after two standalone Ctrl press/release cycles; shortcuts interrupt it.
 #[derive(Default)]
 pub struct DoubleCtrl {
@@ -105,11 +109,7 @@ impl DoubleCtrl {
 }
 
 #[cfg(target_os = "macos")]
-pub fn listen(
-    interval: u64,
-    tx: std::sync::mpsc::Sender<crate::desktop::Action>,
-    ctx: eframe::egui::Context,
-) {
+pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>, wake: Wake) {
     std::thread::spawn(move || {
         use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
         use core_graphics::event::{
@@ -144,11 +144,11 @@ pub fn listen(
                 ) {
                     // Never block the event-tap callback on Accessibility IPC.
                     let tx = tx.clone();
-                    let ctx = ctx.clone();
+                    let wake = wake.clone();
                     std::thread::spawn(move || {
                         if let Some(text) = read() {
-                            let _ = tx.send(crate::desktop::Action::Selection(text));
-                            ctx.request_repaint();
+                            let _ = tx.send(crate::action::Action::Selection(text));
+                            wake();
                         }
                     });
                 }
@@ -188,8 +188,8 @@ mod win {
     struct Shared {
         state: DoubleCtrl,
         interval: std::time::Duration,
-        tx: Sender<crate::desktop::Action>,
-        ctx: eframe::egui::Context,
+        tx: Sender<crate::action::Action>,
+        wake: Wake,
     }
     static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
 
@@ -238,12 +238,12 @@ mod win {
                         .transition(down, std::time::Instant::now(), interval)
                     {
                         let tx = s.tx.clone();
-                        let ctx = s.ctx.clone();
+                        let wake = s.wake.clone();
                         // Read off the hook thread: UI Automation must never block input.
                         std::thread::spawn(move || {
                             if let Some(text) = read() {
-                                let _ = tx.send(crate::desktop::Action::Selection(text));
-                                ctx.request_repaint();
+                                let _ = tx.send(crate::action::Action::Selection(text));
+                                wake();
                             }
                         });
                     }
@@ -253,12 +253,12 @@ mod win {
         unsafe { CallNextHookEx(None::<HHOOK>, code, wparam, lparam) }
     }
 
-    pub fn listen(interval: u64, tx: Sender<crate::desktop::Action>, ctx: eframe::egui::Context) {
+    pub fn listen(interval: u64, tx: Sender<crate::action::Action>, wake: Wake) {
         let _ = SHARED.set(Mutex::new(Shared {
             state: DoubleCtrl::default(),
             interval: std::time::Duration::from_millis(interval),
             tx,
-            ctx,
+            wake,
         }));
         std::thread::spawn(|| unsafe {
             let Ok(handle) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) else {
@@ -277,12 +277,7 @@ mod win {
 pub use win::listen;
 
 #[cfg(not(any(target_os = "macos", windows)))]
-pub fn listen(
-    _interval: u64,
-    _tx: std::sync::mpsc::Sender<crate::desktop::Action>,
-    _ctx: eframe::egui::Context,
-) {
-}
+pub fn listen(_interval: u64, _tx: std::sync::mpsc::Sender<crate::action::Action>, _wake: Wake) {}
 
 #[cfg(test)]
 mod tests {
