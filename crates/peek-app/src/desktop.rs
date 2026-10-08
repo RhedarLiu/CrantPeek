@@ -13,6 +13,7 @@ pub enum Action {
     Selection(String),
     Screenshot,
     Settings,
+    TogglePause,
     Quit,
 }
 pub struct Desktop {
@@ -37,8 +38,9 @@ impl Desktop {
         let open = MenuItem::new("打开空白 Peek", true, None);
         let snip = MenuItem::new("截图", true, None);
         let settings = MenuItem::new("设置", true, None);
+        let pause = MenuItem::new("暂停 / 恢复快捷入口", true, None);
         let quit = MenuItem::new("退出", true, None);
-        menu.append_items(&[&open, &snip, &settings, &quit])
+        menu.append_items(&[&open, &snip, &settings, &pause, &quit])
             .map_err(|e| e.to_string())?;
         let mut pixels = vec![0_u8; 16 * 16 * 4];
         for y in 2..14 {
@@ -77,6 +79,7 @@ impl Desktop {
         let open = open.id().clone();
         let snip = snip.id().clone();
         let settings = settings.id().clone();
+        let pause = pause.id().clone();
         let quit = quit.id().clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             let action = if event.id == open {
@@ -85,6 +88,8 @@ impl Desktop {
                 Some(Action::Screenshot)
             } else if event.id == settings {
                 Some(Action::Settings)
+            } else if event.id == pause {
+                Some(Action::TogglePause)
             } else if event.id == quit {
                 Some(Action::Quit)
             } else {

@@ -46,6 +46,7 @@ struct Peek {
     dict_entry: Option<peek_dict::Entry>,
     desktop: Option<desktop::Desktop>,
     quit: bool,
+    paused: bool,
     visible: bool,
     initial_hide: bool,
     screenshot_image: Option<peek_network::ImageInput>,
@@ -132,6 +133,7 @@ impl Peek {
             dict_entry: None,
             desktop,
             quit: false,
+            paused: false,
             visible: true,
             screenshot_image: None,
             send_image: false,
@@ -519,7 +521,31 @@ impl eframe::App for Peek {
             .map(|d| d.events.try_iter().collect())
             .unwrap_or_default();
         for action in actions {
+            if self.paused
+                && matches!(
+                    action,
+                    desktop::Action::Blank
+                        | desktop::Action::Selection(_)
+                        | desktop::Action::Screenshot
+                )
+            {
+                continue;
+            }
             match action {
+                desktop::Action::TogglePause => {
+                    self.paused = !self.paused;
+                    if self.paused {
+                        self.stop();
+                        self.visible = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    }
+                    self.status = if self.paused {
+                        "快捷入口已暂停（托盘可恢复）"
+                    } else {
+                        "快捷入口已恢复"
+                    }
+                    .into();
+                }
                 desktop::Action::Quit => {
                     self.quit = true;
                     self.stop();
@@ -804,6 +830,9 @@ impl eframe::App for Peek {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 ui.checkbox(&mut self.pinned, "固定");
+                if self.paused {
+                    ui.weak("快捷入口已暂停");
+                }
                 if ui.button("设置").clicked() {
                     self.draft = self.config.clone();
                     self.settings = true;
