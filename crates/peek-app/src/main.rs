@@ -1529,14 +1529,20 @@ impl eframe::App for Peek {
     }
 }
 fn main() -> eframe::Result {
-    let _instance = match store::config_path().and_then(|path| {
-        instance::acquire(&path.with_file_name("instance.lock")).map_err(|e| e.to_string())
-    }) {
-        Ok(Some(lock)) => Some(lock),
-        Ok(None) => return Ok(()),
-        Err(e) => {
-            eprintln!("{}", i18n::format("error-instance", &[("detail", &e)]));
-            return Ok(());
+    // An isolated preview renders offscreen and must not contend for the single-instance
+    // lock, otherwise it silently exits while the user has the app open.
+    let _instance = if std::env::var("PEEK_UI_PREVIEW").is_ok() {
+        None
+    } else {
+        match store::config_path().and_then(|path| {
+            instance::acquire(&path.with_file_name("instance.lock")).map_err(|e| e.to_string())
+        }) {
+            Ok(Some(lock)) => Some(lock),
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                eprintln!("{}", i18n::format("error-instance", &[("detail", &e)]));
+                return Ok(());
+            }
         }
     };
     eframe::run_native(
