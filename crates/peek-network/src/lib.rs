@@ -276,6 +276,7 @@ impl Client {
         }
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
+        let mut output_bytes = 0_usize;
         loop {
             let next = tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), next = stream.next() => next };
             let Some(chunk) = next else {
@@ -283,6 +284,14 @@ impl Client {
             };
             for data in decoder.push(&chunk?)? {
                 if let Some(event) = decode_event(provider.protocol, &data)? {
+                    if let Event::Text(text) = &event {
+                        output_bytes = output_bytes.saturating_add(text.len());
+                        if output_bytes > peek_core::MAX_OUTPUT_BYTES {
+                            return Err(Error::Invalid(
+                                "Generated output exceeds size limit".into(),
+                            ));
+                        }
+                    }
                     let terminal = matches!(event, Event::Done | Event::Failed(_));
                     tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), result = tx.send(event) => { if result.is_err() { return Err(Error::Cancelled); } } }
                     if terminal {
@@ -488,6 +497,20 @@ mod tests {
             assert_eq!(body[field][0]["content"][0]["text"], "describe");
             assert_eq!(messages[0].content, "describe");
         }
+    }
+    #[test]
+    fn sse_multiline_comments_and_limits() {
+        let mut decoder = SseDecoder::default();
+        let result = decoder
+            .push(b":keepalive\nevent: message\ndata: first\ndata: second\n\n")
+            .unwrap();
+        assert_eq!(result, vec!["first\nsecond"]);
+        assert!(
+            SseDecoder::default()
+                .push(&vec![b'x'; 2 * 1024 * 1024 + 1])
+                .is_err()
+        );
+        assert!(SseDecoder::default().push(b"data: \xff\n\n").is_err());
     }
     #[test]
     fn sse_survives_every_chunk_boundary() {
