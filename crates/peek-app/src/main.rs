@@ -11,6 +11,16 @@ use peek_network::{Client, Event};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+fn apply_appearance(ctx: &egui::Context, config: &Config) {
+    let preference = match config.theme.as_str() {
+        "light" => egui::ThemePreference::Light,
+        "dark" => egui::ThemePreference::Dark,
+        _ => egui::ThemePreference::System,
+    };
+    ctx.set_theme(preference);
+    ctx.set_zoom_factor(config.zoom);
+}
+
 struct Peek {
     config: Config,
     draft: Config,
@@ -84,6 +94,7 @@ impl Peek {
             Ok(c) => (c, String::new()),
             Err(e) => (Config::default(), format!("Configuration error: {e}")),
         };
+        apply_appearance(&cc.egui_ctx, &config);
         let desktop = desktop::Desktop::new(&config, cc.egui_ctx.clone());
         let (desktop, status) = match desktop {
             Ok(d) => (Some(d), status),
@@ -340,6 +351,18 @@ impl Peek {
     }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("设置");
+        ui.collapsing("外观", |ui| {
+            egui::ComboBox::from_label("主题")
+                .selected_text(&self.draft.theme)
+                .show_ui(ui, |ui| {
+                    for (value, label) in
+                        [("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
+                    {
+                        ui.selectable_value(&mut self.draft.theme, value.into(), label);
+                    }
+                });
+            ui.add(egui::Slider::new(&mut self.draft.zoom, 0.8..=1.5).text("界面缩放"));
+        });
         if !self.config.onboarding_complete {
             ui.group(|ui| {
                 ui.heading("欢迎使用 Crant Peek");
@@ -447,6 +470,7 @@ impl Peek {
                             || self.config.screenshot_hotkey != self.draft.screenshot_hotkey
                             || self.config.double_ctrl_ms != self.draft.double_ctrl_ms;
                         self.config = self.draft.clone();
+                        apply_appearance(ui.ctx(), &self.config);
                         self.secret_draft.clear();
                         self.decision_secret_draft.clear();
                         self.settings = false;

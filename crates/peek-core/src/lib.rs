@@ -204,6 +204,8 @@ impl Default for DecisionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub theme: String,
+    pub zoom: f32,
     pub onboarding_complete: bool,
     pub decision: DecisionConfig,
     pub schema_version: u32,
@@ -224,6 +226,8 @@ impl Default for Config {
             "Alt"
         };
         Self {
+            theme: "system".into(),
+            zoom: 1.0,
             onboarding_complete: false,
             decision: DecisionConfig::default(),
             schema_version: 1,
@@ -240,6 +244,12 @@ impl Default for Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if !matches!(self.theme.as_str(), "system" | "light" | "dark")
+            || !self.zoom.is_finite()
+            || !(0.8..=1.5).contains(&self.zoom)
+        {
+            return Err("Invalid appearance settings");
+        }
         if self.schema_version != 1 {
             return Err("Unsupported configuration version");
         }
