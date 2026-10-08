@@ -54,4 +54,12 @@ macOS 打包只做本地 ad-hoc 签名，**没有公证**。CI 测试包默认�
 
 ## 当前自动验证
 
-本地单元/HTTP 集成测试、macOS 和 Windows 目标严格 lint；macOS Vision 白图运行冒烟通过。此列表不构成视觉或系统交互验收。
+本地单元/HTTP 集成测试、macOS 和 Windows 目标严格 lint；macOS Vision 白图及合成文字图片运行冒烟通过：识别结果为 `Crant Peek OCR test 123`。未采集用户屏幕。此列表不构成视觉或系统交互验收。
+
+可复用的本地 OCR 验证：
+
+```sh
+cargo run -p peek-app --example ocr_smoke -- assets/ocr-test.png "Crant Peek"
+```
+
+Windows 需要安装支持英语的 OCR 语言包；尚未在 Windows 执行上述命令。
