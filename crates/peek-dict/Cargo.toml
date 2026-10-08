@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 csv = "1"
+memmap2 = "0.9"
+tempfile = "3"
 thiserror.workspace = true
 
 [[bin]]

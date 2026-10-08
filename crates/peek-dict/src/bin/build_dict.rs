@@ -14,8 +14,21 @@ fn main() {
         std::process::exit(1)
     });
     let bytes = peek_dict::build(entries);
-    std::fs::write(&args[2], &bytes).unwrap_or_else(|e| {
-        eprintln!("Cannot write {}: {e}", args[2]);
+    let output = std::path::Path::new(&args[2]);
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(&bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(output).map_err(|e| e.error)?;
+        Ok(())
+    })();
+    result.unwrap_or_else(|e| {
+        eprintln!("Cannot publish {}: {e}", args[2]);
         std::process::exit(1)
     });
     println!("Wrote {} bytes to {}", bytes.len(), args[2]);

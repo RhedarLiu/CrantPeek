@@ -3126,6 +3126,8 @@ name = "peek-dict"
 version = "0.1.0"
 dependencies = [
  "csv",
+ "memmap2",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

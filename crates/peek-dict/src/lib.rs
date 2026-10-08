@@ -132,13 +132,30 @@ pub fn entries_from_csv(reader: impl std::io::Read) -> Result<Vec<Entry>, Error>
     Ok(out)
 }
 
+enum Storage {
+    Owned(Vec<u8>),
+    Mapped(memmap2::Mmap),
+}
+impl std::ops::Deref for Storage {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Mapped(map) => map,
+        }
+    }
+}
+
 pub struct Dict {
-    bytes: Vec<u8>,
+    bytes: Storage,
     count: usize,
 }
 
 impl Dict {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, Error> {
+        Self::from_storage(Storage::Owned(bytes))
+    }
+    fn from_storage(bytes: Storage) -> Result<Self, Error> {
         if bytes.len() < 8 || &bytes[..4] != MAGIC {
             return Err(Error::BadFormat);
         }
@@ -154,7 +171,12 @@ impl Dict {
     }
 
     pub fn open(path: &std::path::Path) -> Result<Self, Error> {
-        Self::from_bytes(std::fs::read(path).map_err(|_| Error::BadFormat)?)
+        let file = std::fs::File::open(path).map_err(|_| Error::BadFormat)?;
+        // Dictionary files must be immutable while open. Builder/update tools publish a new
+        // file rather than truncating an existing mapping. Read-only mapping avoids a full copy.
+        let map =
+            unsafe { memmap2::MmapOptions::new().map(&file) }.map_err(|_| Error::BadFormat)?;
+        Self::from_storage(Storage::Mapped(map))
     }
 
     pub fn len(&self) -> usize {
