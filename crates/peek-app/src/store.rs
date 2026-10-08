@@ -14,6 +14,12 @@ pub fn dictionary_candidates() -> Vec<PathBuf> {
     {
         paths.push(dir.join("ecdict.pkd"));
     }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        paths.push(directory.join("ecdict.pkd"));
+        paths.push(directory.join("../Resources/ecdict.pkd"));
+    }
     paths.push(PathBuf::from("local-assets/ecdict.pkd"));
     paths
 }

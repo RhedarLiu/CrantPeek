@@ -16,3 +16,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo build --workspace --release
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        run: bash tools/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: Crant-Peek-Windows-test
+          path: target/release/peek-app.exe
+      - name: Archive macOS app
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Crant Peek.app" dist/Crant-Peek-macOS.zip
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: Crant-Peek-macOS-test
+          path: dist/Crant-Peek-macOS.zip
