@@ -46,6 +46,49 @@ async fn streams_from_local_http_service() {
 }
 
 #[tokio::test]
+async fn errors_and_redirects_do_not_look_like_success() {
+    for (status, extra, body, expected) in [
+        ("429 Too Many Requests", "", "", "HTTP 429"),
+        (
+            "302 Found",
+            "Location: http://127.0.0.1:1/private\r\n",
+            "",
+            "HTTP 302",
+        ),
+        (
+            "200 OK",
+            "Content-Type: text/event-stream\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            "without completion",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 8192];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket.write_all(format!("HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        });
+        let provider = Provider {
+            base_url: format!("http://{address}/v1"),
+            model: "test".into(),
+            ..Provider::default()
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        let error = Client::default()
+            .stream(&provider, "secret", &[], tx, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        while let Some(event) = rx.recv().await {
+            assert_ne!(event, Event::Done);
+        }
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn decision_accepts_direct_and_cloudflare_envelopes() {
     for wrapped in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
