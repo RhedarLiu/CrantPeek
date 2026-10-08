@@ -226,12 +226,17 @@ impl Dict {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let candidate = self.word_at(mid)?;
-            match candidate
-                .trim()
-                .chars()
-                .flat_map(char::to_lowercase)
-                .cmp(wanted.chars())
-            {
+            let order = if candidate.is_ascii() {
+                candidate
+                    .trim()
+                    .bytes()
+                    .map(|b| b.to_ascii_lowercase())
+                    .cmp(wanted.bytes())
+            } else {
+                // String lowercasing includes context-dependent mappings (e.g. final sigma).
+                key(candidate).cmp(&wanted)
+            };
+            match order {
                 std::cmp::Ordering::Equal => return self.entry_at(mid),
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
@@ -276,6 +281,24 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn unicode_lowercase_search_matches_builder_sorting() {
+        let dict = Dict::from_bytes(build(vec![
+            Entry {
+                word: "ΟΣ".into(),
+                translation: "test".into(),
+                ..Default::default()
+            },
+            Entry {
+                word: "ÉCOLE".into(),
+                translation: "school".into(),
+                ..Default::default()
+            },
+        ]))
+        .unwrap();
+        assert_eq!(dict.lookup("ος").unwrap().word, "ΟΣ");
+        assert_eq!(dict.lookup("école").unwrap().translation, "school");
+    }
     #[test]
     fn mapped_lookup_matches_owned_and_invalid_files_rejected() {
         use std::io::Write;
