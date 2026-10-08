@@ -23,10 +23,10 @@ use std::time::Duration;
 
 use gpui_kit::base::{IndexPath, Root, StyledExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -101,12 +101,16 @@ struct Peek {
     _activation: Subscription,
 
     input: Entity<TextareaState>,
+    follow_up: Entity<InputState>,
     tasks: Entity<SelectState<Vec<SharedString>>>,
 
     answer: String,
     /// Selection text to place in the input box on the next frame. The hook
     /// reports off the UI thread, where no `Window` is available to set it.
     pending_input: Option<String>,
+    /// The first query's text. A follow-up re-derives its target language from
+    /// this rather than from the follow-up sentence.
+    original_query: String,
     status: String,
     busy: bool,
     dictionary_note: String,
@@ -137,6 +141,9 @@ impl Peek {
         });
 
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 5));
+        let follow_up = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(i18n::tr("query-followup-placeholder"))
+        });
 
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
@@ -154,9 +161,11 @@ impl Peek {
             set: fonts::initial(),
             _activation: activation,
             input,
+            follow_up,
             tasks,
             answer: String::new(),
             pending_input: None,
+            original_query: String::new(),
             status: String::new(),
             busy: false,
             dictionary_note: String::new(),
@@ -201,7 +210,7 @@ impl Peek {
                                 cx.update_window(panel_handle, |_, window, _| show_panel(window));
                             this.update(cx, |peek, cx| {
                                 peek.pending_input = Some(text.clone());
-                                peek.begin_turn(text, cx);
+                                peek.begin_turn(text, false, cx);
                             })
                             .ok();
                         }
@@ -256,7 +265,7 @@ impl Peek {
                                 .update_window(panel_handle, |_, window, _| show_panel(window));
                             this.update(cx, |peek, cx| {
                                 peek.pending_input = Some(text.clone());
-                                peek.begin_turn(text, cx);
+                                peek.begin_turn(text, false, cx);
                             })
                             .ok();
                         }
@@ -303,7 +312,7 @@ impl Peek {
                     .timer(Duration::from_millis(900))
                     .await;
                 this.update(cx, |peek, cx| {
-                    peek.begin_turn("ephemeral".into(), cx);
+                    peek.begin_turn("ephemeral".into(), false, cx);
                 })
                 .ok();
                 cx.background_executor()
@@ -393,8 +402,17 @@ impl Peek {
     /// Reads the input box and starts a turn, clearing it only if one began.
     fn start_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().trim().to_owned();
-        if self.begin_turn(text, cx) {
+        if self.begin_turn(text, false, cx) {
             self.input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+        }
+    }
+
+    /// Sends the follow-up box, continuing the current conversation.
+    fn send_follow_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.follow_up.read(cx).value().trim().to_owned();
+        if self.begin_turn(text, true, cx) {
+            self.follow_up
                 .update(cx, |state, cx| state.set_value("", window, cx));
         }
     }
@@ -402,7 +420,7 @@ impl Peek {
     /// Builds the prompt and starts the network turn. Returns whether a turn
     /// actually started. Split out of `start_query` so `PEEK_SELFTEST` can
     /// drive the whole pipeline without a window or a click.
-    fn begin_turn(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+    fn begin_turn(&mut self, text: String, followup: bool, cx: &mut Context<Self>) -> bool {
         if text.is_empty() {
             return false;
         }
@@ -411,12 +429,18 @@ impl Peek {
             cx.notify();
             return false;
         }
+        // A follow-up needs an existing conversation to continue.
+        if followup && self.messages.is_empty() {
+            return false;
+        }
 
         self.stop();
         self.answer.clear();
-        self.dictionary_note.clear();
-        if let Some(entry) = self.lookup_word(&text) {
-            self.dictionary_note = dictionary_text(&entry);
+        if !followup {
+            self.dictionary_note.clear();
+            if let Some(entry) = self.lookup_word(&text) {
+                self.dictionary_note = dictionary_text(&entry);
+            }
         }
 
         let key = match store::secret(&self.config.provider.credential_id) {
@@ -433,8 +457,15 @@ impl Peek {
             return false;
         }
 
+        // A follow-up is routed from the original query, not from its own
+        // sentence, so the target language does not drift mid-conversation.
+        let routed_text = if followup {
+            self.original_query.as_str()
+        } else {
+            text.as_str()
+        };
         let route = local_route(
-            &text,
+            routed_text,
             &self.config.target_language,
             &self.config.chinese_target,
         );
@@ -443,17 +474,22 @@ impl Peek {
         } else {
             self.selected_task(cx)
         };
-        self.messages = vec![Message {
-            role: "system".into(),
-            content: task.styled_instruction(
-                effective_target(&route.target, ""),
-                &self.config.translation_style,
-            ),
-        }];
+        let target = effective_target(&route.target, "").to_owned();
+        if !followup {
+            self.original_query = text.clone();
+            self.messages = vec![Message {
+                role: "system".into(),
+                content: task.styled_instruction(&target, &self.config.translation_style),
+            }];
+        } else if let Some(system) = self.messages.first_mut() {
+            // Re-issue the instruction: the follow-up may be another language.
+            system.content = task.styled_instruction(&target, &self.config.translation_style);
+        }
         self.messages.push(Message {
             role: "user".into(),
             content: text.clone(),
         });
+        peek_core::bound_history(&mut self.messages);
 
         self.status = i18n::tr("status-generating");
         self.busy = true;
@@ -674,7 +710,22 @@ impl Peek {
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.start_query(window, cx);
                             })),
-                    ),
+                    )
+                    .when(self.busy, |this| {
+                        this.child(
+                            Button::new("stop")
+                                .secondary()
+                                .rounded(px(999.))
+                                .h(px(34.))
+                                .px(px(16.))
+                                .label(i18n::tr("query-stop"))
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.stop();
+                                    this.status = i18n::tr("status-stopped");
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             // Offline dictionary result, when the input was a single word.
             .when(!self.dictionary_note.is_empty(), |this| {
@@ -736,6 +787,30 @@ impl Peek {
                             )),
                     )
                 },
+            )
+            // Follow-up turn, continuing the same conversation.
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        Input::new(&self.follow_up)
+                            .id("follow-up")
+                            .flex_1()
+                            .rounded(px(10.)),
+                    )
+                    .child(
+                        Button::new("send")
+                            .rounded(px(999.))
+                            .h(px(34.))
+                            .px(px(16.))
+                            .label(i18n::tr("query-send"))
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.send_follow_up(window, cx);
+                            })),
+                    ),
             )
             .child(
                 h_flex()
