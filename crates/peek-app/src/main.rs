@@ -19,6 +19,7 @@ struct Peek {
     followup: String,
     messages: Vec<Message>,
     task: Task,
+    manual_task: bool,
     pinned: bool,
     status: String,
     secret_draft: String,
@@ -92,6 +93,7 @@ impl Peek {
             followup: String::new(),
             messages: Vec::new(),
             task: Task::Translate,
+            manual_task: false,
             pinned: false,
             status,
             secret_draft: String::new(),
@@ -179,7 +181,7 @@ impl Peek {
                 &self.config.target_language,
                 &self.config.chinese_target,
             );
-            if self.config.smart_mode {
+            if self.config.smart_mode && !self.manual_task {
                 self.task = route.task;
             }
             self.messages = vec![Message {
@@ -202,8 +204,11 @@ impl Peek {
         let provider = self.config.provider.clone();
         let mut messages = self.messages.clone();
         let decision = self.config.decision.clone();
-        let use_decision =
-            !followup && self.config.smart_mode && decision.enabled && self.task != Task::Define;
+        let use_decision = !followup
+            && self.config.smart_mode
+            && !self.manual_task
+            && decision.enabled
+            && self.task != Task::Define;
         let decision_key = if use_decision {
             store::secret(&decision.credential_id).ok()
         } else {
@@ -381,6 +386,7 @@ impl eframe::App for Peek {
                     self.route_note.clear();
                     self.followup.clear();
                     self.messages.clear();
+                    self.manual_task = false;
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
@@ -395,6 +401,7 @@ impl eframe::App for Peek {
                     self.route_note.clear();
                     self.followup.clear();
                     self.messages.clear();
+                    self.manual_task = false;
                     self.settings = false;
                     self.status.clear();
                     self.visible = true;
@@ -601,7 +608,10 @@ impl eframe::App for Peek {
         }
         egui::CentralPanel::default().show(root, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("Crant Peek");
+                let title = ui.heading("Crant Peek");
+                if title.interact(egui::Sense::drag()).drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
                 ui.checkbox(&mut self.pinned, "固定");
                 if ui.button("设置").clicked() {
                     self.draft = self.config.clone();
@@ -613,7 +623,7 @@ impl eframe::App for Peek {
             });
             ui.separator();
             if self.settings {
-                self.settings_ui(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| self.settings_ui(ui));
             } else {
                 ui.add(
                     egui::TextEdit::multiline(&mut self.input)
@@ -629,11 +639,16 @@ impl eframe::App for Peek {
                                     .selectable_value(&mut self.task, task, task.label())
                                     .changed()
                                 {
-                                    self.config.smart_mode = false;
+                                    self.manual_task = true;
                                 }
                             }
                         });
-                    if ui.button("查询").clicked() {
+                    if self.manual_task && ui.button("恢复智能").clicked() {
+                        self.manual_task = false;
+                    }
+                    if ui.button("查询").clicked()
+                        || ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
+                    {
                         self.query(&ctx, false);
                     }
                     if self.busy && ui.button("停止").clicked() {
@@ -641,7 +656,15 @@ impl eframe::App for Peek {
                         self.status = "已停止".into();
                     }
                     if ui.button("复制").clicked() {
-                        ctx.copy_text(self.answer.clone());
+                        let text = if self.answer.is_empty() {
+                            self.dict_entry
+                                .as_ref()
+                                .map(|e| e.translation.clone())
+                                .unwrap_or_default()
+                        } else {
+                            self.answer.clone()
+                        };
+                        ctx.copy_text(text);
                     }
                 });
                 ui.weak(&self.route_note);
@@ -672,13 +695,19 @@ impl eframe::App for Peek {
                     });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.followup).hint_text("继续追问…"));
-                    if ui
+                    let input = ui
+                        .add(egui::TextEdit::singleline(&mut self.followup).hint_text("继续追问…"));
+                    let enter = input.lost_focus()
+                        && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.command);
+                    if (ui
                         .add_enabled(
                             !self.messages.is_empty() && !self.busy,
                             egui::Button::new("发送"),
                         )
                         .clicked()
+                        || enter)
+                        && !self.messages.is_empty()
+                        && !self.busy
                     {
                         self.query(&ctx, true);
                     }
