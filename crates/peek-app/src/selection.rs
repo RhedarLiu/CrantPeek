@@ -136,11 +136,15 @@ pub fn listen(
                     std::time::Instant::now(),
                     std::time::Duration::from_millis(interval),
                 ) {
-                    // Do not steal focus before obtaining the selection.
-                    if let Some(text) = read() {
-                        let _ = tx.send(crate::desktop::Action::Selection(text));
-                        ctx.request_repaint();
-                    }
+                    // Never block the event-tap callback on Accessibility IPC.
+                    let tx = tx.clone();
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        if let Some(text) = read() {
+                            let _ = tx.send(crate::desktop::Action::Selection(text));
+                            ctx.request_repaint();
+                        }
+                    });
                 }
                 None
             },

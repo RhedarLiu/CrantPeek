@@ -2,6 +2,7 @@
 mod capture;
 mod desktop;
 mod ocr;
+mod permissions;
 mod selection;
 mod store;
 use eframe::egui;
@@ -283,6 +284,16 @@ impl Peek {
     }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("设置");
+        ui.collapsing("系统权限与使用说明", |ui| {
+            for (name, granted) in permissions::status() {
+                ui.label(format!("{name}：{}", if granted { "已授权" } else { "未授权" }));
+            }
+            ui.weak("双击 Ctrl 只读取选区，无选区不弹窗。应用不支持选区读取时，请用空白浮窗主动粘贴或截图。");
+            if cfg!(windows) { ui.weak("不能读取高权限应用或安全输入。系统 OCR 需要已安装的语言包。"); }
+            ui.weak("macOS 修改权限后可能需要退出并重新启动 Peek；开发构建路径变化也可能需要重新授权。");
+            if ui.button("打开系统隐私设置").clicked()
+                && let Err(e) = permissions::open_settings() { self.status = e; }
+        });
         ui.label("回答服务（凭据保存在系统安全存储）");
         egui::ComboBox::from_label("协议")
             .selected_text(format!("{:?}", self.draft.provider.protocol))
