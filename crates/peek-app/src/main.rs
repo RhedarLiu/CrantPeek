@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod capture;
 mod desktop;
+mod instance;
 mod ocr;
 mod permissions;
 mod selection;
@@ -1141,6 +1142,16 @@ impl eframe::App for Peek {
     }
 }
 fn main() -> eframe::Result {
+    let _instance = match store::config_path().and_then(|path| {
+        instance::acquire(&path.with_file_name("instance.lock")).map_err(|e| e.to_string())
+    }) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            eprintln!("Cannot acquire application instance lock: {e}");
+            return Ok(());
+        }
+    };
     eframe::run_native(
         "Crant Peek",
         eframe::NativeOptions {

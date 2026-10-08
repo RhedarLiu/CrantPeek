@@ -12,6 +12,7 @@ eframe = { version = "0.36.2", default-features = false, features = ["glow", "de
 serde_json.workspace = true
 directories = "6"
 tempfile = "3"
+fs2 = "0.4"
 base64 = "0.22"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
