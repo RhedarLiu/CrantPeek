@@ -38,6 +38,7 @@ struct Peek {
     visible: bool,
     screenshot_image: Option<peek_network::ImageInput>,
     send_image: bool,
+    decide_image: bool,
     snip: Option<capture::Screen>,
     snip_texture: Option<egui::TextureHandle>,
     drag_start: Option<egui::Pos2>,
@@ -118,6 +119,7 @@ impl Peek {
             visible: true,
             screenshot_image: None,
             send_image: false,
+            decide_image: false,
             snip: None,
             snip_texture: None,
             drag_start: None,
@@ -213,13 +215,19 @@ impl Peek {
             None
         };
         self.send_image = false;
+        let decision_image = if self.decide_image {
+            self.screenshot_image.clone()
+        } else {
+            None
+        };
+        self.decide_image = false;
         let mut messages = self.messages.clone();
         let decision = self.config.decision.clone();
         let use_decision = !followup
-            && self.config.smart_mode
+            && (self.config.smart_mode || decision_image.is_some())
             && !self.manual_task
             && decision.enabled
-            && self.task != Task::Define;
+            && (self.task != Task::Define || decision_image.is_some());
         let decision_key = if use_decision {
             store::secret(&decision.credential_id).ok()
         } else {
@@ -244,13 +252,31 @@ impl Peek {
                 let routed = if let Some(ref decision_key) = decision_key {
                     tokio::time::timeout(
                         std::time::Duration::from_millis(decision.timeout_ms),
-                        Client::default().decide(
-                            &decision.endpoint,
-                            decision_key,
-                            &decision.model,
-                            &query_text,
-                            cancel.clone(),
-                        ),
+                        async {
+                            let client = Client::default();
+                            if let Some(image) = &decision_image {
+                                client
+                                    .decide_image(
+                                        &decision.endpoint,
+                                        decision_key,
+                                        &decision.model,
+                                        &query_text,
+                                        image,
+                                        cancel.clone(),
+                                    )
+                                    .await
+                            } else {
+                                client
+                                    .decide(
+                                        &decision.endpoint,
+                                        decision_key,
+                                        &decision.model,
+                                        &query_text,
+                                        cancel.clone(),
+                                    )
+                                    .await
+                            }
+                        },
                     )
                     .await
                     .ok()
@@ -734,8 +760,6 @@ impl eframe::App for Peek {
                         });
                     if self.manual_task && ui.button("恢复智能").clicked() {
                         self.manual_task = false;
-                        self.screenshot_image = None;
-                        self.send_image = false;
                     }
                     if ui.button("查询").clicked()
                         || ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
@@ -775,12 +799,35 @@ impl eframe::App for Peek {
                             self.send_image = true;
                             self.query(&ctx, false);
                         }
+                        if ui
+                            .add_enabled(
+                                self.config.decision.enabled
+                                    && matches!(
+                                        self.config.decision.model.as_str(),
+                                        "clef" | "clef-flash"
+                                    )
+                                    && !self.busy,
+                                egui::Button::new("Clef 判断截图（上传选区）"),
+                            )
+                            .clicked()
+                        {
+                            if self.input.trim().is_empty() {
+                                self.input = "请判断截图需要什么阅读辅助。".into();
+                            }
+                            self.manual_task = false;
+                            self.decide_image = true;
+                            self.query(&ctx, false);
+                        }
                         if ui.button("丢弃图片").clicked() {
                             self.screenshot_image = None;
                         }
                     });
                     ui.weak(format!(
-                        "图片仅在点击解读后发送到 {}；后续追问默认只发文字",
+                        "Clef 按钮仅发送到决策服务：{}",
+                        self.config.decision.endpoint
+                    ));
+                    ui.weak(format!(
+                        "图片解读按钮发送到 {}；后续追问默认只发文字",
                         self.config.provider.base_url
                     ));
                 }
