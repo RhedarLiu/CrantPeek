@@ -179,7 +179,32 @@ impl Default for Provider {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct DecisionConfig {
+    pub enabled: bool,
+    /// Full endpoint: TypeSafe /v1/systemone or Cloudflare account model route.
+    pub endpoint: String,
+    pub model: String,
+    pub credential_id: String,
+    pub timeout_ms: u64,
+    pub min_confidence: f64,
+}
+impl Default for DecisionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "https://api.typesafe.ai/v1/systemone".into(),
+            model: "jev-latest".into(),
+            credential_id: "decision-default".into(),
+            timeout_ms: 1500,
+            min_confidence: 0.65,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
+    pub decision: DecisionConfig,
     pub schema_version: u32,
     pub provider: Provider,
     pub target_language: String,
@@ -198,6 +223,7 @@ impl Default for Config {
             "Alt"
         };
         Self {
+            decision: DecisionConfig::default(),
             schema_version: 1,
             provider: Provider::default(),
             target_language: "Chinese".into(),
@@ -229,6 +255,22 @@ impl Config {
             || self.provider.base_url.starts_with("http://127.0.0.1:"))
         {
             return Err("Use HTTPS, or HTTP on loopback only");
+        }
+        if self.decision.enabled {
+            if !self.decision.endpoint.starts_with("https://") {
+                return Err("Decision endpoint must use HTTPS");
+            }
+            if self.decision.model.trim().is_empty() {
+                return Err("Decision model cannot be empty");
+            }
+            if !(100..=10000).contains(&self.decision.timeout_ms) {
+                return Err("Decision timeout must be 100–10000ms");
+            }
+            if !self.decision.min_confidence.is_finite()
+                || !(0.0..=1.0).contains(&self.decision.min_confidence)
+            {
+                return Err("Invalid decision confidence threshold");
+            }
         }
         Ok(())
     }

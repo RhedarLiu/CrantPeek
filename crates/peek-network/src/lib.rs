@@ -19,6 +19,7 @@ pub enum Error {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    Route { task: Task, note: String },
     Text(String),
     Done,
     Failed(String),

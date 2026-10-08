@@ -22,6 +22,8 @@ struct Peek {
     pinned: bool,
     status: String,
     secret_draft: String,
+    decision_secret_draft: String,
+    route_note: String,
     runtime: tokio::runtime::Runtime,
     receiver: Option<mpsc::Receiver<Event>>,
     cancel: Option<CancellationToken>,
@@ -93,6 +95,8 @@ impl Peek {
             pinned: false,
             status,
             secret_draft: String::new(),
+            decision_secret_draft: String::new(),
+            route_note: String::new(),
             runtime: tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -195,9 +199,64 @@ impl Peek {
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         let provider = self.config.provider.clone();
-        let messages = self.messages.clone();
+        let mut messages = self.messages.clone();
+        let decision = self.config.decision.clone();
+        let use_decision =
+            !followup && self.config.smart_mode && decision.enabled && self.task != Task::Define;
+        let decision_key = if use_decision {
+            store::secret(&decision.credential_id).ok()
+        } else {
+            None
+        };
+        let query_text = text.to_owned();
+        let target = local_route(
+            text,
+            &self.config.target_language,
+            &self.config.chinese_target,
+        )
+        .target;
+        let fallback_task = self.task;
+        self.route_note = if use_decision {
+            "正在判断任务…".into()
+        } else {
+            "本地判断 / 手动模式".into()
+        };
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
+            if use_decision {
+                let routed = if let Some(ref decision_key) = decision_key {
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(decision.timeout_ms),
+                        Client::default().decide(
+                            &decision.endpoint,
+                            decision_key,
+                            &decision.model,
+                            &query_text,
+                            cancel.clone(),
+                        ),
+                    )
+                    .await
+                    .ok()
+                } else {
+                    None
+                };
+                let (task, note) = match routed {
+                    Some(Ok(result)) if result.confidence >= decision.min_confidence => (
+                        result.task,
+                        format!("{} · 置信度 {:.2}", decision.model, result.confidence),
+                    ),
+                    Some(Ok(_)) => (fallback_task, "决策不确定 · 使用本地判断".into()),
+                    _ => (fallback_task, "决策不可用 · 使用本地判断".into()),
+                };
+                if cancel.is_cancelled() {
+                    return;
+                }
+                messages[0].content = task.instruction(&target);
+                if tx.send(Event::Route { task, note }).await.is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+            }
             let (net_tx, mut net_rx) = mpsc::channel(32);
             let worker = tokio::spawn(async move {
                 Client::default()
@@ -240,6 +299,23 @@ impl Peek {
         ui.text_edit_singleline(&mut self.draft.target_language);
         ui.label("中文翻译目标");
         ui.text_edit_singleline(&mut self.draft.chinese_target);
+        ui.collapsing("决策模型（可选）", |ui| {
+            ui.checkbox(&mut self.draft.decision.enabled, "启用专用决策服务");
+            ui.label("Endpoint：完整 URL；TypeSafe 或 Cloudflare 模型路由");
+            ui.text_edit_singleline(&mut self.draft.decision.endpoint);
+            ui.label("决策 Model");
+            ui.text_edit_singleline(&mut self.draft.decision.model);
+            ui.label("决策 API key / Token（留空保留）");
+            ui.add(egui::TextEdit::singleline(&mut self.decision_secret_draft).password(true));
+            ui.add(
+                egui::Slider::new(&mut self.draft.decision.min_confidence, 0.0..=1.0)
+                    .text("采用阈值"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.draft.decision.timeout_ms, 100..=10000).text("超时 ms"),
+            );
+            ui.weak("只发送当前查询文本。不可用时回退本地判断；图像决策尚未接入。");
+        });
         ui.checkbox(&mut self.draft.smart_mode, "智能判断模式");
         ui.checkbox(&mut self.draft.hide_on_blur, "失焦隐藏（取消固定后生效）");
         ui.horizontal(|ui| {
@@ -248,12 +324,19 @@ impl Peek {
                     if !self.secret_draft.is_empty() {
                         store::save_secret(&self.draft.provider.credential_id, &self.secret_draft)?;
                     }
+                    if !self.decision_secret_draft.is_empty() {
+                        store::save_secret(
+                            &self.draft.decision.credential_id,
+                            &self.decision_secret_draft,
+                        )?;
+                    }
                     store::save(&self.draft)
                 });
                 match result {
                     Ok(()) => {
                         self.config = self.draft.clone();
                         self.secret_draft.clear();
+                        self.decision_secret_draft.clear();
                         self.settings = false;
                         self.status = "已保存".into();
                     }
@@ -263,6 +346,7 @@ impl Peek {
             if ui.button("取消").clicked() {
                 self.draft = self.config.clone();
                 self.secret_draft.clear();
+                self.decision_secret_draft.clear();
                 self.settings = false;
             }
         });
@@ -469,6 +553,19 @@ impl eframe::App for Peek {
         }
         for event in events {
             match event {
+                Event::Route { task, note } => {
+                    self.task = task;
+                    self.route_note = note;
+                    if let Some(system) = self.messages.first_mut() {
+                        let target = local_route(
+                            &self.input,
+                            &self.config.target_language,
+                            &self.config.chinese_target,
+                        )
+                        .target;
+                        system.content = task.instruction(&target);
+                    }
+                }
                 Event::Text(text) => self.answer.push_str(&text),
                 Event::Done => {
                     self.busy = false;
@@ -543,6 +640,7 @@ impl eframe::App for Peek {
                         ctx.copy_text(self.answer.clone());
                     }
                 });
+                ui.weak(&self.route_note);
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
