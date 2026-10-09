@@ -14,16 +14,12 @@ use serde::{Deserialize, Serialize};
 pub struct UiPrefs {
     /// Font bundle id, see `peek_gpui::fonts::ALL` — `default` or `serif`.
     pub font_set: String,
-    /// Whether the settings panel was last open. Kept so the shell can restore
-    /// the same page across restarts.
-    pub settings_open: bool,
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
         Self {
             font_set: "default".into(),
-            settings_open: false,
         }
     }
 }
@@ -75,11 +71,9 @@ mod tests {
         let mut prefs = UiPrefs::default();
         save_to(&prefs, &path).unwrap();
         prefs.font_set = "serif".into();
-        prefs.settings_open = true;
         save_to(&prefs, &path).unwrap();
         let loaded: UiPrefs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(loaded.font_set, "serif");
-        assert!(loaded.settings_open);
     }
 
     #[test]
@@ -91,6 +85,5 @@ mod tests {
         // Unknown fields are tolerated so older builds keep working.
         let parsed: UiPrefs = serde_json::from_slice(br#"{"font_set":"serif"}"#).unwrap();
         assert_eq!(parsed.font_set, "serif");
-        assert!(!parsed.settings_open);
     }
 }

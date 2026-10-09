@@ -238,7 +238,9 @@ impl Peek {
             busy: false,
             dictionary_note: String::new(),
             permissions: peek_runtime::permissions::status(),
-            settings: peek_runtime::prefs::load().settings_open,
+            // The peek always opens on the query page: settings is a view the
+            // user steps into, not a place to be summoned back to.
+            settings: false,
             config,
             client: Client::default(),
             runtime,
@@ -501,7 +503,6 @@ impl Peek {
     fn persist_prefs(&self) {
         let prefs = peek_runtime::prefs::UiPrefs {
             font_set: self.set.id.to_string(),
-            settings_open: self.settings,
         };
         if let Err(err) = peek_runtime::prefs::save(&prefs) {
             eprintln!("saving ui prefs failed: {err}");
@@ -1541,11 +1542,10 @@ impl Peek {
                             .font_family(set.latin)
                             .text_size(px(11.))
                             .text_color(muted)
-                            .child(self.status.clone())
-                            .child(div().flex_1())
-                            // Also the label the settings panel will offer; shown here so
-                            // the active set is visible while the panel is still to come.
-                            .child(set.name),
+                            // Only the status: the active font set belongs in
+                            // settings, and echoing it here was a stand-in
+                            // from before that page existed.
+                            .child(self.status.clone()),
                     )
             })
             .into_any_element()
