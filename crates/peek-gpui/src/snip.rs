@@ -214,7 +214,7 @@ pub fn open(cx: &mut App, result: Sender<Action>) -> Result<(AnyWindowHandle, Re
         let view = cx.new(|cx| Snip::new(screen, backdrop, result, cx));
         let focus = view.read(cx).focus.clone();
         window.focus(&focus, cx);
-        crate::native_window::hide_window_buttons(window);
+        crate::native_window::make_capture_overlay(window);
         cx.new(|cx| gpui_kit::base::Root::new(view, window, cx))
     });
     match opened {

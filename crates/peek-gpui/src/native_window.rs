@@ -52,12 +52,19 @@ fn macos_view(window: &Window) -> Option<*mut std::ffi::c_void> {
     }
 }
 
-/// Hides the close/minimise/zoom buttons. GPUI always gives a macOS window a
-/// titled style mask, so a full-screen overlay otherwise shows traffic lights
-/// in its corner.
-pub fn hide_window_buttons(window: &mut Window) {
+/// Turns a GPUI window into a full-screen capture overlay.
+///
+/// GPUI always gives a macOS window a titled style mask
+/// (`NSTitledWindowMask | NSFullSizeContentViewWindowMask`), and macOS keeps a
+/// titled window inside the visible frame at the normal window level. That is
+/// why the first overlay run left the real menu bar uncovered and drew the
+/// captured menu bar next to it. Borderless plus `NSScreenSaverWindowLevel`
+/// covers the menu bar, which is what Snipaste and similar tools do.
+pub fn make_capture_overlay(window: &mut Window) {
     #[cfg(target_os = "macos")]
     {
+        use objc2_foundation::NSRect;
+
         let Some(ns_view) = macos_view(window) else {
             return;
         };
@@ -69,12 +76,22 @@ pub fn hide_window_buttons(window: &mut Window) {
             if ns_window.is_null() {
                 return;
             }
-            // NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton
-            for kind in [0usize, 1, 2] {
-                let button: *mut AnyObject = msg_send![ns_window, standardWindowButton: kind];
-                if !button.is_null() {
-                    let _: () = msg_send![button, setHidden: true];
-                }
+            // NSBorderlessWindowMask: no titlebar, so the window may extend
+            // over the menu bar.
+            let _: () = msg_send![ns_window, setStyleMask: 0usize];
+            // NSScreenSaverWindowLevel, above the menu bar (NSMainMenuWindowLevel
+            // is 24) and above other applications' full-screen windows.
+            let _: () = msg_send![ns_window, setLevel: 1000isize];
+            // canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary
+            let behavior: usize = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+            let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+            let _: () = msg_send![ns_window, setHasShadow: false];
+            // The frame GPUI asked for was clamped to the visible frame while
+            // the window still had a titlebar, so take the screen's full frame.
+            let screen: *mut AnyObject = msg_send![ns_window, screen];
+            if !screen.is_null() {
+                let frame: NSRect = msg_send![screen, frame];
+                let _: () = msg_send![ns_window, setFrame: frame, display: true];
             }
         }
     }

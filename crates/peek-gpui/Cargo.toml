@@ -20,6 +20,8 @@ tokio-util = "0.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# NSRect for `setFrame:display:`; the type must implement `Encode`.
+objc2-foundation = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
