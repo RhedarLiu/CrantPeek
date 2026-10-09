@@ -128,6 +128,23 @@ fn keys(source: &str) -> BTreeSet<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every quoted literal in `source`, with the byte offset of its opening
+    /// quote so callers can tell ids from resource references.
+    fn quoted_literals(source: &str) -> Vec<(&str, usize)> {
+        let mut found = Vec::new();
+        let mut search = 0;
+        while let Some(offset) = source[search..].find('"') {
+            let start = search + offset;
+            let Some(close) = source[start + 1..].find('"') else {
+                break;
+            };
+            let end = start + 1 + close;
+            found.push((&source[start + 1..end], start));
+            search = end + 1;
+        }
+        found
+    }
     #[tokio::test(flavor = "multi_thread")]
     async fn request_locale_survives_async_scheduling() {
         let locale = I18n::new("zh-CN");
@@ -164,7 +181,14 @@ mod tests {
             include_str!("../../peek-dict/src/lib.rs"),
         ];
         for source in sources {
-            for literal in source.split('"').skip(1).step_by(2) {
+            for (literal, position) in quoted_literals(source) {
+                // A literal handed to a constructor is a stable widget id, not
+                // a resource reference: Button::new("look-up"), .id("answer").
+                // Without this the audit flags every id shaped like a key.
+                let before = &source[position.saturating_sub(12)..position];
+                if before.ends_with("new(") || before.ends_with(".id(") {
+                    continue;
+                }
                 if [
                     "query-",
                     "header-",
