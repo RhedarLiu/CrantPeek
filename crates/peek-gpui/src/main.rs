@@ -130,6 +130,10 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
+    /// Pinned to a regular window: the app takes a Dock icon and menu bar and
+    /// stops hiding when it loses focus. Unpinned is the quick peek that appears
+    /// and leaves, with no Dock presence at all.
+    pinned: bool,
     /// Last applied height mode, so the window resizes on transitions only
     /// rather than on every frame.
     expanded: Option<bool>,
@@ -150,8 +154,9 @@ impl Peek {
     ) -> Self {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
-        let activation = cx.observe_window_activation(window, |_this, window, _cx| {
-            if !window.is_window_active() && !shown_recently() {
+        let activation = cx.observe_window_activation(window, |this, window, _cx| {
+            // A pinned window behaves like a normal window and stays put.
+            if !this.pinned && !window.is_window_active() && !shown_recently() {
                 native_window::hide(window);
             }
         });
@@ -180,6 +185,7 @@ impl Peek {
             tasks,
             answer: String::new(),
             expanded: None,
+            pinned: false,
             overlay: None,
             pending_input: None,
             original_query: String::new(),
@@ -616,6 +622,24 @@ impl Peek {
         true
     }
 
+    /// Switches between the quick peek and a regular window.
+    fn toggle_pinned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pinned = !self.pinned;
+        cx.set_activation_policy(if self.pinned {
+            ActivationPolicy::Regular
+        } else {
+            ActivationPolicy::Accessory
+        });
+        if self.pinned {
+            // A regular app's menu bar only appears once it is activated.
+            cx.activate(true);
+        } else {
+            // Dropping the Dock icon must not take the window with it.
+            native_window::show(window);
+        }
+        cx.notify();
+    }
+
     /// Reports progress to the overlay, dropping the link when it has gone.
     fn forward_overlay(&mut self, event: OverlayEvent) {
         let broken = match &self.overlay {
@@ -706,12 +730,13 @@ impl Peek {
             .text_color(fg)
             .p(px(20.))
             .gap(px(10.))
-            // Esc hides the panel — "appear when needed, gone when done".
-            .on_key_down(|event, window, _cx| {
-                if event.keystroke.key == "escape" {
+            // Esc hides the panel — "appear when needed, gone when done". A
+            // pinned window is a normal window, so Esc leaves it alone.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, _cx| {
+                if !this.pinned && event.keystroke.key == "escape" {
                     native_window::hide(window);
                 }
-            })
+            }))
             .child(
                 h_flex()
                     .w_full()
@@ -724,6 +749,25 @@ impl Peek {
                             .text_size(px(15.))
                             .font_semibold()
                             .child("Crant Peek"),
+                    )
+                    .child(
+                        Button::new("pin-window")
+                            .secondary()
+                            .rounded(px(10.))
+                            .h(px(28.))
+                            .px(px(8.))
+                            .child(
+                                Icon::new(if self.pinned {
+                                    gpui_kit::assets::IconName::PinOff
+                                } else {
+                                    gpui_kit::assets::IconName::Pin
+                                })
+                                .size(px(16.))
+                                .text_color(muted),
+                            )
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.toggle_pinned(window, cx);
+                            })),
                     )
                     .child(
                         Button::new("open-settings")
@@ -1065,7 +1109,10 @@ fn main() {
 fn render_preview(path: &str) -> anyhow::Result<()> {
     let mut cx = gpui_kit::HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
-        std::sync::Arc::new(gpui_kit::assets::Assets),
+        // `AllAssets` is the full Lucide catalog; the default `Assets` only
+        // embeds the icons the component library itself uses, so an app icon
+        // like `Pin` renders as nothing with it.
+        std::sync::Arc::new(gpui_kit::assets::AllAssets),
         gpui_kit::platform::current_headless_renderer,
     );
 
@@ -1216,194 +1263,214 @@ fn main() -> anyhow::Result<()> {
     // the platform, so without this the icon font never loads and every `Icon`
     // renders as nothing. The offscreen preview passes the same assets, which is
     // why icons appeared there and not in the running app.
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
+    // Filled in once the panel exists: `on_reopen` is an `Application` hook and
+    // so cannot capture the window handle directly.
+    let reopen_target: std::rc::Rc<std::cell::Cell<Option<AnyWindowHandle>>> =
+        std::rc::Rc::new(std::cell::Cell::new(None));
+    let reopen_for_hook = reopen_target.clone();
 
-            if let Err(err) = fonts::register(cx) {
-                eprintln!("font registration failed: {err}");
-            }
-            let missing = fonts::missing(cx);
-            if missing.is_empty() {
-                println!("bundled font families registered");
-            } else {
-                eprintln!(
-                    "bundled fonts MISSING (file truncated?): {}",
-                    missing.join(", ")
-                );
-            }
-            fonts::apply(cx, fonts::initial());
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    // Double-clicking the Dock icon of a pinned window brings the panel back;
+    // without this the icon appears to do nothing. `on_reopen` borrows the
+    // application, so it is a statement rather than part of the chain.
+    application.on_reopen(move |app| {
+        if let Some(handle) = reopen_for_hook.get() {
+            app.update_window(handle, |_, window, _| show_panel(window))
+                .ok();
+        }
+    });
+    application.run(move |cx| {
+        gpui_kit::init(cx);
 
-            // One action channel, owned here: the selection hook, the tray menu and
-            // the global hotkeys all feed it, and the panel view drains it.
-            let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
-            peek_runtime::selection::listen(
-                store::load().unwrap_or_default().double_ctrl_ms,
-                action_tx.clone(),
-                // The view polls the channel, so the wake callback is a no-op.
-                std::sync::Arc::new(|| {}),
+        if let Err(err) = fonts::register(cx) {
+            eprintln!("font registration failed: {err}");
+        }
+        let missing = fonts::missing(cx);
+        if missing.is_empty() {
+            println!("bundled font families registered");
+        } else {
+            eprintln!(
+                "bundled fonts MISSING (file truncated?): {}",
+                missing.join(", ")
             );
-            let tray_tx = action_tx.clone();
-            let view_tx = action_tx.clone();
+        }
+        fonts::apply(cx, fonts::initial());
 
-            let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
-                let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
-                cx.new(|cx| Root::new(view, window, cx))
-            }) {
-                Ok((handle, _)) => handle,
-                Err(err) => {
-                    eprintln!("open_window failed: {err}");
-                    cx.quit();
-                    return;
-                }
-            };
+        // One action channel, owned here: the selection hook, the tray menu and
+        // the global hotkeys all feed it, and the panel view drains it.
+        let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
+        peek_runtime::selection::listen(
+            store::load().unwrap_or_default().double_ctrl_ms,
+            action_tx.clone(),
+            // The view polls the channel, so the wake callback is a no-op.
+            std::sync::Arc::new(|| {}),
+        );
+        let tray_tx = action_tx.clone();
+        let view_tx = action_tx.clone();
 
-            // Tray icon — installed here, see the ordering note at the top.
-            let menu = Menu::new();
-            let show_item = MenuItem::new(i18n::tr("tray-open"), true, None);
-            let snip_item = MenuItem::new(i18n::tr("tray-screenshot"), true, None);
-            let quit_item = MenuItem::new(i18n::tr("tray-quit"), true, None);
-            let show_id = show_item.id().clone();
-            let snip_id = snip_item.id().clone();
-            let quit_id = quit_item.id().clone();
-            let _ = menu.append(&show_item);
-            let _ = menu.append(&snip_item);
-            let _ = menu.append(&quit_item);
-            match TrayIconBuilder::new()
-                .with_menu(Box::new(menu))
-                .with_tooltip(i18n::tr("tray-tooltip"))
-                .with_icon(
-                    TrayIconImage::from_rgba(vec![0x28, 0x28, 0x2c, 0xff], 1, 1)
-                        .expect("1x1 tray icon"),
-                )
-                .build()
-            {
-                Ok(tray) => {
-                    println!("tray icon created");
-                    // Kept alive for the process lifetime; dropping it removes the icon.
-                    std::mem::forget(tray);
-                }
-                Err(err) => eprintln!("tray icon failed: {err}"),
-            }
-
-            // Command+Shift+A toggles the panel; Command+Shift+D starts the
-            // screenshot overlay.
-            let toggle_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
-            let snip_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyD);
-            let toggle_id = toggle_hotkey.id();
-            let snip_hotkey_id = snip_hotkey.id();
-            match GlobalHotKeyManager::new() {
-                Ok(manager) => {
-                    let mut registered = 0;
-                    for hotkey in [toggle_hotkey, snip_hotkey] {
-                        match manager.register(hotkey) {
-                            Ok(()) => registered += 1,
-                            Err(err) => eprintln!("hotkey register failed: {err}"),
-                        }
-                    }
-                    println!("{registered} global hotkey(s) registered");
-                    std::mem::forget(manager);
-                }
-                Err(err) => eprintln!("hotkey manager failed: {err}"),
-            }
-
-            // Automated check of the show/hide path, so the native shim does not
-            // depend on a human pressing the hotkey.
-            if selftest {
-                cx.spawn(async move |cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(300))
-                        .await;
-                    let before = cx
-                        .update_window(handle, |_, window, _| native_window::is_visible(window))
-                        .unwrap_or(false);
-                    println!("[selftest] visible at startup : {before}  <- want false");
-
-                    cx.update_window(handle, |_, window, _| show_panel(window))
-                        .ok();
-                    cx.background_executor()
-                        .timer(Duration::from_millis(500))
-                        .await;
-                    let shown = cx
-                        .update_window(handle, |_, window, _| native_window::is_visible(window))
-                        .unwrap_or(false);
-                    println!("[selftest] visible after show  : {shown}  <- want true");
-
-                    cx.update_window(handle, |_, window, _| native_window::hide(window))
-                        .ok();
-                    // Long enough for the query-pipeline check spawned in
-                    // `Peek::new` to finish before the process exits.
-                    cx.background_executor()
-                        .timer(Duration::from_millis(3200))
-                        .await;
-                    let hidden = cx
-                        .update_window(handle, |_, window, _| native_window::is_visible(window))
-                        .unwrap_or(false);
-                    println!("[selftest] visible after hide  : {hidden}  <- want false");
-
-                    cx.update(quit_now);
-                })
-                .detach();
+        let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
+            let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
+            cx.new(|cx| Root::new(view, window, cx))
+        }) {
+            Ok((handle, _)) => handle,
+            Err(err) => {
+                eprintln!("open_window failed: {err}");
+                cx.quit();
                 return;
             }
+        };
+        reopen_target.set(Some(handle));
+        // Peek mode is an accessory app: no Dock icon and no menu bar. GPUI
+        // switches to Regular whenever a window opens, so this has to run
+        // after the panel exists; the pin button switches back for a
+        // regular window, and unpinning restores this.
+        cx.set_activation_policy(ActivationPolicy::Accessory);
 
-            // Drain the tray/hotkey channels. These are separate ecosystems from
-            // GPUI, so they are polled rather than wired into GPUI's dispatcher.
-            cx.spawn(async move |cx| {
-                loop {
-                    cx.background_executor().timer(POLL).await;
+        // Tray icon — installed here, see the ordering note at the top.
+        let menu = Menu::new();
+        let show_item = MenuItem::new(i18n::tr("tray-open"), true, None);
+        let snip_item = MenuItem::new(i18n::tr("tray-screenshot"), true, None);
+        let quit_item = MenuItem::new(i18n::tr("tray-quit"), true, None);
+        let show_id = show_item.id().clone();
+        let snip_id = snip_item.id().clone();
+        let quit_id = quit_item.id().clone();
+        let _ = menu.append(&show_item);
+        let _ = menu.append(&snip_item);
+        let _ = menu.append(&quit_item);
+        match TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip(i18n::tr("tray-tooltip"))
+            .with_icon(
+                TrayIconImage::from_rgba(vec![0x28, 0x28, 0x2c, 0xff], 1, 1)
+                    .expect("1x1 tray icon"),
+            )
+            .build()
+        {
+            Ok(tray) => {
+                println!("tray icon created");
+                // Kept alive for the process lifetime; dropping it removes the icon.
+                std::mem::forget(tray);
+            }
+            Err(err) => eprintln!("tray icon failed: {err}"),
+        }
 
-                    let mut toggle = false;
-                    let mut quit = false;
-                    let mut screenshot = false;
-
-                    while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                        if event.state != HotKeyState::Pressed {
-                            continue;
-                        }
-                        if event.id == toggle_id {
-                            toggle = true;
-                        } else if event.id == snip_hotkey_id {
-                            screenshot = true;
-                        }
-                    }
-                    while let Ok(event) = MenuEvent::receiver().try_recv() {
-                        if event.id == show_id {
-                            toggle = true;
-                        } else if event.id == snip_id {
-                            screenshot = true;
-                        } else if event.id == quit_id {
-                            quit = true;
-                        }
-                    }
-
-                    // The overlay is opened by the view, which owns that state, so
-                    // the request goes through the same channel as the hook's.
-                    if screenshot {
-                        let _ = tray_tx.send(Action::Screenshot);
-                    }
-
-                    if toggle {
-                        let visible = cx
-                            .update_window(handle, |_, window, _| native_window::is_visible(window))
-                            .unwrap_or(false);
-                        if visible {
-                            let _ = cx
-                                .update_window(handle, |_, window, _| native_window::hide(window));
-                        } else {
-                            let _ = cx.update_window(handle, |_, window, _| show_panel(window));
-                        }
-                    }
-
-                    if quit {
-                        cx.update(quit_now);
-                        return;
+        // Command+Shift+A toggles the panel; Command+Shift+D starts the
+        // screenshot overlay.
+        let toggle_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
+        let snip_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyD);
+        let toggle_id = toggle_hotkey.id();
+        let snip_hotkey_id = snip_hotkey.id();
+        match GlobalHotKeyManager::new() {
+            Ok(manager) => {
+                let mut registered = 0;
+                for hotkey in [toggle_hotkey, snip_hotkey] {
+                    match manager.register(hotkey) {
+                        Ok(()) => registered += 1,
+                        Err(err) => eprintln!("hotkey register failed: {err}"),
                     }
                 }
+                println!("{registered} global hotkey(s) registered");
+                std::mem::forget(manager);
+            }
+            Err(err) => eprintln!("hotkey manager failed: {err}"),
+        }
+
+        // Automated check of the show/hide path, so the native shim does not
+        // depend on a human pressing the hotkey.
+        if selftest {
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                let before = cx
+                    .update_window(handle, |_, window, _| native_window::is_visible(window))
+                    .unwrap_or(false);
+                println!("[selftest] visible at startup : {before}  <- want false");
+
+                cx.update_window(handle, |_, window, _| show_panel(window))
+                    .ok();
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let shown = cx
+                    .update_window(handle, |_, window, _| native_window::is_visible(window))
+                    .unwrap_or(false);
+                println!("[selftest] visible after show  : {shown}  <- want true");
+
+                cx.update_window(handle, |_, window, _| native_window::hide(window))
+                    .ok();
+                // Long enough for the query-pipeline check spawned in
+                // `Peek::new` to finish before the process exits.
+                cx.background_executor()
+                    .timer(Duration::from_millis(3200))
+                    .await;
+                let hidden = cx
+                    .update_window(handle, |_, window, _| native_window::is_visible(window))
+                    .unwrap_or(false);
+                println!("[selftest] visible after hide  : {hidden}  <- want false");
+
+                cx.update(quit_now);
             })
             .detach();
-        });
+            return;
+        }
+
+        // Drain the tray/hotkey channels. These are separate ecosystems from
+        // GPUI, so they are polled rather than wired into GPUI's dispatcher.
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(POLL).await;
+
+                let mut toggle = false;
+                let mut quit = false;
+                let mut screenshot = false;
+
+                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                    if event.state != HotKeyState::Pressed {
+                        continue;
+                    }
+                    if event.id == toggle_id {
+                        toggle = true;
+                    } else if event.id == snip_hotkey_id {
+                        screenshot = true;
+                    }
+                }
+                while let Ok(event) = MenuEvent::receiver().try_recv() {
+                    if event.id == show_id {
+                        toggle = true;
+                    } else if event.id == snip_id {
+                        screenshot = true;
+                    } else if event.id == quit_id {
+                        quit = true;
+                    }
+                }
+
+                // The overlay is opened by the view, which owns that state, so
+                // the request goes through the same channel as the hook's.
+                if screenshot {
+                    let _ = tray_tx.send(Action::Screenshot);
+                }
+
+                if toggle {
+                    let visible = cx
+                        .update_window(handle, |_, window, _| native_window::is_visible(window))
+                        .unwrap_or(false);
+                    if visible {
+                        let _ =
+                            cx.update_window(handle, |_, window, _| native_window::hide(window));
+                    } else {
+                        let _ = cx.update_window(handle, |_, window, _| show_panel(window));
+                    }
+                }
+
+                if quit {
+                    cx.update(quit_now);
+                    return;
+                }
+            }
+        })
+        .detach();
+    });
 
     Ok(())
 }
