@@ -169,7 +169,7 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
 }
 #[cfg(windows)]
 mod win {
-    use super::DoubleCtrl;
+    use super::{DoubleCtrl, Wake};
     use std::sync::{Mutex, OnceLock, mpsc::Sender};
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Com::{

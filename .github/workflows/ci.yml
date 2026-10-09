@@ -3,6 +3,9 @@ on: [push, pull_request]
 jobs:
   test:
     strategy:
+      # Let both platforms report independently. With fail-fast the macOS job was
+      # cancelled while the Windows job failed, which hid macOS's real state.
+      fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -13,8 +16,13 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+      # --all-targets lints every crate including peek-gpui, which is how a
+      # Windows-only import error was caught here.
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # peek-gpui has no tests of its own; skipping its test binary avoids
+      # building the whole GPUI tree twice. Its release build below is the real
+      # "does it compile on this platform" check.
+      - run: cargo test --workspace --exclude peek-gpui
       - run: cargo build --workspace --release
       - name: Package macOS app
         if: runner.os == 'macOS'
