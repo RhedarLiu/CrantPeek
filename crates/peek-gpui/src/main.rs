@@ -131,7 +131,12 @@ struct Peek {
 }
 
 impl Peek {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        action_tx: std::sync::mpsc::Sender<Action>,
+        action_rx: std::sync::mpsc::Receiver<Action>,
+    ) -> Self {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
         let activation = cx.observe_window_activation(window, |_this, window, _cx| {
@@ -147,7 +152,6 @@ impl Peek {
 
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
-        let double_ctrl_ms = config.double_ctrl_ms;
 
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
         let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx));
@@ -179,22 +183,13 @@ impl Peek {
             cancel: None,
         };
 
-        // Double-tap Ctrl: the hook and selection reader live in
-        // `peek-runtime` and are toolkit agnostic. They report through a
-        // channel this view drains on a timer, so no UI context crosses the
-        // platform thread boundary.
-        let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
+        // `main` owns the action channel and feeds it from the selection hook,
+        // the tray and the global hotkeys; this view drains it on a timer, so no
+        // UI context ever crosses a platform thread boundary.
         let selftest_wake = action_tx.clone();
         let snip_test_wake = action_tx.clone();
-        // Kept for the screenshot overlay, which reports recognised text back
-        // through the same channel.
-        let snip_tx = action_tx.clone();
-        peek_runtime::selection::listen(
-            double_ctrl_ms,
-            action_tx,
-            // This view polls the channel, so the wake callback is a no-op.
-            std::sync::Arc::new(|| {}),
-        );
+        // Used by the screenshot overlay to report recognised text back.
+        let snip_tx = action_tx;
         let panel_handle = window.window_handle();
         let snip_selftest = std::env::var("PEEK_SNIP_SELFTEST").is_ok();
         cx.spawn(async move |this, cx| {
@@ -1000,7 +995,10 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             eprintln!("bundled fonts MISSING: {}", missing.join(", "));
         }
         fonts::apply(cx, fonts::initial());
-        let view = cx.new(|cx| Peek::new(window, cx));
+        // A preview needs no external actions; the sender is kept alive so the
+        // receiver does not disconnect.
+        let (_preview_tx, preview_rx) = std::sync::mpsc::channel::<Action>();
+        let view = cx.new(|cx| Peek::new(window, cx, _preview_tx, preview_rx));
         let settings_page = std::env::var("PEEK_PAGE").as_deref() == Ok("settings");
         view.update(cx, |peek, cx| {
             if settings_page {
@@ -1134,8 +1132,20 @@ fn main() -> anyhow::Result<()> {
         }
         fonts::apply(cx, fonts::initial());
 
-        let handle = match gpui_kit::open_window(window_options(), cx, |window, cx| {
-            let view = cx.new(|cx| Peek::new(window, cx));
+        // One action channel, owned here: the selection hook, the tray menu and
+        // the global hotkeys all feed it, and the panel view drains it.
+        let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
+        peek_runtime::selection::listen(
+            store::load().unwrap_or_default().double_ctrl_ms,
+            action_tx.clone(),
+            // The view polls the channel, so the wake callback is a no-op.
+            std::sync::Arc::new(|| {}),
+        );
+        let tray_tx = action_tx.clone();
+        let view_tx = action_tx.clone();
+
+        let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
+            let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
             cx.new(|cx| Root::new(view, window, cx))
         }) {
             Ok((handle, _)) => handle,
@@ -1149,10 +1159,13 @@ fn main() -> anyhow::Result<()> {
         // Tray icon — installed here, see the ordering note at the top.
         let menu = Menu::new();
         let show_item = MenuItem::new(i18n::tr("tray-open"), true, None);
+        let snip_item = MenuItem::new(i18n::tr("tray-screenshot"), true, None);
         let quit_item = MenuItem::new(i18n::tr("tray-quit"), true, None);
         let show_id = show_item.id().clone();
+        let snip_id = snip_item.id().clone();
         let quit_id = quit_item.id().clone();
         let _ = menu.append(&show_item);
+        let _ = menu.append(&snip_item);
         let _ = menu.append(&quit_item);
         match TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -1171,15 +1184,24 @@ fn main() -> anyhow::Result<()> {
             Err(err) => eprintln!("tray icon failed: {err}"),
         }
 
-        let hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
+        // Command+Shift+A toggles the panel; Command+Shift+D starts the
+        // screenshot overlay, matching the egui shell's defaults.
+        let toggle_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
+        let snip_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyD);
+        let toggle_id = toggle_hotkey.id();
+        let snip_hotkey_id = snip_hotkey.id();
         match GlobalHotKeyManager::new() {
-            Ok(manager) => match manager.register(hotkey) {
-                Ok(()) => {
-                    println!("global hotkey registered");
-                    std::mem::forget(manager);
+            Ok(manager) => {
+                let mut registered = 0;
+                for hotkey in [toggle_hotkey, snip_hotkey] {
+                    match manager.register(hotkey) {
+                        Ok(()) => registered += 1,
+                        Err(err) => eprintln!("hotkey register failed: {err}"),
+                    }
                 }
-                Err(err) => eprintln!("hotkey register failed: {err}"),
-            },
+                println!("{registered} global hotkey(s) registered");
+                std::mem::forget(manager);
+            }
             Err(err) => eprintln!("hotkey manager failed: {err}"),
         }
 
@@ -1231,18 +1253,32 @@ fn main() -> anyhow::Result<()> {
 
                 let mut toggle = false;
                 let mut quit = false;
+                let mut screenshot = false;
 
                 while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                    if event.state == HotKeyState::Pressed {
+                    if event.state != HotKeyState::Pressed {
+                        continue;
+                    }
+                    if event.id == toggle_id {
                         toggle = true;
+                    } else if event.id == snip_hotkey_id {
+                        screenshot = true;
                     }
                 }
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
                     if event.id == show_id {
                         toggle = true;
+                    } else if event.id == snip_id {
+                        screenshot = true;
                     } else if event.id == quit_id {
                         quit = true;
                     }
+                }
+
+                // The overlay is opened by the view, which owns that state, so
+                // the request goes through the same channel as the hook's.
+                if screenshot {
+                    let _ = tray_tx.send(Action::Screenshot);
                 }
 
                 if toggle {
