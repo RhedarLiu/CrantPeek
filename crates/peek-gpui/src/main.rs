@@ -629,18 +629,54 @@ impl Peek {
                 .w(px(420.))
                 .content(move |content, _window, cx| {
                     let peek = content_entity.read(cx);
+                    let kind = peek.draft_kind(cx);
+                    let muted = cx.theme().muted_foreground;
+                    let field = |label: String, control: AnyElement| {
+                        v_flex()
+                            .w_full()
+                            .gap(px(4.))
+                            .child(div().text_size(px(11.)).text_color(muted).child(label))
+                            .child(control)
+                            .into_any_element()
+                    };
                     content.child(
                         v_flex()
                             .w_full()
-                            .gap(px(8.))
-                            .child(Select::new(&peek.channel_kind).id("channel-kind-dialog"))
-                            .child(Input::new(&peek.channel_name))
-                            .child(Input::new(&peek.channel_endpoint))
-                            .when(peek.draft_kind(cx).needs_credential(), |this| {
-                                this.child(Input::new(&peek.channel_key))
+                            .gap(px(10.))
+                            .child(field(
+                                i18n::tr("channels-kind"),
+                                Select::new(&peek.channel_kind)
+                                    .id("channel-kind-dialog")
+                                    .into_any_element(),
+                            ))
+                            .child(field(
+                                i18n::tr("channels-name"),
+                                Input::new(&peek.channel_name).into_any_element(),
+                            ))
+                            .child(field(
+                                i18n::tr("channels-endpoint"),
+                                Input::new(&peek.channel_endpoint).into_any_element(),
+                            ))
+                            .when(kind.needs_credential(), |this| {
+                                this.child(field(
+                                    if peek.editing_channel.is_some() {
+                                        // The stored secret is never read back.
+                                        format!(
+                                            "{} · {}",
+                                            i18n::tr("channels-key"),
+                                            i18n::tr("channels-key-keep")
+                                        )
+                                    } else {
+                                        i18n::tr("channels-key")
+                                    },
+                                    Input::new(&peek.channel_key).into_any_element(),
+                                ))
                             })
-                            .when(peek.draft_kind(cx).needs_model(), |this| {
-                                this.child(Input::new(&peek.channel_model))
+                            .when(kind.needs_model(), |this| {
+                                this.child(field(
+                                    i18n::tr("channels-model"),
+                                    Input::new(&peek.channel_model).into_any_element(),
+                                ))
                             }),
                     )
                 })
