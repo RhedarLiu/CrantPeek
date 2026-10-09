@@ -44,6 +44,12 @@ use tokio_util::sync::CancellationToken;
 
 /// Poll interval for the tray/hotkey channels. Both crates deliver events on
 /// their own channels rather than through GPUI, so they are drained on a timer.
+/// Panel geometry: compact until there is something to show, which keeps the
+/// default state a bare input box instead of a mostly empty card stack.
+const PANEL_WIDTH: f32 = 480.;
+const PANEL_COMPACT_HEIGHT: f32 = 244.;
+const PANEL_EXPANDED_HEIGHT: f32 = 560.;
+
 const POLL: Duration = Duration::from_millis(60);
 /// How often streamed answer text is moved from the network channel into the view.
 const DRAIN: Duration = Duration::from_millis(30);
@@ -121,6 +127,9 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
+    /// Last applied height mode, so the window resizes on transitions only
+    /// rather than on every frame.
+    expanded: Option<bool>,
     config: Config,
     client: Client,
     runtime: tokio::runtime::Runtime,
@@ -167,6 +176,7 @@ impl Peek {
             follow_up,
             tasks,
             answer: String::new(),
+            expanded: None,
             pending_input: None,
             original_query: String::new(),
             status: String::new(),
@@ -349,6 +359,14 @@ impl Peek {
     }
 
     /// The task chosen in the dropdown.
+    /// Whether there is more to show than the input box.
+    fn has_result(&self) -> bool {
+        self.busy
+            || !self.answer.is_empty()
+            || !self.status.is_empty()
+            || !self.dictionary_note.is_empty()
+    }
+
     fn selected_task(&self, cx: &App) -> Task {
         self.tasks
             .read(cx)
@@ -608,10 +626,24 @@ impl Render for Peek {
                 .update(cx, |state, cx| state.set_value(text, window, cx));
         }
         if self.settings {
-            self.settings_page(cx).into_any_element()
-        } else {
-            self.query_page(cx).into_any_element()
+            // The settings page has its own size; forget the last mode so
+            // returning to the query page applies the right one.
+            self.expanded = None;
+            return self.settings_page(cx).into_any_element();
         }
+        let expanded = self.has_result();
+        if self.expanded != Some(expanded) {
+            self.expanded = Some(expanded);
+            window.resize(size(
+                px(PANEL_WIDTH),
+                px(if expanded {
+                    PANEL_EXPANDED_HEIGHT
+                } else {
+                    PANEL_COMPACT_HEIGHT
+                }),
+            ));
+        }
+        self.query_page(cx).into_any_element()
     }
 }
 
@@ -728,104 +760,107 @@ impl Peek {
                         )
                     }),
             )
-            // Offline dictionary result, when the input was a single word.
-            .when(!self.dictionary_note.is_empty(), |this| {
-                this.child(
-                    div()
-                        .w_full()
-                        .border_1()
-                        .border_color(border)
-                        .rounded(px(14.))
-                        .p(px(14.))
-                        .font_family(set.sc)
-                        .text_size(px(13.))
-                        .child(self.dictionary_note.clone()),
-                )
-            })
-            // Markdown answer.
-            .child(
-                div()
-                    .id("answer")
-                    .w_full()
-                    .flex_1()
-                    .border_1()
-                    .border_color(border)
-                    .rounded(px(16.))
-                    .p(px(16.))
-                    .overflow_y_scroll()
-                    .when(self.answer.is_empty(), |this| {
+            .when(self.has_result(), |this| {
+                this
+                    // Offline dictionary result, when the input was a single word.
+                    .when(!self.dictionary_note.is_empty(), |this| {
                         this.child(
                             div()
-                                .font_family(set.latin)
+                                .w_full()
+                                .border_1()
+                                .border_color(border)
+                                .rounded(px(14.))
+                                .p(px(14.))
+                                .font_family(set.sc)
                                 .text_size(px(13.))
-                                .text_color(muted)
-                                .child(i18n::tr("query-empty-title")),
+                                .child(self.dictionary_note.clone()),
                         )
                     })
-                    .when(!self.answer.is_empty(), |this| {
-                        this.child(TextView::markdown("answer", self.answer.clone()))
-                    }),
-            )
-            .when(
-                self.permissions.iter().any(|(_, granted)| !granted),
-                |this| {
-                    this.child(
+                    // Markdown answer.
+                    .child(
                         div()
+                            .id("answer")
                             .w_full()
+                            .flex_1()
+                            .border_1()
+                            .border_color(border)
+                            .rounded(px(16.))
+                            .p(px(16.))
+                            .overflow_y_scroll()
+                            .when(self.answer.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .font_family(set.latin)
+                                        .text_size(px(13.))
+                                        .text_color(muted)
+                                        .child(i18n::tr("query-empty-title")),
+                                )
+                            })
+                            .when(!self.answer.is_empty(), |this| {
+                                this.child(TextView::markdown("answer", self.answer.clone()))
+                            }),
+                    )
+                    .when(
+                        self.permissions.iter().any(|(_, granted)| !granted),
+                        |this| {
+                            this.child(
+                                div()
+                                    .w_full()
+                                    .font_family(set.latin)
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .child(format!(
+                                        "{}: {}",
+                                        i18n::tr("settings-permission-denied"),
+                                        // `permissions::status()` already yields localisation keys.
+                                        self.permissions
+                                            .iter()
+                                            .filter(|(_, granted)| !granted)
+                                            .map(|(key, _)| i18n::tr(key))
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    )),
+                            )
+                        },
+                    )
+                    // Follow-up turn, continuing the same conversation.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(
+                                Input::new(&self.follow_up)
+                                    .id("follow-up")
+                                    .flex_1()
+                                    .rounded(px(10.)),
+                            )
+                            .child(
+                                Button::new("send")
+                                    .rounded(px(999.))
+                                    .h(px(34.))
+                                    .px(px(16.))
+                                    .label(i18n::tr("query-send"))
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.send_follow_up(window, cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(px(8.))
                             .font_family(set.latin)
                             .text_size(px(11.))
                             .text_color(muted)
-                            .child(format!(
-                                "{}: {}",
-                                i18n::tr("settings-permission-denied"),
-                                // `permissions::status()` already yields localisation keys.
-                                self.permissions
-                                    .iter()
-                                    .filter(|(_, granted)| !granted)
-                                    .map(|(key, _)| i18n::tr(key))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )),
+                            .child(self.status.clone())
+                            .child(div().flex_1())
+                            // Also the label the settings panel will offer; shown here so
+                            // the active set is visible while the panel is still to come.
+                            .child(set.name),
                     )
-                },
-            )
-            // Follow-up turn, continuing the same conversation.
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        Input::new(&self.follow_up)
-                            .id("follow-up")
-                            .flex_1()
-                            .rounded(px(10.)),
-                    )
-                    .child(
-                        Button::new("send")
-                            .rounded(px(999.))
-                            .h(px(34.))
-                            .px(px(16.))
-                            .label(i18n::tr("query-send"))
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.send_follow_up(window, cx);
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap(px(8.))
-                    .font_family(set.latin)
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child(self.status.clone())
-                    .child(div().flex_1())
-                    // Also the label the settings panel will offer; shown here so
-                    // the active set is visible while the panel is still to come.
-                    .child(set.name),
-            )
+            })
             .into_any_element()
     }
 
@@ -1004,14 +1039,17 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         // receiver does not disconnect.
         let (_preview_tx, preview_rx) = std::sync::mpsc::channel::<Action>();
         let view = cx.new(|cx| Peek::new(window, cx, _preview_tx, preview_rx));
-        let settings_page = std::env::var("PEEK_PAGE").as_deref() == Ok("settings");
+        let page = std::env::var("PEEK_PAGE").unwrap_or_default();
         view.update(cx, |peek, cx| {
-            if settings_page {
+            match page.as_str() {
                 // Not persisted: a preview must not overwrite the real choice.
-                peek.settings = true;
-            } else {
-                peek.answer = SAMPLE_ANSWER.into();
-                peek.status = i18n::tr("status-done");
+                "settings" => peek.settings = true,
+                // The default state: only the input box, nothing else.
+                "compact" => {}
+                _ => {
+                    peek.answer = SAMPLE_ANSWER.into();
+                    peek.status = i18n::tr("status-done");
+                }
             }
             cx.notify();
         });
@@ -1038,7 +1076,7 @@ fn window_options() -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(320.), px(200.)),
-            size: size(px(480.), px(560.)),
+            size: size(px(PANEL_WIDTH), px(PANEL_COMPACT_HEIGHT)),
         })),
         titlebar: Some(TitlebarOptions {
             title: None,
@@ -1120,192 +1158,198 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
+    // An asset source must be attached explicitly: `application()` only builds
+    // the platform, so without this the icon font never loads and every `Icon`
+    // renders as nothing. The offscreen preview passes the same assets, which is
+    // why icons appeared there and not in the running app.
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
 
-        if let Err(err) = fonts::register(cx) {
-            eprintln!("font registration failed: {err}");
-        }
-        let missing = fonts::missing(cx);
-        if missing.is_empty() {
-            println!("bundled font families registered");
-        } else {
-            eprintln!(
-                "bundled fonts MISSING (file truncated?): {}",
-                missing.join(", ")
+            if let Err(err) = fonts::register(cx) {
+                eprintln!("font registration failed: {err}");
+            }
+            let missing = fonts::missing(cx);
+            if missing.is_empty() {
+                println!("bundled font families registered");
+            } else {
+                eprintln!(
+                    "bundled fonts MISSING (file truncated?): {}",
+                    missing.join(", ")
+                );
+            }
+            fonts::apply(cx, fonts::initial());
+
+            // One action channel, owned here: the selection hook, the tray menu and
+            // the global hotkeys all feed it, and the panel view drains it.
+            let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
+            peek_runtime::selection::listen(
+                store::load().unwrap_or_default().double_ctrl_ms,
+                action_tx.clone(),
+                // The view polls the channel, so the wake callback is a no-op.
+                std::sync::Arc::new(|| {}),
             );
-        }
-        fonts::apply(cx, fonts::initial());
+            let tray_tx = action_tx.clone();
+            let view_tx = action_tx.clone();
 
-        // One action channel, owned here: the selection hook, the tray menu and
-        // the global hotkeys all feed it, and the panel view drains it.
-        let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
-        peek_runtime::selection::listen(
-            store::load().unwrap_or_default().double_ctrl_ms,
-            action_tx.clone(),
-            // The view polls the channel, so the wake callback is a no-op.
-            std::sync::Arc::new(|| {}),
-        );
-        let tray_tx = action_tx.clone();
-        let view_tx = action_tx.clone();
-
-        let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
-            let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
-            cx.new(|cx| Root::new(view, window, cx))
-        }) {
-            Ok((handle, _)) => handle,
-            Err(err) => {
-                eprintln!("open_window failed: {err}");
-                cx.quit();
-                return;
-            }
-        };
-
-        // Tray icon — installed here, see the ordering note at the top.
-        let menu = Menu::new();
-        let show_item = MenuItem::new(i18n::tr("tray-open"), true, None);
-        let snip_item = MenuItem::new(i18n::tr("tray-screenshot"), true, None);
-        let quit_item = MenuItem::new(i18n::tr("tray-quit"), true, None);
-        let show_id = show_item.id().clone();
-        let snip_id = snip_item.id().clone();
-        let quit_id = quit_item.id().clone();
-        let _ = menu.append(&show_item);
-        let _ = menu.append(&snip_item);
-        let _ = menu.append(&quit_item);
-        match TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip(i18n::tr("tray-tooltip"))
-            .with_icon(
-                TrayIconImage::from_rgba(vec![0x28, 0x28, 0x2c, 0xff], 1, 1)
-                    .expect("1x1 tray icon"),
-            )
-            .build()
-        {
-            Ok(tray) => {
-                println!("tray icon created");
-                // Kept alive for the process lifetime; dropping it removes the icon.
-                std::mem::forget(tray);
-            }
-            Err(err) => eprintln!("tray icon failed: {err}"),
-        }
-
-        // Command+Shift+A toggles the panel; Command+Shift+D starts the
-        // screenshot overlay.
-        let toggle_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
-        let snip_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyD);
-        let toggle_id = toggle_hotkey.id();
-        let snip_hotkey_id = snip_hotkey.id();
-        match GlobalHotKeyManager::new() {
-            Ok(manager) => {
-                let mut registered = 0;
-                for hotkey in [toggle_hotkey, snip_hotkey] {
-                    match manager.register(hotkey) {
-                        Ok(()) => registered += 1,
-                        Err(err) => eprintln!("hotkey register failed: {err}"),
-                    }
-                }
-                println!("{registered} global hotkey(s) registered");
-                std::mem::forget(manager);
-            }
-            Err(err) => eprintln!("hotkey manager failed: {err}"),
-        }
-
-        // Automated check of the show/hide path, so the native shim does not
-        // depend on a human pressing the hotkey.
-        if selftest {
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(300))
-                    .await;
-                let before = cx
-                    .update_window(handle, |_, window, _| native_window::is_visible(window))
-                    .unwrap_or(false);
-                println!("[selftest] visible at startup : {before}  <- want false");
-
-                cx.update_window(handle, |_, window, _| show_panel(window))
-                    .ok();
-                cx.background_executor()
-                    .timer(Duration::from_millis(500))
-                    .await;
-                let shown = cx
-                    .update_window(handle, |_, window, _| native_window::is_visible(window))
-                    .unwrap_or(false);
-                println!("[selftest] visible after show  : {shown}  <- want true");
-
-                cx.update_window(handle, |_, window, _| native_window::hide(window))
-                    .ok();
-                // Long enough for the query-pipeline check spawned in
-                // `Peek::new` to finish before the process exits.
-                cx.background_executor()
-                    .timer(Duration::from_millis(3200))
-                    .await;
-                let hidden = cx
-                    .update_window(handle, |_, window, _| native_window::is_visible(window))
-                    .unwrap_or(false);
-                println!("[selftest] visible after hide  : {hidden}  <- want false");
-
-                cx.update(quit_now);
-            })
-            .detach();
-            return;
-        }
-
-        // Drain the tray/hotkey channels. These are separate ecosystems from
-        // GPUI, so they are polled rather than wired into GPUI's dispatcher.
-        cx.spawn(async move |cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
-
-                let mut toggle = false;
-                let mut quit = false;
-                let mut screenshot = false;
-
-                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                    if event.state != HotKeyState::Pressed {
-                        continue;
-                    }
-                    if event.id == toggle_id {
-                        toggle = true;
-                    } else if event.id == snip_hotkey_id {
-                        screenshot = true;
-                    }
-                }
-                while let Ok(event) = MenuEvent::receiver().try_recv() {
-                    if event.id == show_id {
-                        toggle = true;
-                    } else if event.id == snip_id {
-                        screenshot = true;
-                    } else if event.id == quit_id {
-                        quit = true;
-                    }
-                }
-
-                // The overlay is opened by the view, which owns that state, so
-                // the request goes through the same channel as the hook's.
-                if screenshot {
-                    let _ = tray_tx.send(Action::Screenshot);
-                }
-
-                if toggle {
-                    let visible = cx
-                        .update_window(handle, |_, window, _| native_window::is_visible(window))
-                        .unwrap_or(false);
-                    if visible {
-                        let _ =
-                            cx.update_window(handle, |_, window, _| native_window::hide(window));
-                    } else {
-                        let _ = cx.update_window(handle, |_, window, _| show_panel(window));
-                    }
-                }
-
-                if quit {
-                    cx.update(quit_now);
+            let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
+                let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
+                cx.new(|cx| Root::new(view, window, cx))
+            }) {
+                Ok((handle, _)) => handle,
+                Err(err) => {
+                    eprintln!("open_window failed: {err}");
+                    cx.quit();
                     return;
                 }
+            };
+
+            // Tray icon — installed here, see the ordering note at the top.
+            let menu = Menu::new();
+            let show_item = MenuItem::new(i18n::tr("tray-open"), true, None);
+            let snip_item = MenuItem::new(i18n::tr("tray-screenshot"), true, None);
+            let quit_item = MenuItem::new(i18n::tr("tray-quit"), true, None);
+            let show_id = show_item.id().clone();
+            let snip_id = snip_item.id().clone();
+            let quit_id = quit_item.id().clone();
+            let _ = menu.append(&show_item);
+            let _ = menu.append(&snip_item);
+            let _ = menu.append(&quit_item);
+            match TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                .with_tooltip(i18n::tr("tray-tooltip"))
+                .with_icon(
+                    TrayIconImage::from_rgba(vec![0x28, 0x28, 0x2c, 0xff], 1, 1)
+                        .expect("1x1 tray icon"),
+                )
+                .build()
+            {
+                Ok(tray) => {
+                    println!("tray icon created");
+                    // Kept alive for the process lifetime; dropping it removes the icon.
+                    std::mem::forget(tray);
+                }
+                Err(err) => eprintln!("tray icon failed: {err}"),
             }
-        })
-        .detach();
-    });
+
+            // Command+Shift+A toggles the panel; Command+Shift+D starts the
+            // screenshot overlay.
+            let toggle_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
+            let snip_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyD);
+            let toggle_id = toggle_hotkey.id();
+            let snip_hotkey_id = snip_hotkey.id();
+            match GlobalHotKeyManager::new() {
+                Ok(manager) => {
+                    let mut registered = 0;
+                    for hotkey in [toggle_hotkey, snip_hotkey] {
+                        match manager.register(hotkey) {
+                            Ok(()) => registered += 1,
+                            Err(err) => eprintln!("hotkey register failed: {err}"),
+                        }
+                    }
+                    println!("{registered} global hotkey(s) registered");
+                    std::mem::forget(manager);
+                }
+                Err(err) => eprintln!("hotkey manager failed: {err}"),
+            }
+
+            // Automated check of the show/hide path, so the native shim does not
+            // depend on a human pressing the hotkey.
+            if selftest {
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(300))
+                        .await;
+                    let before = cx
+                        .update_window(handle, |_, window, _| native_window::is_visible(window))
+                        .unwrap_or(false);
+                    println!("[selftest] visible at startup : {before}  <- want false");
+
+                    cx.update_window(handle, |_, window, _| show_panel(window))
+                        .ok();
+                    cx.background_executor()
+                        .timer(Duration::from_millis(500))
+                        .await;
+                    let shown = cx
+                        .update_window(handle, |_, window, _| native_window::is_visible(window))
+                        .unwrap_or(false);
+                    println!("[selftest] visible after show  : {shown}  <- want true");
+
+                    cx.update_window(handle, |_, window, _| native_window::hide(window))
+                        .ok();
+                    // Long enough for the query-pipeline check spawned in
+                    // `Peek::new` to finish before the process exits.
+                    cx.background_executor()
+                        .timer(Duration::from_millis(3200))
+                        .await;
+                    let hidden = cx
+                        .update_window(handle, |_, window, _| native_window::is_visible(window))
+                        .unwrap_or(false);
+                    println!("[selftest] visible after hide  : {hidden}  <- want false");
+
+                    cx.update(quit_now);
+                })
+                .detach();
+                return;
+            }
+
+            // Drain the tray/hotkey channels. These are separate ecosystems from
+            // GPUI, so they are polled rather than wired into GPUI's dispatcher.
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor().timer(POLL).await;
+
+                    let mut toggle = false;
+                    let mut quit = false;
+                    let mut screenshot = false;
+
+                    while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                        if event.state != HotKeyState::Pressed {
+                            continue;
+                        }
+                        if event.id == toggle_id {
+                            toggle = true;
+                        } else if event.id == snip_hotkey_id {
+                            screenshot = true;
+                        }
+                    }
+                    while let Ok(event) = MenuEvent::receiver().try_recv() {
+                        if event.id == show_id {
+                            toggle = true;
+                        } else if event.id == snip_id {
+                            screenshot = true;
+                        } else if event.id == quit_id {
+                            quit = true;
+                        }
+                    }
+
+                    // The overlay is opened by the view, which owns that state, so
+                    // the request goes through the same channel as the hook's.
+                    if screenshot {
+                        let _ = tray_tx.send(Action::Screenshot);
+                    }
+
+                    if toggle {
+                        let visible = cx
+                            .update_window(handle, |_, window, _| native_window::is_visible(window))
+                            .unwrap_or(false);
+                        if visible {
+                            let _ = cx
+                                .update_window(handle, |_, window, _| native_window::hide(window));
+                        } else {
+                            let _ = cx.update_window(handle, |_, window, _| show_panel(window));
+                        }
+                    }
+
+                    if quit {
+                        cx.update(quit_now);
+                        return;
+                    }
+                }
+            })
+            .detach();
+        });
 
     Ok(())
 }
