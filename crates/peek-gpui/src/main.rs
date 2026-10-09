@@ -37,7 +37,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
 use peek_core::{Config, Message, Task, effective_target, local_route};
 use peek_network::{Client, Event};
-use peek_runtime::action::Action;
+use peek_runtime::action::{Action, OverlayEvent};
 use peek_runtime::{i18n, store};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -120,6 +120,9 @@ struct Peek {
     busy: bool,
     dictionary_note: String,
 
+    /// Set while a turn belongs to the screenshot overlay: its progress is
+    /// forwarded there instead of being shown in the panel.
+    overlay: Option<std::sync::mpsc::Sender<OverlayEvent>>,
     /// Permission name (already an i18n key) and whether it is granted. The
     /// double-tap Ctrl hook and selection reading need Accessibility and Input
     /// Monitoring; without them they fail silently, so the panel says so
@@ -177,6 +180,7 @@ impl Peek {
             tasks,
             answer: String::new(),
             expanded: None,
+            overlay: None,
             pending_input: None,
             original_query: String::new(),
             status: String::new(),
@@ -263,6 +267,26 @@ impl Peek {
                                 }
                                 Err(err) => println!("[snip] overlay NOT opened: {err}"),
                             }
+                        }
+                        Action::Translate { text, replies } => {
+                            // The overlay owns this turn: progress goes back to
+                            // it and the panel stays hidden.
+                            let started = this
+                                .update(cx, |peek, cx| {
+                                    peek.overlay = Some(replies);
+                                    let started = peek.begin_turn(text, false, cx);
+                                    if !started {
+                                        // `begin_turn` left a status explaining
+                                        // why it could not run.
+                                        let status = peek.status.clone();
+                                        peek.forward_overlay(OverlayEvent::Status(status));
+                                        peek.forward_overlay(OverlayEvent::Finished);
+                                        peek.overlay = None;
+                                    }
+                                    started
+                                })
+                                .unwrap_or(false);
+                            let _ = started;
                         }
                         Action::Recognized(text) => {
                             let _ = cx
@@ -592,10 +616,24 @@ impl Peek {
         true
     }
 
+    /// Reports progress to the overlay, dropping the link when it has gone.
+    fn forward_overlay(&mut self, event: OverlayEvent) {
+        let broken = match &self.overlay {
+            Some(tx) => tx.send(event).is_err(),
+            None => false,
+        };
+        if broken {
+            self.overlay = None;
+        }
+    }
+
     fn apply_events(&mut self, events: Vec<Event>) {
         for event in events {
             match event {
-                Event::Route { note, .. } => self.status = note,
+                Event::Route { note, .. } => {
+                    self.status = note.clone();
+                    self.forward_overlay(OverlayEvent::Status(note));
+                }
                 Event::Text(delta) => {
                     if self.answer.len() + delta.len() > peek_core::MAX_OUTPUT_BYTES {
                         self.status = i18n::tr("status-output-too-long");
@@ -603,14 +641,20 @@ impl Peek {
                         break;
                     }
                     self.answer.push_str(&delta);
+                    self.forward_overlay(OverlayEvent::Chunk(delta));
                 }
                 Event::Done => {
                     self.status = i18n::tr("status-done");
                     self.busy = false;
+                    self.forward_overlay(OverlayEvent::Finished);
+                    self.overlay = None;
                 }
                 Event::Failed(message) => {
-                    self.status = message;
+                    self.status = message.clone();
                     self.busy = false;
+                    self.forward_overlay(OverlayEvent::Status(message));
+                    self.forward_overlay(OverlayEvent::Finished);
+                    self.overlay = None;
                 }
             }
         }
@@ -1025,7 +1069,14 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         gpui_kit::platform::current_headless_renderer,
     );
 
-    let window = cx.open_window(size(px(480.), px(560.)), |window, cx| {
+    let page = std::env::var("PEEK_PAGE").unwrap_or_default();
+    // The overlay preview needs a desktop-sized canvas; the panel is a popup.
+    let preview_size = if page == "snip" {
+        size(px(1400.), px(900.))
+    } else {
+        size(px(480.), px(560.))
+    };
+    let window = cx.open_window(preview_size, |window, cx| {
         gpui_kit::init(cx);
         if let Err(err) = fonts::register(cx) {
             eprintln!("font registration failed: {err}");
@@ -1038,8 +1089,11 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         // A preview needs no external actions; the sender is kept alive so the
         // receiver does not disconnect.
         let (_preview_tx, preview_rx) = std::sync::mpsc::channel::<Action>();
+        if page == "snip" {
+            let view = cx.new(snip::Snip::preview);
+            return cx.new(|cx| gpui_kit::base::Root::new(view, window, cx));
+        }
         let view = cx.new(|cx| Peek::new(window, cx, _preview_tx, preview_rx));
-        let page = std::env::var("PEEK_PAGE").unwrap_or_default();
         view.update(cx, |peek, cx| {
             match page.as_str() {
                 // Not persisted: a preview must not overwrite the real choice.

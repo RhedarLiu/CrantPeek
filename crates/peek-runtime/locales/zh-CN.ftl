@@ -47,6 +47,9 @@ form-superlative = 最高级
 form-plural = 复数
 
 ## 截图
+snip-copy-text = 提取文本
+snip-to-input = 填入输入框
+snip-copied = 已复制原文
 snip-hint = 拖动框选 · Esc 取消
 snip-image-title = 截图选区
 snip-explain = 图片解读
