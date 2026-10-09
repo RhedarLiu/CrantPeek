@@ -51,6 +51,9 @@ use tokio_util::sync::CancellationToken;
 const PANEL_WIDTH: f32 = 480.;
 const PANEL_COMPACT_HEIGHT: f32 = 244.;
 const PANEL_EXPANDED_HEIGHT: f32 = 560.;
+/// The settings page carries the channel list, its add form, the used-for
+/// pickers and the permission report, so it needs more room than the panel.
+const PANEL_SETTINGS_HEIGHT: f32 = 660.;
 
 const POLL: Duration = Duration::from_millis(60);
 /// How often streamed answer text is moved from the network channel into the view.
@@ -142,9 +145,9 @@ struct Peek {
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
     pinned: bool,
-    /// Last applied height mode, so the window resizes on transitions only
+    /// Last applied window height, so the window resizes on transitions only
     /// rather than on every frame.
-    expanded: Option<bool>,
+    applied_height: Option<f32>,
     config: Config,
     client: Client,
     runtime: tokio::runtime::Runtime,
@@ -210,7 +213,7 @@ impl Peek {
             channel_kind,
             tasks,
             answer: String::new(),
-            expanded: None,
+            applied_height: None,
             pinned: false,
             overlay: None,
             pending_input: None,
@@ -935,23 +938,22 @@ impl Render for Peek {
             self.input
                 .update(cx, |state, cx| state.set_value(text, window, cx));
         }
-        if self.settings {
-            // The settings page has its own size; forget the last mode so
-            // returning to the query page applies the right one.
-            self.expanded = None;
-            return self.settings_page(cx).into_any_element();
+        // Resize before drawing. The query page stays compact until it has
+        // something to show, while the settings page is always tall; sizing it
+        // only from the query page left settings clipped to a compact window.
+        let height = if self.settings {
+            PANEL_SETTINGS_HEIGHT
+        } else if self.has_result() {
+            PANEL_EXPANDED_HEIGHT
+        } else {
+            PANEL_COMPACT_HEIGHT
+        };
+        if self.applied_height != Some(height) {
+            self.applied_height = Some(height);
+            window.resize(size(px(PANEL_WIDTH), px(height)));
         }
-        let expanded = self.has_result();
-        if self.expanded != Some(expanded) {
-            self.expanded = Some(expanded);
-            window.resize(size(
-                px(PANEL_WIDTH),
-                px(if expanded {
-                    PANEL_EXPANDED_HEIGHT
-                } else {
-                    PANEL_COMPACT_HEIGHT
-                }),
-            ));
+        if self.settings {
+            return self.settings_page(cx).into_any_element();
         }
         self.query_page(cx).into_any_element()
     }
@@ -1249,11 +1251,15 @@ impl Peek {
         let muted = theme.muted_foreground;
 
         v_flex()
+            .id("settings-scroll")
             .size_full()
             .bg(bg)
             .text_color(fg)
             .p(px(20.))
             .gap(px(14.))
+            // The page is taller than the window: channels, their fields, the
+            // used-for list and the permission report all live here.
+            .overflow_y_scroll()
             .on_key_down(|event, window, _cx| {
                 if event.keystroke.key == "escape" {
                     native_window::hide(window);
