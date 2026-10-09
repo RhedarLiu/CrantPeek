@@ -330,6 +330,8 @@ pub struct Config {
     pub basic_channel: String,
     /// Channel used for AI tasks, follow-ups and routing decisions.
     pub ai_channel: String,
+    /// Close the screenshot overlay as soon as its text is copied.
+    pub snip_close_on_copy: bool,
     pub target_language: String,
     pub chinese_target: String,
     pub blank_hotkey: String,
@@ -357,6 +359,7 @@ impl Default for Config {
             channels: Vec::new(),
             basic_channel: String::new(),
             ai_channel: String::new(),
+            snip_close_on_copy: true,
             target_language: "Chinese".into(),
             chinese_target: "English".into(),
             blank_hotkey: format!("{modifier}+Shift+A"),

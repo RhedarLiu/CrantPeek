@@ -26,6 +26,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -143,6 +145,8 @@ struct Peek {
     channel_model: Entity<InputState>,
     channel_key: Entity<InputState>,
     channel_kind: Entity<SelectState<Vec<SharedString>>>,
+    /// Which settings tab is showing.
+    settings_tab: usize,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
@@ -208,6 +212,7 @@ impl Peek {
             _activation: activation,
             input,
             follow_up,
+            settings_tab: 0,
             editing_channel: None,
             channel_name,
             channel_endpoint,
@@ -277,7 +282,10 @@ impl Peek {
                             // The overlay captures on release, so this only
                             // opens the selection window.
                             let tx = snip_tx.clone();
-                            let opened = cx.update(|app| snip::open(app, tx));
+                            let close_on_copy = this
+                                .update(cx, |peek, _| peek.config.snip_close_on_copy)
+                                .unwrap_or(true);
+                            let opened = cx.update(|app| snip::open(app, tx, close_on_copy));
                             match opened {
                                 Ok((handle, bounds)) => {
                                     println!(
@@ -1396,7 +1404,7 @@ impl Peek {
         let muted = theme.muted_foreground;
 
         v_flex()
-            .id("settings-scroll")
+            .id("settings_scroll")
             .size_full()
             .bg(bg)
             .text_color(fg)
@@ -1435,148 +1443,191 @@ impl Peek {
                     ),
             )
             .child(
-                v_flex()
-                    .w_full()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .font_family(set.latin)
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(i18n::tr("settings-font-set")),
-                    )
-                    .children(fonts::ALL.iter().map(|candidate| {
-                        let id = candidate.id;
-                        let active = id == set.id;
-                        Button::new(id)
-                            .when(active, |button| button.primary())
-                            .label(candidate.name)
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.choose_font_set(id, cx);
-                            }))
+                TabBar::new("settings_tabs")
+                    .children([
+                        Tab::new().label(i18n::tr("settings-tab-appearance")),
+                        Tab::new().label(i18n::tr("settings-tab-translation")),
+                        Tab::new().label(i18n::tr("settings-tab-permissions")),
+                    ])
+                    .selected_index(self.settings_tab)
+                    .on_click(cx.listener(|this, index: &usize, _window, cx| {
+                        this.settings_tab = *index;
+                        cx.notify();
                     })),
             )
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap(px(6.))
-                    .child(self.section_label(i18n::tr("channels-title"), set, muted))
-                    .when(self.config.channels.is_empty(), |this| {
-                        this.child(
+            .when(self.settings_tab == 0, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(6.))
+                        .child(
                             div()
                                 .font_family(set.latin)
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(i18n::tr("channels-empty")),
+                                .child(i18n::tr("settings-font-set")),
                         )
-                    })
-                    // Each configured channel, with a way to remove it. A kind
-                    // decides what a channel needs, so the label carries it.
-                    .children(channels.iter().map(|(id, name, kind_key, _)| {
-                        let edit_id = id.clone();
-                        let remove_id = id.clone();
-                        let label = format!("{name} · {}", i18n::tr(kind_key));
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
+                        .children(fonts::ALL.iter().map(|candidate| {
+                            let id = candidate.id;
+                            let active = id == set.id;
+                            Button::new(id)
+                                .when(active, |button| button.primary())
+                                .label(candidate.name)
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.choose_font_set(id, cx);
+                                }))
+                        })),
+                )
+            })
+            .when(self.settings_tab == 1, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(6.))
+                        .child(self.section_label(i18n::tr("channels-title"), set, muted))
+                        .when(self.config.channels.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .font_family(set.latin)
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .child(i18n::tr("channels-empty")),
+                            )
+                        })
+                        // Each configured channel, with a way to remove it. A kind
+                        // decides what a channel needs, so the label carries it.
+                        .children(channels.iter().map(|(id, name, kind_key, _)| {
+                            let edit_id = id.clone();
+                            let remove_id = id.clone();
+                            let label = format!("{name} · {}", i18n::tr(kind_key));
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_family(set.latin)
+                                        .text_size(px(12.))
+                                        .child(label),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("edit-{id}")))
+                                        .icon(IconName::Pencil)
+                                        .tooltip(i18n::tr("channels-edit"))
+                                        .on_click(cx.listener(move |this, _event, window, cx| {
+                                            this.open_channel_dialog(
+                                                Some(edit_id.clone()),
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("remove-{id}")))
+                                        .icon(IconName::X)
+                                        .tooltip(i18n::tr("channels-remove"))
+                                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                                            this.remove_channel(&remove_id, cx);
+                                        })),
+                                )
+                                .into_any_element()
+                        }))
+                        .child(
+                            Button::new("add-channel")
+                                .icon(IconName::Plus)
+                                .label(i18n::tr("channels-add"))
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.open_channel_dialog(None, window, cx);
+                                })),
+                        ),
+                )
+            })
+            // Which channel serves which place. Only kinds that can do the job
+            // are offered: a translation-only channel never appears for AI work.
+            .when(self.settings_tab == 1, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(6.))
+                        .child(
+                            h_flex().w_full().items_center().gap(px(8.)).child(
                                 div()
                                     .flex_1()
                                     .font_family(set.latin)
                                     .text_size(px(12.))
-                                    .child(label),
+                                    .child(i18n::tr("settings-snip-close-on-copy")),
+                            ),
+                        )
+                        .child(self.section_label(i18n::tr("channels-usage"), set, muted))
+                        .child(self.section_label(i18n::tr("channels-basic"), set, muted))
+                        .when(channels.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .font_family(set.latin)
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .child(i18n::tr("channels-none")),
                             )
-                            .child(
-                                Button::new(SharedString::from(format!("edit-{id}")))
-                                    .icon(IconName::Pencil)
-                                    .tooltip(i18n::tr("channels-edit"))
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        this.open_channel_dialog(Some(edit_id.clone()), window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("remove-{id}")))
-                                    .icon(IconName::X)
-                                    .tooltip(i18n::tr("channels-remove"))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.remove_channel(&remove_id, cx);
-                                    })),
-                            )
-                            .into_any_element()
-                    }))
-                    .child(
-                        Button::new("add-channel")
-                            .icon(IconName::Plus)
-                            .label(i18n::tr("channels-add"))
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.open_channel_dialog(None, window, cx);
-                            })),
-                    ),
-            )
-            // Which channel serves which place. Only kinds that can do the job
-            // are offered: a translation-only channel never appears for AI work.
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap(px(6.))
-                    .child(self.section_label(i18n::tr("channels-usage"), set, muted))
-                    .child(self.section_label(i18n::tr("channels-basic"), set, muted))
-                    .when(channels.is_empty(), |this| {
-                        this.child(
+                        })
+                        .children(channels.iter().map(|(id, name, _, _)| {
+                            let choice = id.clone();
+                            Button::new(SharedString::from(format!("basic-{id}")))
+                                .when(*id == basic_active, |button| button.primary())
+                                .label(name.clone())
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.assign_channel(false, choice.clone(), cx);
+                                }))
+                        }))
+                        .child(self.section_label(i18n::tr("channels-ai"), set, muted))
+                        .children(ai_channels.iter().map(|(id, name)| {
+                            let choice = id.clone();
+                            Button::new(SharedString::from(format!("ai-{id}")))
+                                .when(*id == ai_active, |button| button.primary())
+                                .label(name.clone())
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.assign_channel(true, choice.clone(), cx);
+                                }))
+                        })),
+                )
+                .child(
+                    Switch::new("snip-close-on-copy")
+                        .checked(self.config.snip_close_on_copy)
+                        .on_click(cx.listener(|this, checked: &bool, _window, cx| {
+                            this.config.snip_close_on_copy = *checked;
+                            this.persist_config();
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(self.settings_tab == 2, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(4.))
+                        .child(
                             div()
                                 .font_family(set.latin)
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(i18n::tr("channels-none")),
+                                .child(i18n::tr("settings-permissions")),
                         )
-                    })
-                    .children(channels.iter().map(|(id, name, _, _)| {
-                        let choice = id.clone();
-                        Button::new(SharedString::from(format!("basic-{id}")))
-                            .when(*id == basic_active, |button| button.primary())
-                            .label(name.clone())
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.assign_channel(false, choice.clone(), cx);
-                            }))
-                    }))
-                    .child(self.section_label(i18n::tr("channels-ai"), set, muted))
-                    .children(ai_channels.iter().map(|(id, name)| {
-                        let choice = id.clone();
-                        Button::new(SharedString::from(format!("ai-{id}")))
-                            .when(*id == ai_active, |button| button.primary())
-                            .label(name.clone())
-                            .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.assign_channel(true, choice.clone(), cx);
-                            }))
-                    })),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .font_family(set.latin)
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(i18n::tr("settings-permissions")),
-                    )
-                    .children(self.permissions.iter().map(|(key, granted)| {
-                        div()
-                            .font_family(set.latin)
-                            .text_size(px(12.))
-                            .child(format!(
-                                "{} — {}",
-                                i18n::tr(key),
-                                i18n::tr(if *granted {
-                                    "settings-permission-granted"
-                                } else {
-                                    "settings-permission-denied"
-                                })
-                            ))
-                    })),
-            )
+                        .children(self.permissions.iter().map(|(key, granted)| {
+                            div()
+                                .font_family(set.latin)
+                                .text_size(px(12.))
+                                .child(format!(
+                                    "{} — {}",
+                                    i18n::tr(key),
+                                    i18n::tr(if *granted {
+                                        "settings-permission-granted"
+                                    } else {
+                                        "settings-permission-denied"
+                                    })
+                                ))
+                        })),
+                )
+            })
             .into_any_element()
     }
 }

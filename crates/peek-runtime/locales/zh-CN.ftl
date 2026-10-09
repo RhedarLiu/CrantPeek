@@ -50,7 +50,7 @@ form-superlative = 最高级
 form-plural = 复数
 
 ## 截图
-snip-copy-text = 提取文本
+snip-copy-text = 复制文本
 snip-to-input = 填入输入框
 snip-copied = 已复制原文
 snip-hint = 拖动框选 · Esc 取消
@@ -125,6 +125,9 @@ error-config-decision-timeout = 决策超时需在 100–10000 ms
 error-config-decision-threshold = 决策阈值无效
 
 ## 设置
+settings-tab-appearance = 外观
+settings-tab-translation = 翻译
+settings-tab-permissions = 权限
 settings-title = 设置
 settings-save = 保存
 settings-cancel = 取消
@@ -209,6 +212,7 @@ settings-smart-mode = 智能判断任务
 settings-ocr-auto = 截图识字后自动查询
 settings-ocr-auto-hint = 关闭后只在本地识字，点击查询或图片按钮才调用外部服务。
 settings-hide-on-blur = 失焦时自动隐藏
+settings-snip-close-on-copy = 复制文本后关闭截图窗口
 settings-permissions = 系统权限
 settings-permission-granted = 已授权
 settings-permission-denied = 未授权

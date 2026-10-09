@@ -59,6 +59,8 @@ pub struct Snip {
     focus: FocusHandle,
     /// The selection is committed; only the result card stays interactive.
     captured: bool,
+    /// Close as soon as the text is copied, from the user's settings.
+    close_on_copy: bool,
 }
 
 impl Snip {
@@ -66,6 +68,7 @@ impl Snip {
         screen: Arc<Screen>,
         backdrop: Arc<RenderImage>,
         link: Sender<Action>,
+        close_on_copy: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
@@ -84,6 +87,7 @@ impl Snip {
             events: None,
             focus: cx.focus_handle(),
             captured: false,
+            close_on_copy,
         };
         // The worker thread and the panel's progress channel cannot touch GPUI
         // state, so both are drained here.
@@ -111,7 +115,7 @@ impl Snip {
         });
         let image = backdrop(&screen);
         let (tx, _rx) = std::sync::mpsc::channel();
-        let mut snip = Self::new(screen, image, tx, cx);
+        let mut snip = Self::new(screen, image, tx, true, cx);
         snip.captured = true;
         snip.anchor = Some(point(px(180.), px(240.)));
         snip.cursor = Some(point(px(820.), px(380.)));
@@ -239,14 +243,20 @@ impl Snip {
     /// Copies the recognised text and confirms with a toast, so the card does
     /// not have to grow a status line for a transient message.
     fn copy_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.text.clone() {
-            let characters = text.chars().count();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let Some(text) = self.text.clone() else {
+            return;
+        };
+        let characters = text.chars().count();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        eprintln!("[snip] copied {characters} chars to the clipboard");
+        if self.close_on_copy {
+            // A toast would vanish with the window, so there is nothing to show.
+            self.close(window);
+        } else {
             window.push_notification(
                 Notification::success(i18n::tr("snip-copied")).autohide(true),
                 cx,
             );
-            eprintln!("[snip] copied {characters} chars to the clipboard");
         }
     }
 
@@ -402,15 +412,10 @@ impl Render for Snip {
                     .size_full()
                     .object_fit(ObjectFit::Fill),
             )
-            // Dimming over the frame.
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .bg(hsla(0.0, 0.0, 0.0, 0.30)),
-            )
+            // Dimming, but never over the selection itself: four bands around
+            // it are drawn instead of one sheet, so the chosen region keeps the
+            // frame's real brightness.
+            .children(dim_bands(selection, window))
             .when(!self.captured, |this| {
                 this.child(
                     div()
@@ -438,6 +443,42 @@ impl Render for Snip {
     }
 }
 
+/// The dimming bands around the selection, or one sheet while nothing is
+/// selected yet. Keeping the selection undimmed is what makes it readable.
+fn dim_bands(selection: Option<Rect>, window: &Window) -> Vec<AnyElement> {
+    let dim = hsla(0.0, 0.0, 0.0, 0.30);
+    let view: Point<Pixels> = window.bounds().size.into();
+    let width: f32 = view.x.into();
+    let height: f32 = view.y.into();
+    let Some(rect) = selection else {
+        return vec![
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(dim)
+                .into_any_element(),
+        ];
+    };
+    let band = |left: f32, top: f32, w: f32, h: f32| {
+        div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(w.max(0.)))
+            .h(px(h.max(0.)))
+            .bg(dim)
+            .into_any_element()
+    };
+    vec![
+        band(0., 0., width, rect.min[1]),
+        band(0., rect.max[1], width, height - rect.max[1]),
+        band(0., rect.min[1], rect.min[0], rect.height()),
+        band(rect.max[0], rect.min[1], width - rect.max[0], rect.height()),
+    ]
+}
+
 /// Converts a captured RGBA frame into GPUI's BGRA render image.
 fn backdrop(screen: &Screen) -> Arc<RenderImage> {
     // GPUI stores pixels as BGRA, xcap as RGBA, so R and B swap.
@@ -452,7 +493,11 @@ fn backdrop(screen: &Screen) -> Arc<RenderImage> {
 ///
 /// Errors are reported as text for the log; the caller leaves the panel as it
 /// was rather than showing a broken overlay.
-pub fn open(cx: &mut App, link: Sender<Action>) -> Result<(AnyWindowHandle, Rect), String> {
+pub fn open(
+    cx: &mut App,
+    link: Sender<Action>,
+    close_on_copy: bool,
+) -> Result<(AnyWindowHandle, Rect), String> {
     let bounds = capture::monitor_bounds().ok_or("no monitor bounds")?;
     let screen = Arc::new(capture::capture().map_err(|err| format!("capture failed: {err}"))?);
     let backdrop = backdrop(&screen);
@@ -473,7 +518,7 @@ pub fn open(cx: &mut App, link: Sender<Action>) -> Result<(AnyWindowHandle, Rect
         ..Default::default()
     };
     let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-        let view = cx.new(|cx| Snip::new(screen, backdrop, link, cx));
+        let view = cx.new(|cx| Snip::new(screen, backdrop, link, close_on_copy, cx));
         let focus = view.read(cx).focus.clone();
         window.focus(&focus, cx);
         crate::native_window::make_capture_overlay(window);
