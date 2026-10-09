@@ -223,7 +223,7 @@ impl Peek {
                             let tx = snip_tx.clone();
                             let opened = cx.update(|app| snip::open(app, tx));
                             match opened {
-                                Some((handle, bounds)) => {
+                                Ok((handle, bounds)) => {
                                     println!(
                                         "[snip] overlay open: origin=({:.0},{:.0}) size={:.0}x{:.0}",
                                         bounds.min[0],
@@ -252,15 +252,22 @@ impl Peek {
                                         .detach();
                                     }
                                 }
-                                None => println!("[snip] overlay NOT opened (no monitor bounds)"),
+                                Err(err) => println!("[snip] overlay NOT opened: {err}"),
                             }
                         }
                         Action::Recognized(text) => {
                             let _ = cx
                                 .update_window(panel_handle, |_, window, _| show_panel(window));
+                            let text = text.trim().to_owned();
                             this.update(cx, |peek, cx| {
-                                peek.pending_input = Some(text.clone());
-                                peek.begin_turn(text, false, cx);
+                                if text.is_empty() {
+                                    // Say so instead of the selection vanishing.
+                                    peek.status = i18n::tr("status-ocr-empty");
+                                    cx.notify();
+                                } else {
+                                    peek.pending_input = Some(text.clone());
+                                    peek.begin_turn(text, false, cx);
+                                }
                             })
                             .ok();
                         }

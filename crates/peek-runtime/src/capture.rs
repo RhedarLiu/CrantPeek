@@ -239,15 +239,11 @@ pub fn monitor_bounds() -> Option<Rect> {
 }
 
 pub fn capture() -> Result<Screen, String> {
-    let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
-    let monitor = cursor_position()
-        .and_then(|(x, y)| xcap::Monitor::from_point(x, y).ok())
-        .or_else(|| {
-            monitors
-                .into_iter()
-                .find(|m| m.is_primary().unwrap_or(false))
-        })
-        .ok_or("error-no-display")?;
+    // `Monitor::from_point` fails with "Monitor is not active" on macOS, so the
+    // cursor's display is resolved by rectangle containment (falls back to the
+    // primary display inside `pick_monitor`).
+    let monitor =
+        monitor_containing(cursor_position().unwrap_or((0, 0))).ok_or("error-no-display")?;
     Ok(Screen {
         pixels: monitor.capture_image().map_err(|e| e.to_string())?,
         origin: [

@@ -1,39 +1,57 @@
 //! Full-screen region selection overlay for screenshot translation.
 //!
-//! The overlay deliberately does **not** pre-capture the display: it opens a
-//! transparent always-on-top window covering the monitor, the user drags a
-//! region, and the capture happens on release. Enumerating monitors needs no
-//! system permission (only `capture_image` does), so the overlay is fully
-//! testable before Screen Recording has been granted — and it lets the user aim
-//! at live, up-to-date screen content instead of a frozen frame.
+//! The display is captured **before** the overlay opens, and that frozen frame
+//! is drawn as the overlay's background, which is how the system screenshot
+//! tool behaves. Two problems found on a real machine forced this:
 //!
-//! Recognised text is reported back through the shell's action channel as
+//! * Capturing on release raced the overlay's own removal: macOS removes a
+//!   window asynchronously, so the capture usually contained the grey overlay
+//!   and OCR found nothing. Only an occasional run won the race.
+//! * A "transparent" GPUI window rendered as an opaque grey sheet, so the user
+//!   could not see what they were selecting.
+//!
+//! The crop and OCR therefore use the pre-captured frame, never a second
+//! capture. Recognised text goes back through the shell's action channel as
 //! [`Action::Recognized`]. Nothing is written to disk.
 
-use std::sync::mpsc::Sender;
+use std::sync::{Arc, mpsc::Sender};
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use peek_runtime::action::Action;
-use peek_runtime::capture::{self, Rect};
+use peek_runtime::capture::{self, Rect, Screen};
 
 pub struct Snip {
     /// Where the drag started, in window coordinates.
     anchor: Option<Point<Pixels>>,
     cursor: Option<Point<Pixels>>,
+    /// The frame captured before the overlay opened; crop and OCR use it.
+    screen: Arc<Screen>,
+    /// The same frame converted for display.
+    backdrop: Arc<RenderImage>,
     /// Where the recognised text goes.
     result: Sender<Action>,
+    /// Keyboard focus, so Esc reaches the overlay.
+    focus: FocusHandle,
     /// Guards against a release firing after Esc already closed the overlay.
     done: bool,
 }
 
 impl Snip {
-    pub fn new(result: Sender<Action>) -> Self {
+    fn new(
+        screen: Arc<Screen>,
+        backdrop: Arc<RenderImage>,
+        result: Sender<Action>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             anchor: None,
             cursor: None,
+            screen,
+            backdrop,
             result,
+            focus: cx.focus_handle(),
             done: false,
         }
     }
@@ -47,33 +65,34 @@ impl Snip {
         ))
     }
 
-    /// Captures, crops and recognises off the UI thread: capture can block and
-    /// OCR takes tens of milliseconds.
+    /// Crops the frozen frame and recognises it off the UI thread.
     fn recognize(&mut self, window: &mut Window) {
         if self.done {
             return;
         }
         self.done = true;
+        window.remove_window();
         let Some(rect) = self.selection() else {
-            window.remove_window();
             return;
         };
+        let screen = self.screen.clone();
         let result = self.result.clone();
         std::thread::spawn(move || {
-            let Ok(screen) = capture::capture() else {
-                return;
-            };
             let Some(image) = capture::crop(&screen, rect) else {
+                eprintln!("[snip] selection too small: {rect:?}");
                 return;
             };
             let image = capture::prepare_region(image);
-            if let Ok(text) = peek_runtime::ocr::recognize(&image)
-                && !text.trim().is_empty()
-            {
-                let _ = result.send(Action::Recognized(text));
+            match peek_runtime::ocr::recognize(&image) {
+                Ok(text) => {
+                    eprintln!("[snip] ocr ok: {} chars", text.trim().chars().count());
+                    // Sent even when empty, so the panel can say "nothing
+                    // recognised" instead of the selection vanishing silently.
+                    let _ = result.send(Action::Recognized(text));
+                }
+                Err(err) => eprintln!("[snip] ocr failed: {err}"),
             }
         });
-        window.remove_window();
     }
 
     fn cancel(&mut self, window: &mut Window) {
@@ -89,9 +108,7 @@ impl Render for Snip {
 
         div()
             .size_full()
-            // Dimming is alpha over a transparent window, so the live desktop
-            // stays visible underneath.
-            .bg(hsla(0.0, 0.0, 0.0, 0.35))
+            .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, _cx| {
                 if event.keystroke.key == "escape" {
                     this.cancel(window);
@@ -117,6 +134,24 @@ impl Render for Snip {
                     this.recognize(window);
                 }),
             )
+            // The frozen frame, stretched to the logical window size.
+            .child(
+                img(self.backdrop.clone())
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Fill),
+            )
+            // Dimming over the frame.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .bg(hsla(0.0, 0.0, 0.0, 0.30)),
+            )
             .child(
                 div()
                     .absolute()
@@ -141,22 +176,30 @@ impl Render for Snip {
     }
 }
 
-/// Opens the overlay covering the monitor that holds the cursor.
+/// Converts a captured RGBA frame into GPUI's BGRA render image.
+fn backdrop(screen: &Screen) -> Arc<RenderImage> {
+    // GPUI stores pixels as BGRA, xcap as RGBA, so R and B swap.
+    let mut pixels = screen.pixels.clone();
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]))
+}
+
+/// Captures the monitor under the cursor, then opens the overlay over it.
 ///
-/// Returns `None` when the monitor geometry is unavailable; the caller then
-/// leaves the panel as it was rather than showing a broken overlay.
-pub fn open(cx: &mut App, result: Sender<Action>) -> Option<(AnyWindowHandle, Rect)> {
-    let bounds = capture::monitor_bounds()?;
+/// Errors are reported as text for the log; the caller leaves the panel as it
+/// was rather than showing a broken overlay.
+pub fn open(cx: &mut App, result: Sender<Action>) -> Result<(AnyWindowHandle, Rect), String> {
+    let bounds = capture::monitor_bounds().ok_or("no monitor bounds")?;
+    let screen = Arc::new(capture::capture().map_err(|err| format!("capture failed: {err}"))?);
+    let backdrop = backdrop(&screen);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(bounds.min[0]), px(bounds.min[1])),
             size: size(px(bounds.width()), px(bounds.height())),
         })),
-        titlebar: Some(TitlebarOptions {
-            title: None,
-            appears_transparent: true,
-            traffic_light_position: None,
-        }),
+        titlebar: None,
         // `PopUp` is the branch that sets CanJoinAllSpaces, so the overlay
         // covers whichever Space the user is on.
         kind: WindowKind::PopUp,
@@ -164,18 +207,18 @@ pub fn open(cx: &mut App, result: Sender<Action>) -> Option<(AnyWindowHandle, Re
         focus: true,
         is_movable: false,
         is_resizable: false,
-        window_background: WindowBackgroundAppearance::Transparent,
+        is_minimizable: false,
         ..Default::default()
     };
     let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-        let view = cx.new(|_| Snip::new(result));
+        let view = cx.new(|cx| Snip::new(screen, backdrop, result, cx));
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        crate::native_window::hide_window_buttons(window);
         cx.new(|cx| gpui_kit::base::Root::new(view, window, cx))
     });
     match opened {
-        Ok((handle, _)) => Some((handle, bounds)),
-        Err(err) => {
-            eprintln!("overlay window failed: {err}");
-            None
-        }
+        Ok((handle, _)) => Ok((handle, bounds)),
+        Err(err) => Err(format!("overlay window failed: {err}")),
     }
 }
