@@ -368,7 +368,7 @@ impl Peek {
                             this.update(cx, |peek, cx| {
                                 if text.is_empty() {
                                     // Say so instead of the selection vanishing.
-                                    peek.status = i18n::tr("status-ocr-empty");
+                                    peek.notify_error(i18n::tr("status-ocr-empty"));
                                     cx.notify();
                                 } else {
                                     peek.pending_input = Some(text.clone());
@@ -458,10 +458,7 @@ impl Peek {
     /// The task chosen in the dropdown.
     /// Whether there is more to show than the input box.
     fn has_result(&self) -> bool {
-        self.busy
-            || !self.answer.is_empty()
-            || !self.status.is_empty()
-            || !self.dictionary_note.is_empty()
+        self.busy || !self.answer.is_empty() || !self.dictionary_note.is_empty()
     }
 
     fn selected_task(&self, cx: &App) -> Task {
@@ -542,7 +539,6 @@ impl Peek {
         );
         let target = effective_target(&route.target, "").to_owned();
         self.original_query = text.clone();
-        self.status = i18n::tr("status-generating");
         self.busy = true;
         let (tx, rx) = mpsc::channel(8);
         self.receiver = Some(rx);
@@ -829,12 +825,12 @@ impl Peek {
         let model = self.channel_model.read(cx).value().trim().to_owned();
         let key = self.channel_key.read(cx).value().to_string();
         if name.is_empty() || endpoint.is_empty() {
-            self.status = i18n::tr("status-channel-incomplete");
+            self.notify_error(i18n::tr("status-channel-incomplete"));
             cx.notify();
             return;
         }
         if kind.needs_model() && model.is_empty() {
-            self.status = i18n::tr("error-config-channel-model");
+            self.notify_error(i18n::tr("error-config-channel-model"));
             cx.notify();
             return;
         }
@@ -1022,6 +1018,13 @@ impl Peek {
         }
     }
 
+    /// Queues an error for the next frame, where a Window exists to raise a
+    /// notification. Errors are collected here rather than written into the
+    /// panel: the panel is for results, not for a log.
+    fn notify_error(&mut self, message: String) {
+        self.pending_toast = Some(message);
+    }
+
     /// Builds the prompt and starts the network turn. Returns whether a turn
     /// actually started. Split out of `start_query` so `PEEK_SELFTEST` can
     /// drive the whole pipeline without a window or a click.
@@ -1030,7 +1033,7 @@ impl Peek {
             return false;
         }
         if text.len() > peek_core::MAX_INPUT_BYTES {
-            self.status = i18n::tr("status-input-too-long");
+            self.notify_error(i18n::tr("status-input-too-long"));
             cx.notify();
             return false;
         }
@@ -1075,7 +1078,7 @@ impl Peek {
             _ => self.config.ai().cloned(),
         };
         let Some(channel) = chosen else {
-            self.status = i18n::tr("status-channel-missing");
+            self.notify_error(i18n::tr("status-channel-missing"));
             cx.notify();
             return false;
         };
@@ -1083,13 +1086,13 @@ impl Peek {
             return self.begin_deeplx(channel.endpoint.clone(), channel.api_key.clone(), text, cx);
         }
         let Some(provider) = channel.provider() else {
-            self.status = i18n::tr("status-channel-missing");
+            self.notify_error(i18n::tr("status-channel-missing"));
             cx.notify();
             return false;
         };
         let key = channel.api_key.clone();
         if channel.kind.needs_credential() && key.trim().is_empty() {
-            self.status = i18n::tr("status-key-missing");
+            self.notify_error(i18n::tr("status-key-missing"));
             cx.notify();
             return false;
         }
@@ -1109,7 +1112,6 @@ impl Peek {
         });
         peek_core::bound_history(&mut self.messages);
 
-        self.status = i18n::tr("status-generating");
         self.busy = true;
         let (tx, rx) = mpsc::channel(128);
         self.receiver = Some(rx);
@@ -1240,12 +1242,13 @@ impl Peek {
         for event in events {
             match event {
                 Event::Route { note, .. } => {
-                    self.status = note.clone();
+                    // Routing is internal detail; only the overlay, which has
+                    // no other surface while it works, hears about it.
                     self.forward_overlay(OverlayEvent::Status(note));
                 }
                 Event::Text(delta) => {
                     if self.answer.len() + delta.len() > peek_core::MAX_OUTPUT_BYTES {
-                        self.status = i18n::tr("status-output-too-long");
+                        self.notify_error(i18n::tr("status-output-too-long"));
                         self.stop();
                         break;
                     }
@@ -1263,8 +1266,7 @@ impl Peek {
                 Event::Failed(message) => {
                     // The detail is long and often carries a URL, so it goes to
                     // a notification and the panel keeps only a short state.
-                    self.pending_toast = Some(message.clone());
-                    self.status = i18n::tr("status-failed");
+                    self.notify_error(message.clone());
                     self.busy = false;
                     self.forward_overlay(OverlayEvent::Status(message));
                     self.forward_overlay(OverlayEvent::Finished);
@@ -1547,18 +1549,6 @@ impl Peek {
                                         this.send_follow_up(window, cx);
                                     })),
                             ),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap(px(8.))
-                            .font_family(set.latin)
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            // Only the status: the active font set belongs in
-                            // settings, and echoing it here was a stand-in
-                            // from before that page existed.
-                            .child(self.status.clone()),
                     )
             })
             .into_any_element()
