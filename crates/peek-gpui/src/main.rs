@@ -25,7 +25,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -1237,8 +1237,15 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     } else {
         size(px(480.), px(560.))
     };
+    // The component layer must be initialised before a window opens: it
+    // registers per-window state that notifications and dialogs look up. The
+    // running app already does this; the preview did it too late, which only
+    // showed up once a preview pushed a notification.
+    {
+        let mut app = cx.app.borrow_mut();
+        gpui_kit::init(&mut app);
+    }
     let window = cx.open_window(preview_size, |window, cx| {
-        gpui_kit::init(cx);
         if let Err(err) = fonts::register(cx) {
             eprintln!("font registration failed: {err}");
         }
@@ -1276,6 +1283,22 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     })?;
 
     cx.run_until_parked();
+    // A notification needs the window's root, which the component layer
+    // registers on the first frame, so the push has to wait for one. This is
+    // only a preview aid: real pushes come from clicks, long after first paint.
+    if std::env::var("PEEK_NOTIFY").is_ok() {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.push_notification(
+                gpui_kit::component::notification::Notification::success(i18n::tr("snip-copied")),
+                cx,
+            );
+        })?;
+        // The toast animates in, so the clock has to move for it to be opaque.
+        for _ in 0..30 {
+            cx.advance_clock(std::time::Duration::from_millis(80));
+            cx.run_until_parked();
+        }
+    }
     let image = cx.capture_screenshot(window.into())?;
     let out = std::path::PathBuf::from(path);
     if let Some(parent) = out.parent() {

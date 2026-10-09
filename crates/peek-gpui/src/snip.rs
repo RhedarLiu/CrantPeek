@@ -19,8 +19,9 @@ use std::sync::{
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -58,8 +59,6 @@ pub struct Snip {
     focus: FocusHandle,
     /// The selection is committed; only the result card stays interactive.
     captured: bool,
-    /// The card's own message, for example after copying.
-    note: String,
 }
 
 impl Snip {
@@ -85,7 +84,6 @@ impl Snip {
             events: None,
             focus: cx.focus_handle(),
             captured: false,
-            note: String::new(),
         };
         // The worker thread and the panel's progress channel cannot touch GPUI
         // state, so both are drained here.
@@ -119,6 +117,10 @@ impl Snip {
         snip.cursor = Some(point(px(820.), px(380.)));
         snip.text = Some("Screenshot text".into());
         snip.answer = "## 截图翻译\n\n识别到的文字在这里直接翻译，不用先跳回主窗口。".into();
+        // The preview has no panel to answer a translate request, so mark the
+        // turn as already attached; otherwise it reports a worker failure.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        snip.events = Some(rx);
         snip
     }
 
@@ -178,7 +180,6 @@ impl Snip {
         self.captured = true;
         self.busy = true;
         self.status = i18n::tr("status-ocr-running");
-        self.note.clear();
         let screen = self.screen.clone();
         let tx = self.ocr_tx.clone();
         std::thread::spawn(move || {
@@ -235,11 +236,17 @@ impl Snip {
         self.close(window);
     }
 
-    fn copy_text(&mut self, cx: &mut Context<Self>) {
+    /// Copies the recognised text and confirms with a toast, so the card does
+    /// not have to grow a status line for a transient message.
+    fn copy_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.text.clone() {
+            let characters = text.chars().count();
             cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.note = i18n::tr("snip-copied");
-            cx.notify();
+            window.push_notification(
+                Notification::success(i18n::tr("snip-copied")).autohide(true),
+                cx,
+            );
+            eprintln!("[snip] copied {characters} chars to the clipboard");
         }
     }
 
@@ -326,8 +333,8 @@ impl Render for Snip {
                             Button::new("snip_copy")
                                 .icon(IconName::Copy)
                                 .label(i18n::tr("snip-copy-text"))
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.copy_text(cx);
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.copy_text(window, cx);
                                 })),
                         )
                         .child(
@@ -349,14 +356,6 @@ impl Render for Snip {
                                 })),
                         ),
                 )
-                .when(!self.note.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(self.note.clone()),
-                    )
-                })
                 .into_any_element()
         });
 
