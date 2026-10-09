@@ -76,6 +76,7 @@ status-key-missing = 该渠道缺少 API key，请在设置里补上
 status-channel-missing = 还没有可用渠道，请先在设置里添加
 status-channel-incomplete = 渠道信息不完整：名称和端点必填
 status-generating = 生成中…
+status-failed = 请求失败
 status-done = 完成
 status-done-trimmed = 完成 · 已释放较早追问，保留初始问题与最近对话
 status-stopped = 已停止

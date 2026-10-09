@@ -25,6 +25,7 @@ use gpui_kit::base::{IndexPath, Root, StyledExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -138,6 +139,9 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
+    /// Failure text waiting for a `Window`: a turn's errors arrive through the
+    /// poll loop, where no notification can be raised.
+    pending_toast: Option<String>,
     /// Result of the last connection test: channel id and what happened.
     channel_test: Option<(String, String)>,
     /// Sends test results from the network task to the poll loop.
@@ -219,6 +223,7 @@ impl Peek {
             input,
             follow_up,
             settings_tab: 0,
+            pending_toast: None,
             channel_test: None,
             test_tx,
             editing_channel: None,
@@ -1254,7 +1259,10 @@ impl Peek {
                     self.overlay = None;
                 }
                 Event::Failed(message) => {
-                    self.status = message.clone();
+                    // The detail is long and often carries a URL, so it goes to
+                    // a notification and the panel keeps only a short state.
+                    self.pending_toast = Some(message.clone());
+                    self.status = i18n::tr("status-failed");
                     self.busy = false;
                     self.forward_overlay(OverlayEvent::Status(message));
                     self.forward_overlay(OverlayEvent::Finished);
@@ -1269,6 +1277,9 @@ impl Render for Peek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A selection arrives off the UI thread, so it is applied here where a
         // `Window` is available.
+        if let Some(message) = self.pending_toast.take() {
+            window.push_notification(Notification::error(message).autohide(true), cx);
+        }
         if let Some(text) = self.pending_input.take() {
             self.input
                 .update(cx, |state, cx| state.set_value(text, window, cx));
@@ -2040,7 +2051,13 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     if std::env::var("PEEK_NOTIFY").is_ok() {
         cx.update_window(window.into(), |_, window, cx| {
             window.push_notification(
-                gpui_kit::component::notification::Notification::success(i18n::tr("snip-copied")),
+                // The same shape a failed turn raises, so a preview checks the
+                // path the user actually sees.
+                Notification::error(format!(
+                    "{} {}",
+                    i18n::tr("status-failed"),
+                    "HTTP 404 · https://router.bloret.net/chat/completions"
+                )),
                 cx,
             );
         })?;

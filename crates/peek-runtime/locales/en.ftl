@@ -59,6 +59,7 @@ status-key-missing = This channel has no API key; add one in settings
 status-channel-missing = No usable channel yet; add one in settings
 status-channel-incomplete = Channel is incomplete: name and endpoint are required
 status-generating = Generating…
+status-failed = Request failed
 status-done = Done
 status-done-trimmed = Done · older follow-ups released; original query and recent turns retained
 status-stopped = Stopped
