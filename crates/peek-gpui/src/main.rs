@@ -135,7 +135,9 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
-    /// Draft fields for adding a channel.
+    /// Channel being edited, or `None` when the dialog is adding one.
+    editing_channel: Option<String>,
+    /// Draft fields for the channel dialog.
     channel_name: Entity<InputState>,
     channel_endpoint: Entity<InputState>,
     channel_model: Entity<InputState>,
@@ -206,6 +208,7 @@ impl Peek {
             _activation: activation,
             input,
             follow_up,
+            editing_channel: None,
             channel_name,
             channel_endpoint,
             channel_model,
@@ -556,12 +559,116 @@ impl Peek {
             .unwrap_or_default()
     }
 
-    /// Adds the channel described by the draft fields.
+    /// Opens the channel form. `editing` pre-fills it from an existing channel.
+    ///
+    /// The form lives in a dialog rather than in the settings page: the page
+    /// stays a scannable list, and the same form serves adding and editing.
+    fn open_channel_dialog(
+        &mut self,
+        editing: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = editing
+            .as_deref()
+            .and_then(|id| self.config.channel(id))
+            .cloned();
+        let kind = existing.as_ref().map(|c| c.kind).unwrap_or_default();
+        let name = existing
+            .as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let endpoint = existing
+            .as_ref()
+            .map(|c| c.endpoint.clone())
+            .unwrap_or_default();
+        let model = existing
+            .as_ref()
+            .map(|c| c.model.clone())
+            .unwrap_or_default();
+        self.editing_channel = editing;
+        self.channel_name
+            .update(cx, |state, cx| state.set_value(&name, window, cx));
+        self.channel_endpoint
+            .update(cx, |state, cx| state.set_value(&endpoint, window, cx));
+        self.channel_model
+            .update(cx, |state, cx| state.set_value(&model, window, cx));
+        // Never pre-filled: the stored secret stays in the keychain, and an
+        // empty field keeps it.
+        self.channel_key
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        let index = ChannelKind::ALL
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .unwrap_or(0);
+        self.channel_kind.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::new(index)), window, cx);
+        });
+
+        let entity = cx.entity();
+        let title = i18n::tr(if self.editing_channel.is_some() {
+            "channels-edit-title"
+        } else {
+            "channels-add-title"
+        });
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            // The builder runs on every frame, so each closure gets its own
+            // handle rather than moving the only one.
+            let content_entity = entity.clone();
+            let ok_entity = entity.clone();
+            dialog
+                .title(title.clone())
+                .w(px(420.))
+                .content(move |content, _window, cx| {
+                    let peek = content_entity.read(cx);
+                    content.child(
+                        v_flex()
+                            .w_full()
+                            .gap(px(8.))
+                            .child(Select::new(&peek.channel_kind).id("channel-kind-dialog"))
+                            .child(Input::new(&peek.channel_name))
+                            .child(Input::new(&peek.channel_endpoint))
+                            .when(peek.draft_kind(cx).needs_credential(), |this| {
+                                this.child(Input::new(&peek.channel_key))
+                            })
+                            .when(peek.draft_kind(cx).needs_model(), |this| {
+                                this.child(Input::new(&peek.channel_model))
+                            }),
+                    )
+                })
+                // A plain Dialog renders no buttons of its own: the footer is
+                // the caller's, so these are the two actions it needs.
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(
+                            Button::new("channel-cancel")
+                                .label(i18n::tr("channels-cancel"))
+                                .on_click(move |_event, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("channel-save")
+                                .primary()
+                                .label(i18n::tr("channels-save"))
+                                .on_click(move |_event, window, cx| {
+                                    ok_entity.update(cx, |peek, cx| peek.save_channel(window, cx));
+                                    window.close_dialog(cx);
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Saves the dialog's channel, adding it or updating the one being edited.
     ///
     /// A kind declares what it needs: an AI kind takes an endpoint, a model and
     /// a credential, while DeepLX takes an endpoint only. The secret goes to the
     /// keychain and config keeps a reference.
-    fn add_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let kind = self.draft_kind(cx);
         let name = self.channel_name.read(cx).value().trim().to_owned();
         let endpoint = self.channel_endpoint.read(cx).value().trim().to_owned();
@@ -577,11 +684,17 @@ impl Peek {
             cx.notify();
             return;
         }
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
-        let id = format!("ch-{stamp}");
+
+        let editing = self.editing_channel.clone();
+        let id = editing.clone().unwrap_or_else(|| {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or(0);
+            format!("ch-{stamp}")
+        });
+        // An existing credential is kept when the field is left empty, so the
+        // secret never has to be re-entered to change another field.
         let credential_id = if kind.needs_credential() {
             let reference = format!("channel.{id}");
             if !key.trim().is_empty()
@@ -595,7 +708,7 @@ impl Peek {
         } else {
             String::new()
         };
-        self.config.channels.push(Channel {
+        let saved = Channel {
             id: id.clone(),
             name,
             kind,
@@ -604,24 +717,57 @@ impl Peek {
             credential_id,
             vision: false,
             max_output_tokens: 2048,
-        });
-        // The first channel of each kind becomes the default for its places.
-        if self.config.basic_channel.is_empty() {
-            self.config.basic_channel = id.clone();
+        };
+        match editing {
+            Some(_) => {
+                if let Some(slot) = self
+                    .config
+                    .channels
+                    .iter_mut()
+                    .find(|channel| channel.id == id)
+                {
+                    // Keep the credential reference when the stored key is
+                    // reused; the new value is empty in that case.
+                    let previous = slot.credential_id.clone();
+                    *slot = saved;
+                    if slot.credential_id.is_empty() && !previous.is_empty() {
+                        slot.credential_id = previous;
+                    }
+                }
+            }
+            None => {
+                self.config.channels.push(saved);
+                // The first channel becomes the default for a place that has
+                // nothing chosen yet.
+                if self.config.basic_channel.is_empty() {
+                    self.config.basic_channel = id.clone();
+                }
+                if self.config.ai_channel.is_empty() && kind.is_ai() {
+                    self.config.ai_channel = id;
+                }
+            }
         }
-        if self.config.ai_channel.is_empty() && kind.is_ai() {
-            self.config.ai_channel = id;
+        // A channel that changed kind may no longer be able to serve its place.
+        if self.config.ai().is_none() {
+            // Resolved first: the iterator borrows the config.
+            let fallback = self
+                .config
+                .ai_candidates()
+                .next()
+                .map(|channel| channel.id.clone())
+                .unwrap_or_default();
+            self.config.ai_channel = fallback;
         }
+        self.editing_channel = None;
         self.persist_config();
         for input in [
             &self.channel_name,
             &self.channel_endpoint,
             &self.channel_model,
+            &self.channel_key,
         ] {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
-        self.channel_key
-            .update(cx, |state, cx| state.set_value("", window, cx));
         cx.notify();
     }
 
@@ -1243,7 +1389,6 @@ impl Peek {
             .collect();
         let basic_active = self.config.basic_channel.clone();
         let ai_active = self.config.ai_channel.clone();
-        let draft_kind = self.draft_kind(cx);
         let theme = cx.theme();
         let set = self.set;
         let fg = theme.foreground;
@@ -1328,6 +1473,7 @@ impl Peek {
                     // Each configured channel, with a way to remove it. A kind
                     // decides what a channel needs, so the label carries it.
                     .children(channels.iter().map(|(id, name, kind_key, _)| {
+                        let edit_id = id.clone();
                         let remove_id = id.clone();
                         let label = format!("{name} · {}", i18n::tr(kind_key));
                         h_flex()
@@ -1342,6 +1488,14 @@ impl Peek {
                                     .child(label),
                             )
                             .child(
+                                Button::new(SharedString::from(format!("edit-{id}")))
+                                    .icon(IconName::Pencil)
+                                    .tooltip(i18n::tr("channels-edit"))
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.open_channel_dialog(Some(edit_id.clone()), window, cx);
+                                    })),
+                            )
+                            .child(
                                 Button::new(SharedString::from(format!("remove-{id}")))
                                     .icon(IconName::X)
                                     .tooltip(i18n::tr("channels-remove"))
@@ -1351,31 +1505,12 @@ impl Peek {
                             )
                             .into_any_element()
                     }))
-                    // Add form. The fields a kind needs appear as it is picked.
-                    .child(self.section_label(i18n::tr("channels-kind"), set, muted))
-                    .child(
-                        Select::new(&self.channel_kind)
-                            .id("channel-kind")
-                            .rounded(px(10.)),
-                    )
-                    .child(self.section_label(i18n::tr("channels-name"), set, muted))
-                    .child(Input::new(&self.channel_name))
-                    .child(self.section_label(i18n::tr("channels-endpoint"), set, muted))
-                    .child(Input::new(&self.channel_endpoint))
-                    .when(draft_kind.needs_credential(), |this| {
-                        this.child(self.section_label(i18n::tr("channels-key"), set, muted))
-                            .child(Input::new(&self.channel_key))
-                    })
-                    .when(draft_kind.needs_model(), |this| {
-                        this.child(self.section_label(i18n::tr("channels-model"), set, muted))
-                            .child(Input::new(&self.channel_model))
-                    })
                     .child(
                         Button::new("add-channel")
                             .icon(IconName::Plus)
                             .label(i18n::tr("channels-add"))
                             .on_click(cx.listener(|this, _event, window, cx| {
-                                this.add_channel(window, cx);
+                                this.open_channel_dialog(None, window, cx);
                             })),
                     ),
             )
@@ -1521,6 +1656,10 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         let mut app = cx.app.borrow_mut();
         gpui_kit::init(&mut app);
     }
+    // The panel view is created inside the closure but a preview may need to
+    // drive it (the channel dialog) once the window has painted.
+    let published: std::rc::Rc<std::cell::RefCell<Option<Entity<Peek>>>> = Default::default();
+    let publish_target = published.clone();
     let window = cx.open_window(preview_size, |window, cx| {
         if let Err(err) = fonts::register(cx) {
             eprintln!("font registration failed: {err}");
@@ -1538,6 +1677,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             return cx.new(|cx| gpui_kit::base::Root::new(view, window, cx));
         }
         let view = cx.new(|cx| Peek::new(window, cx, _preview_tx, preview_rx));
+        *publish_target.borrow_mut() = Some(view.clone());
         view.update(cx, |peek, cx| {
             // In-memory only: a preview must never overwrite the real choice.
 
@@ -1557,6 +1697,17 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     })?;
 
     cx.run_until_parked();
+    // The channel dialog is opened by a click, so a preview opens it directly.
+    // It has to wait for the first frame: the component layer registers the
+    // per-window state dialogs look up while painting.
+    if std::env::var("PEEK_DIALOG").is_ok()
+        && let Some(view) = published.borrow().clone()
+    {
+        cx.update_window(window.into(), |_, window, cx| {
+            view.update(cx, |peek, cx| peek.open_channel_dialog(None, window, cx));
+        })?;
+        cx.run_until_parked();
+    }
     // A notification needs the window's root, which the component layer
     // registers on the first frame, so the push has to wait for one. This is
     // only a preview aid: real pushes come from clicks, long after first paint.
