@@ -72,7 +72,9 @@ fn hwnd(window: &Window) -> Option<*mut std::ffi::c_void> {
 
     match <Window as raw_window_handle::HasWindowHandle>::window_handle(window) {
         Ok(raw) => match raw.as_raw() {
-            RawWindowHandle::Win32(win32) => Some(win32.hwnd.as_ptr()),
+            // raw-window-handle 0.6 stores the Win32 handle as a `NonZeroIsize`,
+            // not a pointer, so it is converted rather than dereferenced.
+            RawWindowHandle::Win32(win32) => Some(win32.hwnd.get() as *mut std::ffi::c_void),
             _ => None,
         },
         Err(_) => None,
