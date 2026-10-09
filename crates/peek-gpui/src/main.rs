@@ -1656,11 +1656,25 @@ impl Peek {
                                 .items_center()
                                 .gap(px(8.))
                                 .child(
-                                    div()
+                                    // Name on top, purpose underneath in the
+                                    // muted colour: a parenthetical would make
+                                    // one dense line instead of a readable pair.
+                                    v_flex()
                                         .flex_1()
-                                        .font_family(set.latin)
-                                        .text_size(px(12.))
-                                        .child(i18n::tr(key)),
+                                        .gap(px(1.))
+                                        .child(
+                                            div()
+                                                .font_family(set.latin)
+                                                .text_size(px(12.))
+                                                .child(i18n::tr(key)),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(set.latin)
+                                                .text_size(px(10.5))
+                                                .text_color(muted)
+                                                .child(i18n::tr(&format!("{key}-purpose"))),
+                                        ),
                                 )
                                 .child(
                                     div()
