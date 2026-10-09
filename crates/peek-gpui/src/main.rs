@@ -53,9 +53,10 @@ use tokio_util::sync::CancellationToken;
 const PANEL_WIDTH: f32 = 480.;
 const PANEL_COMPACT_HEIGHT: f32 = 244.;
 const PANEL_EXPANDED_HEIGHT: f32 = 560.;
-/// The settings page carries the channel list, its add form, the used-for
-/// pickers and the permission report, so it needs more room than the panel.
-const PANEL_SETTINGS_HEIGHT: f32 = 660.;
+/// Chrome the settings page always shows: header, tab row, padding and gaps.
+const SETTINGS_CHROME: f32 = 168.;
+/// One row of the channel list, or a channel button in the used-for pickers.
+const SETTINGS_ROW: f32 = 42.;
 
 const POLL: Duration = Duration::from_millis(60);
 /// How often streamed answer text is moved from the network channel into the view.
@@ -546,6 +547,26 @@ impl Peek {
         });
         cx.notify();
         true
+    }
+
+    /// Height for the settings page's current tab.
+    ///
+    /// The page is a stack of sections of very different lengths, so a single
+    /// fixed height either clipped the long tab or left the short one with a
+    /// large empty area. This estimates from what the tab actually renders and
+    /// stays within a usable range.
+    fn settings_height(&self) -> f32 {
+        let channels = self.config.channels.len() as f32;
+        let height = match self.settings_tab {
+            // Font set: a label and two buttons.
+            0 => SETTINGS_CHROME + 92.,
+            // Channels: the list, the add button, the copy switch and the
+            // used-for pickers.
+            1 => SETTINGS_CHROME + 190. + SETTINGS_ROW * (channels + 2.),
+            // Permissions: one row per permission.
+            _ => SETTINGS_CHROME + 24. + SETTINGS_ROW * self.permissions.len() as f32,
+        };
+        height.clamp(240., 720.)
     }
 
     /// A small muted section label, used across the settings page.
@@ -1124,7 +1145,7 @@ impl Render for Peek {
         // something to show, while the settings page is always tall; sizing it
         // only from the query page left settings clipped to a compact window.
         let height = if self.settings {
-            PANEL_SETTINGS_HEIGHT
+            self.settings_height()
         } else if self.has_result() {
             PANEL_EXPANDED_HEIGHT
         } else {
