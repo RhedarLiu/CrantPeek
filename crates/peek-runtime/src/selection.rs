@@ -21,9 +21,13 @@ pub fn read() -> Option<String> {
     unsafe {
         let system = AXUIElementCreateSystemWide();
         if system.is_null() {
+            eprintln!("[selection] AXUIElementCreateSystemWide returned null");
             return None;
         }
-        AXUIElementSetMessagingTimeout(system, 0.2);
+        // 200 ms was too tight: browser/Electron accessibility bridges often take
+        // longer on their first query and answer with kAXErrorCannotComplete.
+        // The read runs on a background thread, so waiting is safe.
+        AXUIElementSetMessagingTimeout(system, 0.5);
         let focused = CFString::new("AXFocusedUIElement");
         let mut element: CFTypeRef = std::ptr::null();
         let status = AXUIElementCopyAttributeValue(
@@ -33,9 +37,12 @@ pub fn read() -> Option<String> {
         );
         CFRelease(system);
         if status != 0 || element.is_null() {
+            // -25204 kAXErrorCannotComplete, -25211 kAXErrorAPIDisabled,
+            // -25205 kAXErrorAttributeUnsupported …
+            eprintln!("[selection] AXFocusedUIElement failed: status={status}");
             return None;
         }
-        AXUIElementSetMessagingTimeout(element, 0.2);
+        AXUIElementSetMessagingTimeout(element, 0.5);
         let selected = CFString::new("AXSelectedText");
         let mut value: CFTypeRef = std::ptr::null();
         let status = AXUIElementCopyAttributeValue(
@@ -45,14 +52,25 @@ pub fn read() -> Option<String> {
         );
         CFRelease(element);
         if status != 0 || value.is_null() {
+            // The focused element has no selected text: nothing is selected, or
+            // the app does not expose AXSelectedText at all.
+            eprintln!("[selection] AXSelectedText failed: status={status}");
             return None;
         }
         if core_foundation::base::CFGetTypeID(value) != CFString::type_id() {
             CFRelease(value);
+            eprintln!("[selection] AXSelectedText is not a string");
             return None;
         }
         let text = CFString::wrap_under_create_rule(value.cast()).to_string();
-        peek_core::entry_text(peek_core::Entry::Selection, Some(&text))
+        let result = peek_core::entry_text(peek_core::Entry::Selection, Some(&text));
+        if result.is_none() {
+            eprintln!(
+                "[selection] selection was empty or whitespace ({} raw chars)",
+                text.chars().count()
+            );
+        }
+        result
     }
 }
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -145,11 +163,19 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
                     // Never block the event-tap callback on Accessibility IPC.
                     let tx = tx.clone();
                     let wake = wake.clone();
-                    std::thread::spawn(move || {
-                        if let Some(text) = read() {
+                    std::thread::spawn(move || match read() {
+                        Some(text) => {
+                            eprintln!("[selection] double tap read {} chars", text.chars().count());
                             let _ = tx.send(crate::action::Action::Selection(text));
                             wake();
                         }
+                        // The tap fires as soon as Input Monitoring is granted,
+                        // but reading the selection additionally needs
+                        // Accessibility, and it fails silently without it.
+                        None => eprintln!(
+                            "[selection] double tap detected, but no selection is readable \
+                             — grant Accessibility to this app (or nothing is selected)"
+                        ),
                     });
                 }
                 None
@@ -163,7 +189,12 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
                 runloop.add_source(&source, kCFRunLoopCommonModes);
             }
             tap.enable();
+            // Visible confirmation that the hook is live: installing the tap is
+            // what Input Monitoring gates, and it fails quietly otherwise.
+            eprintln!("[selection] double-tap Ctrl hook installed");
             CFRunLoop::run_current();
+        } else {
+            eprintln!("[selection] hook NOT installed — grant Input Monitoring to this app");
         }
     });
 }

@@ -1073,8 +1073,24 @@ fn main() -> anyhow::Result<()> {
         return render_preview(&path);
     }
 
-    // Monitor diagnostic: creates and shows no window.
+    // Selection diagnostic: AXIsProcessTrusted() can report true while real
+    // Accessibility calls still fail with kAXErrorAPIDisabled - which is what
+    // happens when the app is launched from a terminal rather than by
+    // LaunchServices. This exercises the API itself, and shows no window.
+    if std::env::var("PEEK_SELECTION_SELFTEST").is_ok() {
+        match peek_runtime::selection::read() {
+            Some(text) => println!("selection read ok: {} chars", text.chars().count()),
+            None => println!("selection read failed (see the [selection] lines above)"),
+        }
+        return Ok(());
+    }
+
+    // Environment diagnostic: creates and shows no window. Run through a
+    // packaged .app binary to see the permissions macOS grants that bundle.
     if std::env::var("PEEK_MONITOR_REPORT").is_ok() {
+        for (name, granted) in peek_runtime::permissions::status() {
+            println!("permission {name}: {granted}");
+        }
         println!(
             "cursor monitor bounds: {:?}",
             peek_runtime::capture::monitor_bounds()
