@@ -1444,6 +1444,9 @@ impl Peek {
             )
             .child(
                 TabBar::new("settings_tabs")
+                    // The default filled-tab strip reads as a different design
+                    // language; an underline row matches a flat settings page.
+                    .underline()
                     .children([
                         Tab::new().label(i18n::tr("settings-tab-appearance")),
                         Tab::new().label(i18n::tr("settings-tab-translation")),
