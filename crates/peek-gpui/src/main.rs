@@ -138,6 +138,10 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
+    /// Result of the last connection test: channel id and what happened.
+    channel_test: Option<(String, String)>,
+    /// Sends test results from the network task to the poll loop.
+    test_tx: std::sync::mpsc::Sender<(String, String)>,
     /// Channel being edited, or `None` when the dialog is adding one.
     editing_channel: Option<String>,
     /// Draft fields for the channel dialog.
@@ -197,6 +201,7 @@ impl Peek {
         let channel_kind =
             cx.new(|cx| SelectState::new(kinds, Some(IndexPath::new(0)), window, cx));
 
+        let (test_tx, test_rx) = std::sync::mpsc::channel();
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
 
@@ -214,6 +219,8 @@ impl Peek {
             input,
             follow_up,
             settings_tab: 0,
+            channel_test: None,
+            test_tx,
             editing_channel: None,
             channel_name,
             channel_endpoint,
@@ -252,6 +259,13 @@ impl Peek {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
+                while let Ok((id, message)) = test_rx.try_recv() {
+                    this.update(cx, |peek, cx| {
+                        peek.channel_test = Some((id, message));
+                        cx.notify();
+                    })
+                    .ok();
+                }
                 while let Ok(action) = action_rx.try_recv() {
                     match action {
                         Action::Selection(text) => {
@@ -569,6 +583,69 @@ impl Peek {
         height.clamp(240., 720.)
     }
 
+    /// A label and the dropdown that chooses for it.
+    fn picker_row(
+        &self,
+        label: String,
+        picker: impl IntoElement,
+        set: &'static crate::fonts::FontSet,
+    ) -> AnyElement {
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(10.))
+            .child(
+                div()
+                    .w(px(72.))
+                    .font_family(set.latin)
+                    .text_size(px(12.))
+                    .child(label),
+            )
+            .child(div().flex_1().child(picker))
+            .into_any_element()
+    }
+
+    /// A dropdown of channels. Only channels the caller offers appear, so a
+    /// translation-only channel is never listed for AI work.
+    fn channel_picker(
+        &self,
+        id: &'static str,
+        choices: Vec<(String, String)>,
+        active: String,
+        ai: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity();
+        let current = choices
+            .iter()
+            .find(|(channel, _)| *channel == active)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| i18n::tr("channels-none"));
+        DropdownButton::new(id)
+            .button(
+                // The dropdown draws its own chevron beside the button, so the
+                // button sizes to the row instead of claiming the full width.
+                Button::new(SharedString::from(format!("{id}_button")))
+                    .label(current)
+                    .flex_1(),
+            )
+            .dropdown_menu(move |mut menu, _window, _cx| {
+                for (channel, name) in &choices {
+                    let target = entity.clone();
+                    let chosen = channel.clone();
+                    let selected = *channel == active;
+                    menu = menu.item(PopupMenuItem::new(name.clone()).checked(selected).on_click(
+                        move |_event, _window, cx| {
+                            target.update(cx, |peek, cx| {
+                                peek.assign_channel(ai, chosen.clone(), cx);
+                            });
+                        },
+                    ));
+                }
+                menu
+            })
+    }
+
     /// A small muted section label, used across the settings page.
     fn section_label(
         &self,
@@ -832,6 +909,60 @@ impl Peek {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
         cx.notify();
+    }
+
+    /// Checks that a channel actually answers.
+    ///
+    /// The endpoint a channel is configured with is a base URL, so a request
+    /// goes to `<endpoint>/chat/completions` for an OpenAI-style protocol. That
+    /// is exactly where a URL missing its `/v1` segment fails, so the result
+    /// names the URL that was tried.
+    fn test_channel(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(channel) = self.config.channel(&id).cloned() else {
+            return;
+        };
+        self.channel_test = Some((id.clone(), i18n::tr("channels-testing")));
+        cx.notify();
+        let client = self.client.clone();
+        let tx = self.test_tx.clone();
+        let ui_language = self.config.ui_language.clone();
+        self.runtime.spawn(async move {
+            let locale = i18n::I18n::new(&ui_language);
+            let outcome = if channel.kind == ChannelKind::DeepLx {
+                let url = channel.endpoint.clone();
+                match client
+                    .translate_deeplx(
+                        &url,
+                        &channel.api_key,
+                        "hello",
+                        "Chinese",
+                        CancellationToken::new(),
+                    )
+                    .await
+                {
+                    Ok(_) => i18n::tr("channels-test-ok"),
+                    Err(err) => locale.format(
+                        "channels-test-failed",
+                        &[("detail", &format!("{} · {url}", locale.network_error(&err)))],
+                    ),
+                }
+            } else {
+                let Some(provider) = channel.provider() else {
+                    let _ = tx.send((id.clone(), i18n::tr("status-channel-missing")));
+                    return;
+                };
+                let url = peek_network::endpoint_url(&provider)
+                    .unwrap_or_else(|_| provider.base_url.clone());
+                match client.probe(&provider, &channel.api_key).await {
+                    Ok(()) => i18n::tr("channels-test-ok"),
+                    Err(err) => locale.format(
+                        "channels-test-failed",
+                        &[("detail", &format!("{} · {url}", locale.network_error(&err)))],
+                    ),
+                }
+            };
+            let _ = tx.send((id, outcome));
+        });
     }
 
     /// Removes a channel and clears any selection that pointed at it.
@@ -1551,38 +1682,75 @@ impl Peek {
                         .children(channels.iter().map(|(id, name, kind_key, _)| {
                             let edit_id = id.clone();
                             let remove_id = id.clone();
+                            let test_id = id.clone();
                             let label = format!("{name} · {}", i18n::tr(kind_key));
-                            h_flex()
+                            // The last test's result, shown under the row it
+                            // belongs to so a failure names its own channel.
+                            let outcome = self
+                                .channel_test
+                                .as_ref()
+                                .filter(|(tested, _)| tested == id)
+                                .map(|(_, message)| message.clone());
+                            v_flex()
                                 .w_full()
-                                .items_center()
-                                .gap(px(8.))
+                                .gap(px(4.))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .font_family(set.latin)
-                                        .text_size(px(12.))
-                                        .child(label),
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .font_family(set.latin)
+                                                .text_size(px(12.))
+                                                .child(label),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!("test-{id}")))
+                                                .icon(IconName::PlugZap)
+                                                .tooltip(i18n::tr("channels-test"))
+                                                .on_click(cx.listener(
+                                                    move |this, _event, _window, cx| {
+                                                        this.test_channel(test_id.clone(), cx);
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!("edit-{id}")))
+                                                .icon(IconName::Pencil)
+                                                .tooltip(i18n::tr("channels-edit"))
+                                                .on_click(cx.listener(
+                                                    move |this, _event, window, cx| {
+                                                        this.open_channel_dialog(
+                                                            Some(edit_id.clone()),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!("remove-{id}")))
+                                                .icon(IconName::X)
+                                                .tooltip(i18n::tr("channels-remove"))
+                                                .on_click(cx.listener(
+                                                    move |this, _event, _window, cx| {
+                                                        this.remove_channel(&remove_id, cx);
+                                                    },
+                                                )),
+                                        ),
                                 )
-                                .child(
-                                    Button::new(SharedString::from(format!("edit-{id}")))
-                                        .icon(IconName::Pencil)
-                                        .tooltip(i18n::tr("channels-edit"))
-                                        .on_click(cx.listener(move |this, _event, window, cx| {
-                                            this.open_channel_dialog(
-                                                Some(edit_id.clone()),
-                                                window,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("remove-{id}")))
-                                        .icon(IconName::X)
-                                        .tooltip(i18n::tr("channels-remove"))
-                                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                                            this.remove_channel(&remove_id, cx);
-                                        })),
-                                )
+                                // The last test's outcome, under its own row.
+                                .when_some(outcome, |this, message| {
+                                    this.child(
+                                        div()
+                                            .font_family(set.latin)
+                                            .text_size(px(11.))
+                                            .text_color(muted)
+                                            .child(message),
+                                    )
+                                })
                                 .into_any_element()
                         }))
                         .child(
@@ -1595,24 +1763,65 @@ impl Peek {
                         ),
                 )
             })
-            // Which channel serves which place. Only kinds that can do the job
-            // are offered: a translation-only channel never appears for AI work.
+            // Which channel serves which place, plus the copy behaviour that
+            // belongs to the capture flow.
             .when(self.settings_tab == 1, |this| {
                 this.child(
                     v_flex()
                         .w_full()
-                        .gap(px(6.))
+                        .gap(px(10.))
                         .child(
-                            h_flex().w_full().items_center().gap(px(8.)).child(
-                                div()
-                                    .flex_1()
-                                    .font_family(set.latin)
-                                    .text_size(px(12.))
-                                    .child(i18n::tr("settings-snip-close-on-copy")),
-                            ),
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_family(set.latin)
+                                        .text_size(px(12.))
+                                        .child(i18n::tr("settings-snip-close-on-copy")),
+                                )
+                                .child(
+                                    Switch::new("snip_close_on_copy")
+                                        .checked(self.config.snip_close_on_copy)
+                                        .on_click(cx.listener(
+                                            |this, checked: &bool, _window, cx| {
+                                                this.config.snip_close_on_copy = *checked;
+                                                this.persist_config();
+                                                cx.notify();
+                                            },
+                                        )),
+                                ),
                         )
                         .child(self.section_label(i18n::tr("channels-usage"), set, muted))
-                        .child(self.section_label(i18n::tr("channels-basic"), set, muted))
+                        .child(
+                            self.picker_row(
+                                i18n::tr("channels-basic"),
+                                self.channel_picker(
+                                    "basic_picker",
+                                    channels
+                                        .iter()
+                                        .map(|(id, name, _, _)| (id.clone(), name.clone()))
+                                        .collect(),
+                                    basic_active.clone(),
+                                    false,
+                                    cx,
+                                ),
+                                set,
+                            ),
+                        )
+                        .child(self.picker_row(
+                            i18n::tr("channels-ai"),
+                            self.channel_picker(
+                                "ai_picker",
+                                ai_channels,
+                                ai_active.clone(),
+                                true,
+                                cx,
+                            ),
+                            set,
+                        ))
                         .when(channels.is_empty(), |this| {
                             this.child(
                                 div()
@@ -1621,35 +1830,7 @@ impl Peek {
                                     .text_color(muted)
                                     .child(i18n::tr("channels-none")),
                             )
-                        })
-                        .children(channels.iter().map(|(id, name, _, _)| {
-                            let choice = id.clone();
-                            Button::new(SharedString::from(format!("basic-{id}")))
-                                .when(*id == basic_active, |button| button.primary())
-                                .label(name.clone())
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.assign_channel(false, choice.clone(), cx);
-                                }))
-                        }))
-                        .child(self.section_label(i18n::tr("channels-ai"), set, muted))
-                        .children(ai_channels.iter().map(|(id, name)| {
-                            let choice = id.clone();
-                            Button::new(SharedString::from(format!("ai-{id}")))
-                                .when(*id == ai_active, |button| button.primary())
-                                .label(name.clone())
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.assign_channel(true, choice.clone(), cx);
-                                }))
-                        })),
-                )
-                .child(
-                    Switch::new("snip-close-on-copy")
-                        .checked(self.config.snip_close_on_copy)
-                        .on_click(cx.listener(|this, checked: &bool, _window, cx| {
-                            this.config.snip_close_on_copy = *checked;
-                            this.persist_config();
-                            cx.notify();
-                        })),
+                        }),
                 )
             })
             .when(self.settings_tab == 2, |this| {

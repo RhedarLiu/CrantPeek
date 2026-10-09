@@ -262,6 +262,35 @@ impl Client {
         .await
     }
 
+    /// Sends one minimal request to confirm that the endpoint, the path and the
+    /// credential all work.
+    ///
+    /// A channel can be perfectly configured and still answer 404 because the
+    /// path suffix is missing, so a probe is worth more than a reachability
+    /// check: it reports the status the service actually returns.
+    pub async fn probe(&self, provider: &Provider, key: &str) -> Result<(), Error> {
+        let url = endpoint_url(provider)?;
+        let body = json!({
+            "model": provider.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": false,
+        });
+        let mut request = self.http.post(url).json(&body);
+        if provider.protocol == Protocol::Anthropic {
+            request = request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01");
+        } else {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(Error::Http(response.status().as_u16()));
+        }
+        Ok(())
+    }
+
     async fn stream_body(
         &self,
         provider: &Provider,
@@ -270,14 +299,7 @@ impl Client {
         tx: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(), Error> {
-        peek_core::validate_endpoint(&provider.base_url, true)
-            .map_err(|e| Error::Invalid(e.into()))?;
-        let suffix = match provider.protocol {
-            Protocol::ChatCompletions => "chat/completions",
-            Protocol::Responses => "responses",
-            Protocol::Anthropic => "messages",
-        };
-        let url = format!("{}/{suffix}", provider.base_url.trim_end_matches('/'));
+        let url = endpoint_url(provider)?;
         let mut request = self.http.post(url).json(&body);
         if provider.protocol == Protocol::Anthropic {
             request = request
@@ -812,5 +834,59 @@ mod deeplx_tests {
         // Unknown targets still need a code.
         assert_eq!(deeplx_language_code("Klingon"), "EN");
         assert_eq!(deeplx_language_code(""), "EN");
+    }
+}
+
+/// The URL a request for `provider` is sent to.
+///
+/// The configured endpoint is a base: the protocol's path is appended, so
+/// `https://host/v1` becomes `https://host/v1/chat/completions`. Exposed so a
+/// failed request can name the URL it tried.
+pub fn endpoint_url(provider: &Provider) -> Result<String, Error> {
+    peek_core::validate_endpoint(&provider.base_url, true).map_err(|e| Error::Invalid(e.into()))?;
+    let suffix = match provider.protocol {
+        Protocol::ChatCompletions => "chat/completions",
+        Protocol::Responses => "responses",
+        Protocol::Anthropic => "messages",
+    };
+    Ok(format!(
+        "{}/{suffix}",
+        provider.base_url.trim_end_matches('/')
+    ))
+}
+
+#[cfg(test)]
+mod endpoint_url_tests {
+    use super::endpoint_url;
+    use peek_core::{Protocol, Provider};
+
+    #[test]
+    fn the_protocol_path_is_appended_to_the_base() {
+        let provider = Provider {
+            base_url: "https://router.example/v1".into(),
+            protocol: Protocol::ChatCompletions,
+            ..Provider::default()
+        };
+        assert_eq!(
+            endpoint_url(&provider).unwrap(),
+            "https://router.example/v1/chat/completions"
+        );
+        // A trailing slash must not double up.
+        let provider = Provider {
+            base_url: "https://router.example/v1/".into(),
+            ..provider
+        };
+        assert_eq!(
+            endpoint_url(&provider).unwrap(),
+            "https://router.example/v1/chat/completions"
+        );
+        let anthropic = Provider {
+            protocol: Protocol::Anthropic,
+            ..provider
+        };
+        assert_eq!(
+            endpoint_url(&anthropic).unwrap(),
+            "https://router.example/v1/messages"
+        );
     }
 }
