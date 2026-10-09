@@ -25,7 +25,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -154,6 +154,7 @@ impl Peek {
     ) -> Self {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
+        native_window::hide_window_buttons(window);
         let activation = cx.observe_window_activation(window, |this, window, _cx| {
             // A pinned window behaves like a normal window and stays put.
             if !this.pinned && !window.is_window_active() && !shown_recently() {
@@ -237,6 +238,11 @@ impl Peek {
                             return;
                         }
                         Action::Screenshot => {
+                            // The panel would otherwise sit under the overlay
+                            // and compete with the selection.
+                            let _ = cx.update_window(panel_handle, |_, window, _| {
+                                native_window::hide(window)
+                            });
                             // The overlay captures on release, so this only
                             // opens the selection window.
                             let tx = snip_tx.clone();
@@ -622,6 +628,23 @@ impl Peek {
         true
     }
 
+    /// An icon button in the component's own style: the default variant's
+    /// minimal border, the icon in the button's icon slot, and a tooltip so the
+    /// action is still discoverable without a label.
+    fn icon_button(
+        &self,
+        id: &'static str,
+        icon: gpui_kit::assets::IconName,
+        tooltip: String,
+        cx: &Context<Self>,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Button {
+        Button::new(id)
+            .icon(icon)
+            .tooltip(tooltip)
+            .on_click(cx.listener(move |this, _event, window, cx| on_click(this, window, cx)))
+    }
+
     /// Switches between the quick peek and a regular window.
     fn toggle_pinned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pinned = !self.pinned;
@@ -750,47 +773,39 @@ impl Peek {
                             .font_semibold()
                             .child("Crant Peek"),
                     )
-                    .child(
-                        Button::new("pin-window")
-                            .secondary()
-                            .rounded(px(10.))
-                            .h(px(28.))
-                            .px(px(8.))
-                            .child(
-                                Icon::new(if self.pinned {
-                                    gpui_kit::assets::IconName::PinOff
-                                } else {
-                                    gpui_kit::assets::IconName::Pin
-                                })
-                                .size(px(16.))
-                                .text_color(muted),
-                            )
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.toggle_pinned(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("open-settings")
-                            .secondary()
-                            .rounded(px(10.))
-                            .h(px(28.))
-                            .px(px(8.))
-                            .child(
-                                Icon::new(gpui_kit::assets::IconName::Settings)
-                                    .size(px(16.))
-                                    .text_color(muted),
-                            )
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.settings = true;
-                                this.persist_prefs();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Icon::new(gpui_kit::assets::IconName::Close)
-                            .size(px(16.))
-                            .text_color(muted),
-                    ),
+                    .child(self.icon_button(
+                        "pin-window",
+                        if self.pinned {
+                            gpui_kit::assets::IconName::PinOff
+                        } else {
+                            gpui_kit::assets::IconName::Pin
+                        },
+                        if self.pinned {
+                            i18n::tr("action-unpin")
+                        } else {
+                            i18n::tr("action-pin")
+                        },
+                        cx,
+                        |this, window, cx| this.toggle_pinned(window, cx),
+                    ))
+                    .child(self.icon_button(
+                        "open-settings",
+                        gpui_kit::assets::IconName::Settings,
+                        i18n::tr("settings-title"),
+                        cx,
+                        |this, _window, cx| {
+                            this.settings = true;
+                            this.persist_prefs();
+                            cx.notify();
+                        },
+                    ))
+                    .child(self.icon_button(
+                        "close-panel",
+                        gpui_kit::assets::IconName::X,
+                        i18n::tr("action-close"),
+                        cx,
+                        |_this, window, _cx| native_window::hide(window),
+                    )),
             )
             // Source input.
             .child(
@@ -823,9 +838,6 @@ impl Peek {
                     .child(
                         Button::new("look-up")
                             .primary()
-                            .rounded(px(999.))
-                            .h(px(34.))
-                            .px(px(16.))
                             .label(i18n::tr("query-run"))
                             .loading(self.busy)
                             .on_click(cx.listener(|this, _event, window, cx| {
@@ -833,19 +845,13 @@ impl Peek {
                             })),
                     )
                     .when(self.busy, |this| {
-                        this.child(
-                            Button::new("stop")
-                                .secondary()
-                                .rounded(px(999.))
-                                .h(px(34.))
-                                .px(px(16.))
-                                .label(i18n::tr("query-stop"))
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.stop();
-                                    this.status = i18n::tr("status-stopped");
-                                    cx.notify();
-                                })),
-                        )
+                        this.child(Button::new("stop").label(i18n::tr("query-stop")).on_click(
+                            cx.listener(|this, _event, _window, cx| {
+                                this.stop();
+                                this.status = i18n::tr("status-stopped");
+                                cx.notify();
+                            }),
+                        ))
                     }),
             )
             .when(self.has_result(), |this| {
@@ -925,9 +931,6 @@ impl Peek {
                             )
                             .child(
                                 Button::new("send")
-                                    .rounded(px(999.))
-                                    .h(px(34.))
-                                    .px(px(16.))
                                     .label(i18n::tr("query-send"))
                                     .disabled(self.busy)
                                     .on_click(cx.listener(|this, _event, window, cx| {
@@ -980,11 +983,8 @@ impl Peek {
                     .gap(px(10.))
                     .child(
                         Button::new("settings-back")
-                            .secondary()
-                            .rounded(px(10.))
-                            .h(px(28.))
-                            .px(px(10.))
-                            .label(i18n::tr("header-back"))
+                            .icon(gpui_kit::assets::IconName::ArrowLeft)
+                            .tooltip(i18n::tr("header-back"))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.settings = false;
                                 this.persist_prefs();
@@ -1015,11 +1015,7 @@ impl Peek {
                         let id = candidate.id;
                         let active = id == set.id;
                         Button::new(id)
-                            .rounded(px(10.))
-                            .h(px(34.))
-                            .px(px(12.))
                             .when(active, |button| button.primary())
-                            .when(!active, |button| button.secondary())
                             .label(candidate.name)
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.choose_font_set(id, cx);

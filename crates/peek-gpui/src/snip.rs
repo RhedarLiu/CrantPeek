@@ -17,6 +17,7 @@ use std::sync::{
     mpsc::{Receiver, Sender},
 };
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, h_flex};
@@ -323,10 +324,7 @@ impl Render for Snip {
                         .gap(px(8.))
                         .child(
                             Button::new("snip_copy")
-                                .secondary()
-                                .rounded(px(999.))
-                                .h(px(30.))
-                                .px(px(12.))
+                                .icon(IconName::Copy)
                                 .label(i18n::tr("snip-copy-text"))
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.copy_text(cx);
@@ -335,9 +333,7 @@ impl Render for Snip {
                         .child(
                             Button::new("snip_to_panel")
                                 .primary()
-                                .rounded(px(999.))
-                                .h(px(30.))
-                                .px(px(12.))
+                                .icon(IconName::CornerDownLeft)
                                 .label(i18n::tr("snip-to-input"))
                                 .on_click(cx.listener(|this, _event, window, _cx| {
                                     this.send_to_panel(window);
@@ -346,11 +342,8 @@ impl Render for Snip {
                         .child(div().flex_1())
                         .child(
                             Button::new("snip_close")
-                                .secondary()
-                                .rounded(px(999.))
-                                .h(px(30.))
-                                .px(px(12.))
-                                .label(i18n::tr("snip-discard"))
+                                .icon(IconName::X)
+                                .tooltip(i18n::tr("snip-discard"))
                                 .on_click(cx.listener(|this, _event, window, _cx| {
                                     this.close(window);
                                 })),

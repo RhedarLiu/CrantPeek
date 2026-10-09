@@ -99,6 +99,38 @@ pub fn make_capture_overlay(window: &mut Window) {
     let _ = window;
 }
 
+/// Hides the close/minimise/zoom buttons.
+///
+/// The panel is a titled window, so macOS draws traffic lights in its corner.
+/// The panel has its own close button and is summoned by hotkey, so the system
+/// ones are noise.
+pub fn hide_window_buttons(window: &mut Window) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(ns_view) = macos_view(window) else {
+            return;
+        };
+        unsafe {
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+            let view = ns_view as *mut AnyObject;
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            if ns_window.is_null() {
+                return;
+            }
+            // NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton
+            for kind in [0usize, 1, 2] {
+                let button: *mut AnyObject = msg_send![ns_window, standardWindowButton: kind];
+                if !button.is_null() {
+                    let _: () = msg_send![button, setHidden: true];
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
 #[cfg(target_os = "macos")]
 fn macos_hide(window: &mut Window) {
     let Some(ns_view) = macos_view(window) else {

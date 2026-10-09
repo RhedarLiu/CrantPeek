@@ -8,6 +8,9 @@ header-pin = 固定
 header-unpin = 取消固定
 header-settings = 设置
 header-close = 关闭
+action-close = 关闭
+action-pin = 固定为正式窗口
+action-unpin = 恢复即用即走
 header-back = 返回
 header-paused = 快捷入口已暂停
 
