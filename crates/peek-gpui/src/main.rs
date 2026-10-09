@@ -52,7 +52,12 @@ use tokio_util::sync::CancellationToken;
 /// Panel geometry: compact until there is something to show, which keeps the
 /// default state a bare input box instead of a mostly empty card stack.
 const PANEL_WIDTH: f32 = 480.;
-const PANEL_COMPACT_HEIGHT: f32 = 244.;
+/// Panel height with the input box at its two-row minimum: header, input card,
+/// action row, padding and gaps.
+const PANEL_COMPACT_BASE: f32 = 166.;
+/// Added per input row, so a longer draft grows the panel instead of spilling
+/// outside the input card.
+const PANEL_INPUT_ROW: f32 = 22.;
 const PANEL_EXPANDED_HEIGHT: f32 = 560.;
 /// Chrome the settings page always shows: header, tab row, padding and gaps.
 const SETTINGS_CHROME: f32 = 168.;
@@ -1296,7 +1301,10 @@ impl Render for Peek {
         } else if self.has_result() {
             PANEL_EXPANDED_HEIGHT
         } else {
-            PANEL_COMPACT_HEIGHT
+            // The textarea auto-grows between two and five rows, so the compact
+            // panel follows it rather than guessing a single height.
+            let rows = self.input.read(cx).value().lines().count().clamp(2, 5) as f32;
+            PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows
         };
         if self.applied_height != Some(height) {
             self.applied_height = Some(height);
@@ -1423,6 +1431,10 @@ impl Peek {
             .child(
                 div()
                     .w_full()
+                    // The textarea grows with its content up to five rows; a
+                    // fixed height here let it paint over the row below, and
+                    // clipping keeps that from ever happening again.
+                    .overflow_hidden()
                     .border_1()
                     .border_color(border)
                     .rounded(px(16.))
@@ -1430,7 +1442,6 @@ impl Peek {
                     .child(
                         Textarea::new(&self.input)
                             .w_full()
-                            .h(px(78.))
                             .appearance(false)
                             .bordered(false),
                     ),
@@ -2080,7 +2091,10 @@ fn window_options() -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(320.), px(200.)),
-            size: size(px(PANEL_WIDTH), px(PANEL_COMPACT_HEIGHT)),
+            size: size(
+                px(PANEL_WIDTH),
+                px(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.),
+            ),
         })),
         titlebar: Some(TitlebarOptions {
             title: None,
