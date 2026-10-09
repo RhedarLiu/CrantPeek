@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/peek-core", "crates/peek-network", "crates/peek-dict", "crates/peek-runtime", "crates/peek-app", "crates/peek-gpui"]
+members = ["crates/peek-core", "crates/peek-network", "crates/peek-dict", "crates/peek-runtime", "crates/peek-gpui"]
 # UI framework spikes are throwaway, standalone workspaces. Excluded so a
 # `cargo init`/`cargo new` inside spikes/ can never be adopted as a member
 # (that previously produced "multiple workspace roots" and broke the build).

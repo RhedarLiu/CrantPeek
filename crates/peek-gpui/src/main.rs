@@ -1,10 +1,9 @@
 //! Crant Peek — GPUI shell.
 //!
 //! Tray-resident, floating-first: no main window, the peek panel is created
-//! hidden at startup and summoned by a global hotkey. This crate replaces the
-//! egui/eframe UI layer (`peek-app`) while `peek-core`, `peek-network` and
-//! `peek-dict` stay unchanged; shared config/keychain/i18n live in
-//! `peek-runtime`.
+//! hidden at startup and summoned by a global hotkey. `peek-core`,
+//! `peek-network` and `peek-dict` hold the domain logic; shared
+//! config/keychain/i18n live in `peek-runtime`.
 //!
 //! Ordering note: the tray icon and the hotkey manager are installed *inside*
 //! the `Application::run` callback, not before it. Creating them earlier makes
@@ -934,7 +933,7 @@ impl Peek {
     }
 }
 
-/// Renders a dictionary hit the way the egui shell did: headword, phonetic,
+/// Renders a dictionary hit: headword, phonetic,
 /// translation, word forms and lemma. `peek_dict::Entry` and `peek_core::Entry`
 /// are distinct types, so the text is assembled here.
 fn dictionary_text(entry: &peek_dict::Entry) -> String {
@@ -982,8 +981,7 @@ fn main() {
 > 日文示例：エラーを解析します。直線と骨格、今日の海。
 "#;
 
-/// Renders the panel offscreen to a PNG, the GPUI counterpart of the egui
-/// shell's `PEEK_UI_PREVIEW`. No window is shown, so this is safe to run
+/// Renders the panel offscreen to a PNG. No window is shown, so this is safe to run
 /// unattended and gives the Markdown answer a visual check without credentials.
 fn render_preview(path: &str) -> anyhow::Result<()> {
     let mut cx = gpui_kit::HeadlessAppContext::with_platform(
@@ -1192,7 +1190,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Command+Shift+A toggles the panel; Command+Shift+D starts the
-        // screenshot overlay, matching the egui shell's defaults.
+        // screenshot overlay.
         let toggle_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
         let snip_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyD);
         let toggle_id = toggle_hotkey.id();

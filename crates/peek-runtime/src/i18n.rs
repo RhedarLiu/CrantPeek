@@ -65,7 +65,15 @@ impl I18n {
         static SYSTEM: OnceLock<String> = OnceLock::new();
         let language = if language == "system" {
             SYSTEM
-                .get_or_init(|| sys_locale::get_locale().unwrap_or_else(|| "en".into()))
+                .get_or_init(|| {
+                    // `PEEK_LANGUAGE` forces a language for isolated previews,
+                    // which otherwise follow the system locale and so cannot
+                    // show the other catalog on one machine.
+                    std::env::var("PEEK_LANGUAGE")
+                        .ok()
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| sys_locale::get_locale().unwrap_or_else(|| "en".into()))
+                })
                 .as_str()
         } else {
             language
@@ -146,9 +154,9 @@ mod tests {
         let available = keys(EN);
         let sources = [
             // This module lives in `peek-runtime`; the view layer it audits is
-            // still `peek-app` until the GPUI shell reaches parity.
-            include_str!("../../peek-app/src/main.rs"),
-            include_str!("../../peek-app/src/desktop.rs"),
+            // the shell crate.
+            include_str!("../../peek-gpui/src/main.rs"),
+            include_str!("../../peek-gpui/src/snip.rs"),
             include_str!("permissions.rs"),
             include_str!("store.rs"),
             include_str!("../../peek-core/src/lib.rs"),
@@ -180,6 +188,7 @@ mod tests {
                         "settings-answer",
                         "settings-translation",
                         "settings-general",
+                        "settings-back",
                         "snip-area",
                     ]
                     .contains(&literal)

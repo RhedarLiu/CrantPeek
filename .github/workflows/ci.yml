@@ -31,7 +31,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           name: Crant-Peek-Windows-test
-          path: target/release/peek-app.exe
+          path: target/release/peek-gpui.exe
       - name: Archive macOS app
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Crant Peek.app" dist/Crant-Peek-macOS.zip

@@ -26,12 +26,12 @@
 | 多模态决策 / 回答 | 已接入显式按钮：图片解读发送至启用 vision 的回答服务；Clef 判断发送至决策服务。目标地址可见，默认不上传图片。三类回答协议及 Clef 官方图片 schema 有测试。**未对真实服务与界面交互验收** |
 | 权限诊断、首次使用引导、快捷键设置 | 已加入设置页：首次欢迎说明、macOS 权限状态/系统设置入口、快捷键格式与重复检查；修改快捷键需重启。跨应用冲突以注册失败报告，尚无交互验收。 |
 | 界面多语言（i18n） | 中英文文案全部外置到 Fluent 资源，界面内不写死文案；可跟随系统或手动选择，保存后立即生效（含托盘菜单）。测试覆盖键一致、参数一致、资源引用、回退与异步语言。**新增语言需按 [I18N.md](I18N.md) 补全键。** |
-| 浮窗视觉 | 黑白灰圆角卡片风格（原生 egui，无 Web 技术），浅色/深色/跟随系统、界面缩放、图标操作与固定页脚。已用隔离预览目测中英文浅深色；**Windows 实机与真实交互未验收** |
+| 浮窗视觉 | 黑白灰圆角卡片风格（GPUI，无 Web 技术），内置方案 2 字体集为默认、方案 3 衬线可选，浅色/深色/跟随系统、界面缩放、图标操作与固定页脚。已用隔离预览目测中英文浅深色；**Windows 实机与真实交互未验收** |
 
 ## 运行
 
 ```sh
-cargo run -p peek-app
+cargo run -p peek-gpui
 ```
 
 ### 离线词典
@@ -52,7 +52,7 @@ cargo run --release -p peek-dict --bin build-dict -- local-assets/ecdict/ecdict.
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p peek-app --target x86_64-pc-windows-msvc -- -D warnings   # Windows 交叉检查
+cargo clippy -p peek-runtime --target x86_64-pc-windows-msvc -- -D warnings   # Windows 交叉检查
 ```
 
 ## 文档

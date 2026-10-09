@@ -1,7 +1,6 @@
 //! Events the tray, the global hotkeys and the double-tap Ctrl hook produce.
 //!
-//! Neutral data, so both the egui shell and the GPUI shell can consume the same
-//! platform code.
+//! Neutral data, so the shell never touches platform code directly.
 
 #[derive(Debug)]
 pub enum Action {

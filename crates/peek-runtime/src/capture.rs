@@ -1,8 +1,8 @@
 //! User-triggered capture. Images remain in memory and are never written to disk.
 //!
 //! Geometry is expressed with plain `[f32; 2]` points and an owned [`Rect`]
-//! rather than a GUI toolkit's types, so both the egui shell and the GPUI shell
-//! can share the same capture and coordinate math. Callers convert at the edge.
+//! rather than a GUI toolkit's types, so the capture and coordinate math is
+//! independent of the shell. Callers convert at the edge.
 
 /// A point or vector in display coordinates: `[x, y]`.
 pub type Point = [f32; 2];

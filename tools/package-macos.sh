@@ -4,13 +4,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 
-# Defaults package the egui shell, which is what CI and the existing bundle use.
-# Override to package the GPUI shell into its own bundle, so macOS permissions
-# can be granted to each separately while both exist:
-#   PACKAGE=peek-gpui BIN=peek-gpui APP_NAME="Crant Peek GPUI.app" \
-#   BUNDLE_ID=dev.crant.peek.gpui EXEC_NAME=CrantPeekGPUI tools/package-macos.sh
-PACKAGE="${PACKAGE:-peek-app}"
-BIN="${BIN:-peek-app}"
+# The GPUI shell is the application. The overrides exist so an alternative
+# bundle can be built side by side (for example while comparing UI crates)
+# without touching this one:
+#   PACKAGE=... BIN=... APP_NAME=... BUNDLE_ID=... EXEC_NAME=... tools/package-macos.sh
+PACKAGE="${PACKAGE:-peek-gpui}"
+BIN="${BIN:-peek-gpui}"
 APP_NAME="${APP_NAME:-Crant Peek.app}"
 BUNDLE_ID="${BUNDLE_ID:-dev.crant.peek}"
 EXEC_NAME="${EXEC_NAME:-CrantPeek}"
