@@ -358,11 +358,14 @@ impl Client {
     /// Translates with a DeepLX-compatible endpoint.
     ///
     /// DeepLX is a self-hosted proxy in front of DeepL's free web API, so it
-    /// needs no credential, only a reachable URL. It answers in one piece
-    /// rather than as a stream.
+    /// usually needs no credential, only a reachable URL. A deployment behind a
+    /// gateway may want a token, so a non-empty `key` is sent as a bearer token;
+    /// servers that ignore it are unaffected. It answers in one piece rather
+    /// than as a stream.
     pub async fn translate_deeplx(
         &self,
         endpoint: &str,
+        key: &str,
         text: &str,
         target_language: &str,
         cancel: CancellationToken,
@@ -373,9 +376,15 @@ impl Client {
             "source_lang": "auto",
             "target_lang": deeplx_language_code(target_language),
         });
+        let request = self.http.post(endpoint).json(&body);
+        let request = if key.trim().is_empty() {
+            request
+        } else {
+            request.bearer_auth(key)
+        };
         let response = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            r = self.http.post(endpoint).json(&body).send() => r?,
+            r = request.send() => r?,
         };
         if !response.status().is_success() {
             return Err(Error::Http(response.status().as_u16()));
@@ -760,7 +769,7 @@ mod deeplx_tests {
         let (endpoint, server) =
             stub_deeplx(r#"{"code":200,"message":"Success","data":"你好"}"#).await;
         let translated = Client::default()
-            .translate_deeplx(&endpoint, "Hello", "Chinese", CancellationToken::new())
+            .translate_deeplx(&endpoint, "", "Hello", "Chinese", CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(translated, "你好");
@@ -775,7 +784,7 @@ mod deeplx_tests {
     async fn deeplx_accepts_a_bare_string_body() {
         let (endpoint, _server) = stub_deeplx(r#""older builds answer like this""#).await;
         let translated = Client::default()
-            .translate_deeplx(&endpoint, "Hello", "English", CancellationToken::new())
+            .translate_deeplx(&endpoint, "", "Hello", "English", CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(translated, "older builds answer like this");
@@ -785,7 +794,7 @@ mod deeplx_tests {
     async fn deeplx_reports_an_unusable_body() {
         let (endpoint, _server) = stub_deeplx(r#"{"code":403,"message":"auth"}"#).await;
         let error = Client::default()
-            .translate_deeplx(&endpoint, "Hello", "Chinese", CancellationToken::new())
+            .translate_deeplx(&endpoint, "", "Hello", "Chinese", CancellationToken::new())
             .await
             .unwrap_err();
         // The code is localised by the caller, so the raw body is the detail.

@@ -72,6 +72,7 @@ route-uncertain = 决策不确定 · 使用本地判断
 route-unavailable = 决策不可用 · 使用本地判断
 
 ## 状态
+status-key-missing = 该渠道缺少 API key，请在设置里补上
 status-channel-missing = 还没有可用渠道，请先在设置里添加
 status-channel-incomplete = 渠道信息不完整：名称和端点必填
 status-generating = 生成中…

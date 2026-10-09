@@ -507,7 +507,13 @@ impl Peek {
     /// It reuses the same event channel as an AI turn, so the panel and the
     /// screenshot overlay need no separate path; the endpoint answers in one
     /// piece rather than as a stream.
-    fn begin_deeplx(&mut self, endpoint: String, text: String, cx: &mut Context<Self>) -> bool {
+    fn begin_deeplx(
+        &mut self,
+        endpoint: String,
+        key: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let route = local_route(
             &text,
             &self.config.target_language,
@@ -526,7 +532,7 @@ impl Peek {
         self.runtime.spawn(async move {
             let locale = i18n::I18n::new(&ui_language);
             match client
-                .translate_deeplx(&endpoint, &text, &target, cancel)
+                .translate_deeplx(&endpoint, &key, &text, &target, cancel)
                 .await
             {
                 Ok(translated) => {
@@ -717,7 +723,7 @@ impl Peek {
         let name = self.channel_name.read(cx).value().trim().to_owned();
         let endpoint = self.channel_endpoint.read(cx).value().trim().to_owned();
         let model = self.channel_model.read(cx).value().trim().to_owned();
-        let key = self.channel_key.read(cx).value().to_owned();
+        let key = self.channel_key.read(cx).value().to_string();
         if name.is_empty() || endpoint.is_empty() {
             self.status = i18n::tr("status-channel-incomplete");
             cx.notify();
@@ -737,20 +743,17 @@ impl Peek {
                 .unwrap_or(0);
             format!("ch-{stamp}")
         });
-        // An existing credential is kept when the field is left empty, so the
-        // secret never has to be re-entered to change another field.
-        let credential_id = if kind.needs_credential() {
-            let reference = format!("channel.{id}");
-            if !key.trim().is_empty()
-                && let Err(err) = store::save_secret(&reference, &key)
-            {
-                self.status = err;
-                cx.notify();
-                return;
-            }
-            reference
+        // An existing key is kept when the field is left empty, so the secret
+        // never has to be re-entered to change another field. It is stored with
+        // the channel rather than in the keychain: see `Channel::api_key`.
+        let api_key = if key.trim().is_empty() {
+            editing
+                .as_deref()
+                .and_then(|id| self.config.channel(id))
+                .map(|channel| channel.api_key.clone())
+                .unwrap_or_default()
         } else {
-            String::new()
+            key
         };
         let saved = Channel {
             id: id.clone(),
@@ -758,7 +761,8 @@ impl Peek {
             kind,
             endpoint,
             model,
-            credential_id,
+            api_key,
+            credential_id: String::new(),
             vision: false,
             max_output_tokens: 2048,
         };
@@ -770,13 +774,7 @@ impl Peek {
                     .iter_mut()
                     .find(|channel| channel.id == id)
                 {
-                    // Keep the credential reference when the stored key is
-                    // reused; the new value is empty in that case.
-                    let previous = slot.credential_id.clone();
                     *slot = saved;
-                    if slot.credential_id.is_empty() && !previous.is_empty() {
-                        slot.credential_id = previous;
-                    }
                 }
             }
             None => {
@@ -924,25 +922,19 @@ impl Peek {
             return false;
         };
         if channel.kind == ChannelKind::DeepLx {
-            return self.begin_deeplx(channel.endpoint.clone(), text, cx);
+            return self.begin_deeplx(channel.endpoint.clone(), channel.api_key.clone(), text, cx);
         }
         let Some(provider) = channel.provider() else {
             self.status = i18n::tr("status-channel-missing");
             cx.notify();
             return false;
         };
-        let key = if channel.kind.needs_credential() {
-            match store::secret(&channel.credential_id) {
-                Ok(key) => key,
-                Err(err) => {
-                    self.status = err;
-                    cx.notify();
-                    return false;
-                }
-            }
-        } else {
-            String::new()
-        };
+        let key = channel.api_key.clone();
+        if channel.kind.needs_credential() && key.trim().is_empty() {
+            self.status = i18n::tr("status-key-missing");
+            cx.notify();
+            return false;
+        }
         if !followup {
             self.original_query = text.clone();
             self.messages = vec![Message {
@@ -1651,19 +1643,40 @@ impl Peek {
                                 .text_color(muted)
                                 .child(i18n::tr("settings-permissions")),
                         )
+                        // One row per permission with a status chip, rather
+                        // than a sentence with a dash in it.
                         .children(self.permissions.iter().map(|(key, granted)| {
-                            div()
-                                .font_family(set.latin)
-                                .text_size(px(12.))
-                                .child(format!(
-                                    "{} — {}",
-                                    i18n::tr(key),
-                                    i18n::tr(if *granted {
-                                        "settings-permission-granted"
-                                    } else {
-                                        "settings-permission-denied"
-                                    })
-                                ))
+                            let (background, foreground) = if *granted {
+                                (theme.success, theme.success_foreground)
+                            } else {
+                                (theme.danger, theme.danger_foreground)
+                            };
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_family(set.latin)
+                                        .text_size(px(12.))
+                                        .child(i18n::tr(key)),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(8.))
+                                        .py(px(2.))
+                                        .rounded(px(999.))
+                                        .bg(background)
+                                        .text_color(foreground)
+                                        .text_size(px(11.))
+                                        .child(i18n::tr(if *granted {
+                                            "settings-permission-granted"
+                                        } else {
+                                            "settings-permission-denied"
+                                        })),
+                                )
+                                .into_any_element()
                         })),
                 )
             })
@@ -1773,7 +1786,14 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
 
             match page.as_str() {
                 // Not persisted: a preview must not overwrite the real choice.
-                "settings" => peek.settings = true,
+                "settings" => {
+                    peek.settings = true;
+                    if let Ok(tab) = std::env::var("PEEK_TAB")
+                        && let Ok(index) = tab.parse()
+                    {
+                        peek.settings_tab = index;
+                    }
+                }
                 // The default state: only the input box, nothing else.
                 "compact" => {}
                 _ => {

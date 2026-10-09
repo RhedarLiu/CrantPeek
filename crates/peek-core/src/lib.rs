@@ -194,9 +194,11 @@ impl ChannelKind {
         !matches!(self, Self::DeepLx)
     }
 
-    /// Only AI kinds need a keychain entry.
+    /// Every kind may carry a credential. AI kinds require one; a translation
+    /// endpoint often sits behind a proxy that wants a token, so DeepLX accepts
+    /// an optional one.
     pub fn needs_credential(self) -> bool {
-        self.is_ai()
+        true
     }
 
     /// Only AI kinds need a model id.
@@ -228,7 +230,16 @@ pub struct Channel {
     /// Base URL for AI kinds, request URL for a translation-only kind.
     pub endpoint: String,
     pub model: String,
-    /// Reference only. The secret itself must not be serialized into config.
+    /// The credential itself, stored with the channel.
+    ///
+    /// It lives in the config file rather than the system keychain: a keychain
+    /// entry's access control is bound to the application's code requirement,
+    /// so every rebuilt development binary prompted again, and "always allow"
+    /// did not survive the next build. The config file sits in the user's own
+    /// application-support directory under the user's own permissions. A
+    /// shipped, stably signed build could move this back to the keychain.
+    pub api_key: String,
+    /// Legacy keychain reference, kept so older configs still deserialize.
     pub credential_id: String,
     pub vision: bool,
     pub max_output_tokens: u32,
@@ -242,6 +253,7 @@ impl Default for Channel {
             kind: ChannelKind::default(),
             endpoint: "https://api.openai.com/v1".into(),
             model: String::new(),
+            api_key: String::new(),
             credential_id: String::new(),
             vision: false,
             max_output_tokens: 2048,

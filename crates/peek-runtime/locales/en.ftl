@@ -55,6 +55,7 @@ route-deciding = Choosing a task…
 route-decided = { $model } · confidence { $confidence }
 route-uncertain = Uncertain decision · using local routing
 route-unavailable = Decision unavailable · using local routing
+status-key-missing = This channel has no API key; add one in settings
 status-channel-missing = No usable channel yet; add one in settings
 status-channel-incomplete = Channel is incomplete: name and endpoint are required
 status-generating = Generating…
