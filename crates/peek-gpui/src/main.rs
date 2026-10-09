@@ -1253,7 +1253,9 @@ impl Peek {
                     self.forward_overlay(OverlayEvent::Chunk(delta));
                 }
                 Event::Done => {
-                    self.status = i18n::tr("status-done");
+                    // A finished turn says so by having an answer; a "done"
+                    // line only takes space.
+                    self.status.clear();
                     self.busy = false;
                     self.forward_overlay(OverlayEvent::Finished);
                     self.overlay = None;
@@ -2025,7 +2027,9 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                 "compact" => {}
                 _ => {
                     peek.answer = SAMPLE_ANSWER.into();
-                    peek.status = i18n::tr("status-done");
+                    // No status: a finished turn shows its answer and nothing
+                    // else, which is what the preview should mirror.
+                    peek.status.clear();
                 }
             }
             cx.notify();
