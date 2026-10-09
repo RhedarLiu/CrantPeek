@@ -155,6 +155,30 @@ pub enum Protocol {
     Anthropic,
 }
 
+/// How a plain translation is produced.
+///
+/// `Ai` routes through the configured provider like any other task. `DeepLx` is
+/// a DeepLX-compatible endpoint: a self-hosted proxy that speaks DeepL's free
+/// web API, needs no API key, and is only reachable at a URL the user runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TranslationBackend {
+    #[default]
+    Ai,
+    DeepLx,
+}
+
+impl TranslationBackend {
+    pub const ALL: [Self; 2] = [Self::Ai, Self::DeepLx];
+
+    /// Localisation key for the choice.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Ai => "settings-backend-ai",
+            Self::DeepLx => "settings-backend-deeplx",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Provider {
@@ -224,6 +248,10 @@ pub struct Config {
     pub hide_on_blur: bool,
     pub smart_mode: bool,
     pub ocr_auto_query: bool,
+    /// Which backend answers a plain translation.
+    pub translation_backend: TranslationBackend,
+    /// DeepLX endpoint, used when `translation_backend` is `DeepLx`.
+    pub deeplx_endpoint: String,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -241,6 +269,8 @@ impl Default for Config {
             decision: DecisionConfig::default(),
             schema_version: 1,
             provider: Provider::default(),
+            translation_backend: TranslationBackend::default(),
+            deeplx_endpoint: "http://127.0.0.1:1188/translate".into(),
             target_language: "Chinese".into(),
             chinese_target: "English".into(),
             blank_hotkey: format!("{modifier}+Shift+A"),

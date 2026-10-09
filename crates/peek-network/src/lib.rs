@@ -355,6 +355,50 @@ impl Client {
         self.decide_body(endpoint, key, body, cancel).await
     }
 
+    /// Translates with a DeepLX-compatible endpoint.
+    ///
+    /// DeepLX is a self-hosted proxy in front of DeepL's free web API, so it
+    /// needs no credential, only a reachable URL. It answers in one piece
+    /// rather than as a stream.
+    pub async fn translate_deeplx(
+        &self,
+        endpoint: &str,
+        text: &str,
+        target_language: &str,
+        cancel: CancellationToken,
+    ) -> Result<String, Error> {
+        peek_core::validate_endpoint(endpoint, true).map_err(|e| Error::Invalid(e.into()))?;
+        let body = json!({
+            "text": text,
+            "source_lang": "auto",
+            "target_lang": deeplx_language_code(target_language),
+        });
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            r = self.http.post(endpoint).json(&body).send() => r?,
+        };
+        if !response.status().is_success() {
+            return Err(Error::Http(response.status().as_u16()));
+        }
+        const MAX_TRANSLATION_BYTES: usize = 256 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_TRANSLATION_BYTES as u64)
+        {
+            return Err(Error::Invalid("error-translation-size".into()));
+        }
+        let value: Value = response.json().await?;
+        // Newer DeepLX builds nest the text under `data`; older ones reply with
+        // the translation itself.
+        if let Some(data) = value.get("data").and_then(Value::as_str) {
+            return Ok(data.to_owned());
+        }
+        if let Some(text) = value.as_str() {
+            return Ok(text.to_owned());
+        }
+        Err(Error::Invalid(value.to_string()))
+    }
+
     async fn decide_body(
         &self,
         endpoint: &str,
@@ -651,5 +695,113 @@ mod tests {
             c.stream(&Provider::default(), "", &[], tx, cancel).await,
             Err(Error::Cancelled)
         ));
+    }
+}
+
+/// Maps a configured language name ("Chinese") or tag ("zh-CN") to the code a
+/// DeepLX endpoint expects.
+pub fn deeplx_language_code(language: &str) -> String {
+    let lower = language.trim().to_ascii_lowercase();
+    let code = if lower.starts_with("zh") || lower.contains("chinese") {
+        "ZH"
+    } else if lower.starts_with("en") || lower.contains("english") {
+        "EN"
+    } else if lower.starts_with("ja") || lower.contains("japanese") {
+        "JA"
+    } else if lower.starts_with("ko") || lower.contains("korean") {
+        "KO"
+    } else if lower.starts_with("fr") || lower.contains("french") {
+        "FR"
+    } else if lower.starts_with("de") || lower.contains("german") {
+        "DE"
+    } else if lower.starts_with("es") || lower.contains("spanish") {
+        "ES"
+    } else if lower.starts_with("ru") || lower.contains("russian") {
+        "RU"
+    } else if lower.starts_with("pt") || lower.contains("portuguese") {
+        "PT"
+    } else if lower.starts_with("it") || lower.contains("italian") {
+        "IT"
+    } else {
+        // An endpoint needs a target, and English is the least surprising guess.
+        "EN"
+    };
+    code.to_owned()
+}
+
+#[cfg(test)]
+mod deeplx_tests {
+    use super::{Client, deeplx_language_code};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::sync::CancellationToken;
+
+    /// Serves one canned HTTP response and reports the request body it saw.
+    async fn stub_deeplx(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 4096];
+            let read = stream.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+        (format!("http://{address}/translate"), handle)
+    }
+
+    #[tokio::test]
+    async fn deeplx_request_and_response_are_wired() {
+        let (endpoint, server) =
+            stub_deeplx(r#"{"code":200,"message":"Success","data":"你好"}"#).await;
+        let translated = Client::default()
+            .translate_deeplx(&endpoint, "Hello", "Chinese", CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(translated, "你好");
+        let request = server.await.unwrap();
+        // The text and the mapped language code must reach the endpoint.
+        assert!(request.contains(r#""text":"Hello""#), "{request}");
+        assert!(request.contains(r#""target_lang":"ZH""#), "{request}");
+        assert!(request.contains(r#""source_lang":"auto""#), "{request}");
+    }
+
+    #[tokio::test]
+    async fn deeplx_accepts_a_bare_string_body() {
+        let (endpoint, _server) = stub_deeplx(r#""older builds answer like this""#).await;
+        let translated = Client::default()
+            .translate_deeplx(&endpoint, "Hello", "English", CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(translated, "older builds answer like this");
+    }
+
+    #[tokio::test]
+    async fn deeplx_reports_an_unusable_body() {
+        let (endpoint, _server) = stub_deeplx(r#"{"code":403,"message":"auth"}"#).await;
+        let error = Client::default()
+            .translate_deeplx(&endpoint, "Hello", "Chinese", CancellationToken::new())
+            .await
+            .unwrap_err();
+        // The code is localised by the caller, so the raw body is the detail.
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn language_names_and_tags_map_to_deeplx_codes() {
+        assert_eq!(deeplx_language_code("Chinese"), "ZH");
+        assert_eq!(deeplx_language_code("English"), "EN");
+        assert_eq!(deeplx_language_code("zh-CN"), "ZH");
+        assert_eq!(deeplx_language_code("ja"), "JA");
+        assert_eq!(deeplx_language_code(" Japanese "), "JA");
+        assert_eq!(deeplx_language_code("German"), "DE");
+        // Unknown targets still need a code.
+        assert_eq!(deeplx_language_code("Klingon"), "EN");
+        assert_eq!(deeplx_language_code(""), "EN");
     }
 }

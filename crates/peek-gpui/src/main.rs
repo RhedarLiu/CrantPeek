@@ -35,7 +35,7 @@ use tray_icon::Icon as TrayIconImage;
 use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
-use peek_core::{Config, Message, Task, effective_target, local_route};
+use peek_core::{Config, Message, Task, TranslationBackend, effective_target, local_route};
 use peek_network::{Client, Event};
 use peek_runtime::action::{Action, OverlayEvent};
 use peek_runtime::{i18n, store};
@@ -130,6 +130,8 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
+    /// DeepLX endpoint, editable in settings and persisted as it changes.
+    deeplx_input: Entity<InputState>,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
@@ -166,9 +168,26 @@ impl Peek {
         let follow_up = cx.new(|cx| {
             InputState::new(window, cx).placeholder(i18n::tr("query-followup-placeholder"))
         });
+        let deeplx_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::tr("settings-deeplx-hint")));
 
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
+        deeplx_input.update(cx, |state, cx| {
+            state.set_value(&config.deeplx_endpoint, window, cx);
+        });
+        // Persisted as it is typed, like the rest of the settings.
+        cx.observe(&deeplx_input, |this, state, cx| {
+            let value = state.read(cx).value().to_string();
+            if this.config.deeplx_endpoint != value {
+                this.config.deeplx_endpoint = value;
+                if let Err(err) = store::save(&this.config) {
+                    eprintln!("config save failed: {err}");
+                }
+                cx.notify();
+            }
+        })
+        .detach();
 
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
         let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx));
@@ -183,6 +202,7 @@ impl Peek {
             _activation: activation,
             input,
             follow_up,
+            deeplx_input,
             tasks,
             answer: String::new(),
             expanded: None,
@@ -463,6 +483,56 @@ impl Peek {
         }
     }
 
+    /// Translates through the configured DeepLX endpoint.
+    ///
+    /// It reuses the same event channel as an AI turn, so the panel and the
+    /// screenshot overlay need no separate path; the endpoint answers in one
+    /// piece rather than as a stream.
+    fn begin_deeplx(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+        let route = local_route(
+            &text,
+            &self.config.target_language,
+            &self.config.chinese_target,
+        );
+        let target = effective_target(&route.target, "").to_owned();
+        self.original_query = text.clone();
+        self.status = i18n::tr("status-generating");
+        self.busy = true;
+        let (tx, rx) = mpsc::channel(8);
+        self.receiver = Some(rx);
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        let endpoint = self.config.deeplx_endpoint.clone();
+        let client = self.client.clone();
+        let ui_language = self.config.ui_language.clone();
+        self.runtime.spawn(async move {
+            let locale = i18n::I18n::new(&ui_language);
+            match client
+                .translate_deeplx(&endpoint, &text, &target, cancel)
+                .await
+            {
+                Ok(translated) => {
+                    let _ = tx.send(Event::Text(translated)).await;
+                    let _ = tx.send(Event::Done).await;
+                }
+                Err(err) => {
+                    let _ = tx.send(Event::Failed(locale.network_error(&err))).await;
+                }
+            }
+        });
+        cx.notify();
+        true
+    }
+
+    /// Switches translation backend and remembers the choice.
+    fn choose_backend(&mut self, backend: TranslationBackend, cx: &mut Context<Self>) {
+        self.config.translation_backend = backend;
+        if let Err(err) = store::save(&self.config) {
+            eprintln!("config save failed: {err}");
+        }
+        cx.notify();
+    }
+
     /// Sends the follow-up box, continuing the current conversation.
     fn send_follow_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.follow_up.read(cx).value().trim().to_owned();
@@ -496,6 +566,11 @@ impl Peek {
             if let Some(entry) = self.lookup_word(&text) {
                 self.dictionary_note = dictionary_text(&entry);
             }
+        }
+
+        // DeepLX needs no credential, only a reachable endpoint.
+        if self.config.translation_backend == TranslationBackend::DeepLx {
+            return self.begin_deeplx(text, cx);
         }
 
         let key = match store::secret(&self.config.provider.credential_id) {
@@ -1025,6 +1100,49 @@ impl Peek {
             .child(
                 v_flex()
                     .w_full()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .font_family(set.latin)
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(i18n::tr("settings-translation-backend")),
+                    )
+                    .children(TranslationBackend::ALL.iter().map(|candidate| {
+                        let choice = *candidate;
+                        Button::new(choice.label_key())
+                            .when(choice == self.config.translation_backend, |button| {
+                                button.primary()
+                            })
+                            .label(i18n::tr(choice.label_key()))
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.choose_backend(choice, cx);
+                            }))
+                    }))
+                    // The endpoint only matters for DeepLX, and it needs no
+                    // credential, which is the point of offering it.
+                    .when(
+                        self.config.translation_backend == TranslationBackend::DeepLx,
+                        |this| {
+                            this.child(
+                                v_flex()
+                                    .w_full()
+                                    .gap(px(4.))
+                                    .child(
+                                        div()
+                                            .font_family(set.latin)
+                                            .text_size(px(11.))
+                                            .text_color(muted)
+                                            .child(i18n::tr("settings-deeplx-endpoint")),
+                                    )
+                                    .child(Input::new(&self.deeplx_input)),
+                            )
+                        },
+                    ),
+            )
+            .child(
+                v_flex()
+                    .w_full()
                     .gap(px(4.))
                     .child(
                         div()
@@ -1138,6 +1256,10 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         }
         let view = cx.new(|cx| Peek::new(window, cx, _preview_tx, preview_rx));
         view.update(cx, |peek, cx| {
+            // In-memory only: a preview must never overwrite the real choice.
+            if std::env::var("PEEK_BACKEND").as_deref() == Ok("deeplx") {
+                peek.config.translation_backend = TranslationBackend::DeepLx;
+            }
             match page.as_str() {
                 // Not persisted: a preview must not overwrite the real choice.
                 "settings" => peek.settings = true,
