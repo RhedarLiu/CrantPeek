@@ -1088,15 +1088,31 @@ fn main() -> anyhow::Result<()> {
     // Environment diagnostic: creates and shows no window. Run through a
     // packaged .app binary to see the permissions macOS grants that bundle.
     if std::env::var("PEEK_MONITOR_REPORT").is_ok() {
+        // Written to a file as well when PEEK_SELECTION_LOG is set, because
+        // `open` refuses to redirect stdio into an already-running app and that
+        // redirection also muddies which process TCC holds responsible.
+        let report = |line: String| {
+            println!("{line}");
+            if let Ok(path) = std::env::var("PEEK_SELECTION_LOG") {
+                use std::io::Write as _;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(file, "{line}");
+                }
+            }
+        };
         for (name, granted) in peek_runtime::permissions::status() {
-            println!("permission {name}: {granted}");
+            report(format!("permission {name}: {granted}"));
         }
-        println!(
+        report(format!(
             "cursor monitor bounds: {:?}",
             peek_runtime::capture::monitor_bounds()
-        );
+        ));
         for line in peek_runtime::capture::monitor_report() {
-            println!("{line}");
+            report(line);
         }
         return Ok(());
     }

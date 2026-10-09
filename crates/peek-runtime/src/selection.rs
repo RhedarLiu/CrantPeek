@@ -21,7 +21,7 @@ pub fn read() -> Option<String> {
     unsafe {
         let system = AXUIElementCreateSystemWide();
         if system.is_null() {
-            eprintln!("[selection] AXUIElementCreateSystemWide returned null");
+            note("[selection] AXUIElementCreateSystemWide returned null");
             return None;
         }
         // 200 ms was too tight: browser/Electron accessibility bridges often take
@@ -39,7 +39,9 @@ pub fn read() -> Option<String> {
         if status != 0 || element.is_null() {
             // -25204 kAXErrorCannotComplete, -25211 kAXErrorAPIDisabled,
             // -25205 kAXErrorAttributeUnsupported …
-            eprintln!("[selection] AXFocusedUIElement failed: status={status}");
+            note(&format!(
+                "[selection] AXFocusedUIElement failed: status={status}"
+            ));
             return None;
         }
         AXUIElementSetMessagingTimeout(element, 0.5);
@@ -54,21 +56,23 @@ pub fn read() -> Option<String> {
         if status != 0 || value.is_null() {
             // The focused element has no selected text: nothing is selected, or
             // the app does not expose AXSelectedText at all.
-            eprintln!("[selection] AXSelectedText failed: status={status}");
+            note(&format!(
+                "[selection] AXSelectedText failed: status={status}"
+            ));
             return None;
         }
         if core_foundation::base::CFGetTypeID(value) != CFString::type_id() {
             CFRelease(value);
-            eprintln!("[selection] AXSelectedText is not a string");
+            note("[selection] AXSelectedText is not a string");
             return None;
         }
         let text = CFString::wrap_under_create_rule(value.cast()).to_string();
         let result = peek_core::entry_text(peek_core::Entry::Selection, Some(&text));
         if result.is_none() {
-            eprintln!(
+            note(&format!(
                 "[selection] selection was empty or whitespace ({} raw chars)",
                 text.chars().count()
-            );
+            ));
         }
         result
     }
@@ -76,6 +80,25 @@ pub fn read() -> Option<String> {
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn read() -> Option<String> {
     None
+}
+
+/// Hook diagnostics.
+///
+/// `eprintln!` alone is not enough when a bundle is launched with `open`: it
+/// has no terminal, and its stderr pipe can hold output back. Setting
+/// `PEEK_SELECTION_LOG` to a path also appends every note to that file.
+pub(crate) fn note(message: &str) {
+    eprintln!("{message}");
+    if let Ok(path) = std::env::var("PEEK_SELECTION_LOG") {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{message}");
+        }
+    }
 }
 
 /// Called after an action is queued so the host UI can wake itself. Pass a
@@ -91,6 +114,10 @@ pub struct DoubleCtrl {
     last_release: Option<std::time::Instant>,
 }
 impl DoubleCtrl {
+    /// Whether Ctrl is currently held, for the trace log.
+    pub fn is_down(&self) -> bool {
+        self.down
+    }
     pub fn interrupt(&mut self) {
         self.interrupted = true;
         self.last_release = None;
@@ -135,6 +162,9 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
             CGEventType,
         };
         let state = std::cell::RefCell::new(DoubleCtrl::default());
+        // PEEK_HOOK_DEBUG logs every Ctrl transition, which tells "the tap
+        // delivers nothing" apart from "the double-tap rule did not match".
+        let trace = std::env::var("PEEK_HOOK_DEBUG").is_ok();
         let tap = CGEventTap::new(
             CGEventTapLocation::Session,
             CGEventTapPlacement::HeadInsertEventTap,
@@ -143,6 +173,9 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
             move |_, kind, event| {
                 let mut state = state.borrow_mut();
                 if matches!(kind, CGEventType::KeyDown) {
+                    if trace {
+                        note("[selection] other key down (sequence reset)");
+                    }
                     state.interrupt();
                     return None;
                 }
@@ -155,8 +188,12 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
                     state.interrupt();
                     return None;
                 }
+                let ctrl_down = flags.contains(CGEventFlags::CGEventFlagControl);
+                if trace && ctrl_down != state.is_down() {
+                    note(&format!("[selection] ctrl down={ctrl_down}"));
+                }
                 if state.transition(
-                    flags.contains(CGEventFlags::CGEventFlagControl),
+                    ctrl_down,
                     std::time::Instant::now(),
                     std::time::Duration::from_millis(interval),
                 ) {
@@ -165,17 +202,19 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
                     let wake = wake.clone();
                     std::thread::spawn(move || match read() {
                         Some(text) => {
-                            eprintln!("[selection] double tap read {} chars", text.chars().count());
+                            note(&format!(
+                                "[selection] double tap read {} chars",
+                                text.chars().count()
+                            ));
                             let _ = tx.send(crate::action::Action::Selection(text));
                             wake();
                         }
                         // The tap fires as soon as Input Monitoring is granted,
                         // but reading the selection additionally needs
                         // Accessibility, and it fails silently without it.
-                        None => eprintln!(
-                            "[selection] double tap detected, but no selection is readable \
-                             — grant Accessibility to this app (or nothing is selected)"
-                        ),
+                        None => {
+                            note("[selection] double tap detected, but no selection is readable")
+                        }
                     });
                 }
                 None
@@ -191,10 +230,13 @@ pub fn listen(interval: u64, tx: std::sync::mpsc::Sender<crate::action::Action>,
             tap.enable();
             // Visible confirmation that the hook is live: installing the tap is
             // what Input Monitoring gates, and it fails quietly otherwise.
-            eprintln!("[selection] double-tap Ctrl hook installed");
+            // Creating the tap succeeds even without Input Monitoring; such a
+            // tap simply never receives an event, so this line alone does not
+            // mean the hook works. Only a logged Ctrl transition does.
+            note("[selection] double-tap Ctrl event tap created");
             CFRunLoop::run_current();
         } else {
-            eprintln!("[selection] hook NOT installed — grant Input Monitoring to this app");
+            note("[selection] hook NOT installed - grant Input Monitoring to this app");
         }
     });
 }
