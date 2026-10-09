@@ -20,9 +20,11 @@ mod snip;
 
 use std::time::Duration;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
@@ -35,7 +37,7 @@ use tray_icon::Icon as TrayIconImage;
 use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
-use peek_core::{Config, Message, Task, TranslationBackend, effective_target, local_route};
+use peek_core::{Channel, ChannelKind, Config, Message, Task, effective_target, local_route};
 use peek_network::{Client, Event};
 use peek_runtime::action::{Action, OverlayEvent};
 use peek_runtime::{i18n, store};
@@ -130,8 +132,12 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
-    /// DeepLX endpoint, editable in settings and persisted as it changes.
-    deeplx_input: Entity<InputState>,
+    /// Draft fields for adding a channel.
+    channel_name: Entity<InputState>,
+    channel_endpoint: Entity<InputState>,
+    channel_model: Entity<InputState>,
+    channel_key: Entity<InputState>,
+    channel_kind: Entity<SelectState<Vec<SharedString>>>,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
@@ -168,26 +174,21 @@ impl Peek {
         let follow_up = cx.new(|cx| {
             InputState::new(window, cx).placeholder(i18n::tr("query-followup-placeholder"))
         });
-        let deeplx_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder(i18n::tr("settings-deeplx-hint")));
+        // Draft fields for adding a channel. One set is enough: the fields a
+        // kind needs are shown or hidden as the type changes.
+        let channel_name = cx.new(|cx| InputState::new(window, cx));
+        let channel_endpoint = cx.new(|cx| InputState::new(window, cx));
+        let channel_model = cx.new(|cx| InputState::new(window, cx));
+        let channel_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let kinds: Vec<SharedString> = ChannelKind::ALL
+            .iter()
+            .map(|kind| i18n::tr(kind.label_key()).into())
+            .collect();
+        let channel_kind =
+            cx.new(|cx| SelectState::new(kinds, Some(IndexPath::new(0)), window, cx));
 
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
-        deeplx_input.update(cx, |state, cx| {
-            state.set_value(&config.deeplx_endpoint, window, cx);
-        });
-        // Persisted as it is typed, like the rest of the settings.
-        cx.observe(&deeplx_input, |this, state, cx| {
-            let value = state.read(cx).value().to_string();
-            if this.config.deeplx_endpoint != value {
-                this.config.deeplx_endpoint = value;
-                if let Err(err) = store::save(&this.config) {
-                    eprintln!("config save failed: {err}");
-                }
-                cx.notify();
-            }
-        })
-        .detach();
 
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
         let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx));
@@ -202,7 +203,11 @@ impl Peek {
             _activation: activation,
             input,
             follow_up,
-            deeplx_input,
+            channel_name,
+            channel_endpoint,
+            channel_model,
+            channel_key,
+            channel_kind,
             tasks,
             answer: String::new(),
             expanded: None,
@@ -488,7 +493,7 @@ impl Peek {
     /// It reuses the same event channel as an AI turn, so the panel and the
     /// screenshot overlay need no separate path; the endpoint answers in one
     /// piece rather than as a stream.
-    fn begin_deeplx(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+    fn begin_deeplx(&mut self, endpoint: String, text: String, cx: &mut Context<Self>) -> bool {
         let route = local_route(
             &text,
             &self.config.target_language,
@@ -502,7 +507,6 @@ impl Peek {
         self.receiver = Some(rx);
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
-        let endpoint = self.config.deeplx_endpoint.clone();
         let client = self.client.clone();
         let ui_language = self.config.ui_language.clone();
         self.runtime.spawn(async move {
@@ -524,13 +528,140 @@ impl Peek {
         true
     }
 
-    /// Switches translation backend and remembers the choice.
-    fn choose_backend(&mut self, backend: TranslationBackend, cx: &mut Context<Self>) {
-        self.config.translation_backend = backend;
+    /// A small muted section label, used across the settings page.
+    fn section_label(
+        &self,
+        text: String,
+        set: &'static crate::fonts::FontSet,
+        muted: Hsla,
+    ) -> AnyElement {
+        div()
+            .font_family(set.latin)
+            .text_size(px(11.))
+            .text_color(muted)
+            .child(text)
+            .into_any_element()
+    }
+
+    /// The kind currently picked in the add form.
+    fn draft_kind(&self, cx: &App) -> ChannelKind {
+        self.channel_kind
+            .read(cx)
+            .selected_index(cx)
+            .and_then(|index| ChannelKind::ALL.get(index.row))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Adds the channel described by the draft fields.
+    ///
+    /// A kind declares what it needs: an AI kind takes an endpoint, a model and
+    /// a credential, while DeepLX takes an endpoint only. The secret goes to the
+    /// keychain and config keeps a reference.
+    fn add_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.draft_kind(cx);
+        let name = self.channel_name.read(cx).value().trim().to_owned();
+        let endpoint = self.channel_endpoint.read(cx).value().trim().to_owned();
+        let model = self.channel_model.read(cx).value().trim().to_owned();
+        let key = self.channel_key.read(cx).value().to_owned();
+        if name.is_empty() || endpoint.is_empty() {
+            self.status = i18n::tr("status-channel-incomplete");
+            cx.notify();
+            return;
+        }
+        if kind.needs_model() && model.is_empty() {
+            self.status = i18n::tr("error-config-channel-model");
+            cx.notify();
+            return;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+        let id = format!("ch-{stamp}");
+        let credential_id = if kind.needs_credential() {
+            let reference = format!("channel.{id}");
+            if !key.trim().is_empty()
+                && let Err(err) = store::save_secret(&reference, &key)
+            {
+                self.status = err;
+                cx.notify();
+                return;
+            }
+            reference
+        } else {
+            String::new()
+        };
+        self.config.channels.push(Channel {
+            id: id.clone(),
+            name,
+            kind,
+            endpoint,
+            model,
+            credential_id,
+            vision: false,
+            max_output_tokens: 2048,
+        });
+        // The first channel of each kind becomes the default for its places.
+        if self.config.basic_channel.is_empty() {
+            self.config.basic_channel = id.clone();
+        }
+        if self.config.ai_channel.is_empty() && kind.is_ai() {
+            self.config.ai_channel = id;
+        }
+        self.persist_config();
+        for input in [
+            &self.channel_name,
+            &self.channel_endpoint,
+            &self.channel_model,
+        ] {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+        self.channel_key
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// Removes a channel and clears any selection that pointed at it.
+    fn remove_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.config.channels.retain(|channel| channel.id != id);
+        if self.config.basic_channel == id {
+            self.config.basic_channel = self
+                .config
+                .channels
+                .first()
+                .map(|channel| channel.id.clone())
+                .unwrap_or_default();
+        }
+        if self.config.ai_channel == id {
+            // Resolved before the assignment: the iterator borrows the config.
+            let fallback = self
+                .config
+                .ai_candidates()
+                .next()
+                .map(|channel| channel.id.clone())
+                .unwrap_or_default();
+            self.config.ai_channel = fallback;
+        }
+        self.persist_config();
+        cx.notify();
+    }
+
+    /// Points a place in the app at a channel.
+    fn assign_channel(&mut self, ai: bool, id: String, cx: &mut Context<Self>) {
+        if ai {
+            self.config.ai_channel = id;
+        } else {
+            self.config.basic_channel = id;
+        }
+        self.persist_config();
+        cx.notify();
+    }
+
+    fn persist_config(&mut self) {
         if let Err(err) = store::save(&self.config) {
             eprintln!("config save failed: {err}");
         }
-        cx.notify();
     }
 
     /// Sends the follow-up box, continuing the current conversation.
@@ -568,25 +699,6 @@ impl Peek {
             }
         }
 
-        // DeepLX needs no credential, only a reachable endpoint.
-        if self.config.translation_backend == TranslationBackend::DeepLx {
-            return self.begin_deeplx(text, cx);
-        }
-
-        let key = match store::secret(&self.config.provider.credential_id) {
-            Ok(key) => key,
-            Err(err) => {
-                self.status = err;
-                cx.notify();
-                return false;
-            }
-        };
-        if self.config.provider.model.trim().is_empty() {
-            self.status = i18n::tr("status-model-missing");
-            cx.notify();
-            return false;
-        }
-
         // A follow-up is routed from the original query, not from its own
         // sentence, so the target language does not drift mid-conversation.
         let routed_text = if followup {
@@ -605,6 +717,39 @@ impl Peek {
             self.selected_task(cx)
         };
         let target = effective_target(&route.target, "").to_owned();
+
+        // Plain translation may go through a basic channel such as DeepLX;
+        // everything else needs an AI channel. A channel's kind decides where
+        // it can be offered, so this never picks DeepLX for code explanation.
+        let chosen = match task {
+            Task::Translate => self.config.basic().or_else(|| self.config.ai()).cloned(),
+            _ => self.config.ai().cloned(),
+        };
+        let Some(channel) = chosen else {
+            self.status = i18n::tr("status-channel-missing");
+            cx.notify();
+            return false;
+        };
+        if channel.kind == ChannelKind::DeepLx {
+            return self.begin_deeplx(channel.endpoint.clone(), text, cx);
+        }
+        let Some(provider) = channel.provider() else {
+            self.status = i18n::tr("status-channel-missing");
+            cx.notify();
+            return false;
+        };
+        let key = if channel.kind.needs_credential() {
+            match store::secret(&channel.credential_id) {
+                Ok(key) => key,
+                Err(err) => {
+                    self.status = err;
+                    cx.notify();
+                    return false;
+                }
+            }
+        } else {
+            String::new()
+        };
         if !followup {
             self.original_query = text.clone();
             self.messages = vec![Message {
@@ -628,7 +773,6 @@ impl Peek {
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
 
-        let provider = self.config.provider.clone();
         let messages = self.messages.clone();
         let client = self.client.clone();
         let ui_language = self.config.ui_language.clone();
@@ -815,6 +959,13 @@ impl Render for Peek {
 
 impl Peek {
     fn query_page(&self, cx: &Context<Self>) -> AnyElement {
+        let basic_choices: Vec<(String, String)> = self
+            .config
+            .basic_candidates()
+            .map(|channel| (channel.id.clone(), channel.name.clone()))
+            .collect();
+        let basic_active = self.config.basic_channel.clone();
+        let basic_entity = cx.entity();
         let theme = cx.theme();
         let set = self.set;
         let fg = theme.foreground;
@@ -847,6 +998,40 @@ impl Peek {
                             .text_size(px(15.))
                             .font_semibold()
                             .child("Crant Peek"),
+                    )
+                    .child(
+                        // Which channel answers a plain translation. Only
+                        // channels that can translate are listed, and the same
+                        // choice can be made in settings.
+                        DropdownButton::new("basic-channel")
+                            .button(
+                                Button::new("basic-channel-button")
+                                    .icon(IconName::Languages)
+                                    .tooltip(i18n::tr("channels-basic-pick")),
+                            )
+                            .dropdown_menu(move |mut menu, _window, _cx| {
+                                if basic_choices.is_empty() {
+                                    return menu.item(
+                                        PopupMenuItem::new(i18n::tr("channels-none"))
+                                            .disabled(true),
+                                    );
+                                }
+                                for (id, name) in &basic_choices {
+                                    let target = basic_entity.clone();
+                                    let chosen = id.clone();
+                                    let selected = *id == basic_active;
+                                    menu = menu.item(
+                                        PopupMenuItem::new(name.clone())
+                                            .checked(selected)
+                                            .on_click(move |_event, _window, cx| {
+                                                target.update(cx, |peek, cx| {
+                                                    peek.assign_channel(false, chosen.clone(), cx);
+                                                });
+                                            }),
+                                    );
+                                }
+                                menu
+                            }),
                     )
                     .child(self.icon_button(
                         "pin-window",
@@ -1034,6 +1219,29 @@ impl Peek {
     /// migration is required to expose as a choice, and it is verifiable from
     /// an offscreen render.
     fn settings_page(&self, cx: &Context<Self>) -> AnyElement {
+        // Collected up front so the button closures do not borrow the config
+        // while the layout is being built.
+        let channels: Vec<(String, String, &'static str, bool)> = self
+            .config
+            .channels
+            .iter()
+            .map(|channel| {
+                (
+                    channel.id.clone(),
+                    channel.name.clone(),
+                    channel.kind.label_key(),
+                    channel.kind.is_ai(),
+                )
+            })
+            .collect();
+        let ai_channels: Vec<(String, String)> = channels
+            .iter()
+            .filter(|(_, _, _, is_ai)| *is_ai)
+            .map(|(id, name, _, _)| (id.clone(), name.clone()))
+            .collect();
+        let basic_active = self.config.basic_channel.clone();
+        let ai_active = self.config.ai_channel.clone();
+        let draft_kind = self.draft_kind(cx);
         let theme = cx.theme();
         let set = self.set;
         let fg = theme.foreground;
@@ -1101,44 +1309,106 @@ impl Peek {
                 v_flex()
                     .w_full()
                     .gap(px(6.))
+                    .child(self.section_label(i18n::tr("channels-title"), set, muted))
+                    .when(self.config.channels.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .font_family(set.latin)
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(i18n::tr("channels-empty")),
+                        )
+                    })
+                    // Each configured channel, with a way to remove it. A kind
+                    // decides what a channel needs, so the label carries it.
+                    .children(channels.iter().map(|(id, name, kind_key, _)| {
+                        let remove_id = id.clone();
+                        let label = format!("{name} · {}", i18n::tr(kind_key));
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .font_family(set.latin)
+                                    .text_size(px(12.))
+                                    .child(label),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("remove-{id}")))
+                                    .icon(IconName::X)
+                                    .tooltip(i18n::tr("channels-remove"))
+                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                        this.remove_channel(&remove_id, cx);
+                                    })),
+                            )
+                            .into_any_element()
+                    }))
+                    // Add form. The fields a kind needs appear as it is picked.
+                    .child(self.section_label(i18n::tr("channels-kind"), set, muted))
                     .child(
-                        div()
-                            .font_family(set.latin)
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .child(i18n::tr("settings-translation-backend")),
+                        Select::new(&self.channel_kind)
+                            .id("channel-kind")
+                            .rounded(px(10.)),
                     )
-                    .children(TranslationBackend::ALL.iter().map(|candidate| {
-                        let choice = *candidate;
-                        Button::new(choice.label_key())
-                            .when(choice == self.config.translation_backend, |button| {
-                                button.primary()
-                            })
-                            .label(i18n::tr(choice.label_key()))
+                    .child(self.section_label(i18n::tr("channels-name"), set, muted))
+                    .child(Input::new(&self.channel_name))
+                    .child(self.section_label(i18n::tr("channels-endpoint"), set, muted))
+                    .child(Input::new(&self.channel_endpoint))
+                    .when(draft_kind.needs_credential(), |this| {
+                        this.child(self.section_label(i18n::tr("channels-key"), set, muted))
+                            .child(Input::new(&self.channel_key))
+                    })
+                    .when(draft_kind.needs_model(), |this| {
+                        this.child(self.section_label(i18n::tr("channels-model"), set, muted))
+                            .child(Input::new(&self.channel_model))
+                    })
+                    .child(
+                        Button::new("add-channel")
+                            .icon(IconName::Plus)
+                            .label(i18n::tr("channels-add"))
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.add_channel(window, cx);
+                            })),
+                    ),
+            )
+            // Which channel serves which place. Only kinds that can do the job
+            // are offered: a translation-only channel never appears for AI work.
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(6.))
+                    .child(self.section_label(i18n::tr("channels-usage"), set, muted))
+                    .child(self.section_label(i18n::tr("channels-basic"), set, muted))
+                    .when(channels.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .font_family(set.latin)
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(i18n::tr("channels-none")),
+                        )
+                    })
+                    .children(channels.iter().map(|(id, name, _, _)| {
+                        let choice = id.clone();
+                        Button::new(SharedString::from(format!("basic-{id}")))
+                            .when(*id == basic_active, |button| button.primary())
+                            .label(name.clone())
                             .on_click(cx.listener(move |this, _event, _window, cx| {
-                                this.choose_backend(choice, cx);
+                                this.assign_channel(false, choice.clone(), cx);
                             }))
                     }))
-                    // The endpoint only matters for DeepLX, and it needs no
-                    // credential, which is the point of offering it.
-                    .when(
-                        self.config.translation_backend == TranslationBackend::DeepLx,
-                        |this| {
-                            this.child(
-                                v_flex()
-                                    .w_full()
-                                    .gap(px(4.))
-                                    .child(
-                                        div()
-                                            .font_family(set.latin)
-                                            .text_size(px(11.))
-                                            .text_color(muted)
-                                            .child(i18n::tr("settings-deeplx-endpoint")),
-                                    )
-                                    .child(Input::new(&self.deeplx_input)),
-                            )
-                        },
-                    ),
+                    .child(self.section_label(i18n::tr("channels-ai"), set, muted))
+                    .children(ai_channels.iter().map(|(id, name)| {
+                        let choice = id.clone();
+                        Button::new(SharedString::from(format!("ai-{id}")))
+                            .when(*id == ai_active, |button| button.primary())
+                            .label(name.clone())
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.assign_channel(true, choice.clone(), cx);
+                            }))
+                    })),
             )
             .child(
                 v_flex()
@@ -1264,9 +1534,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         let view = cx.new(|cx| Peek::new(window, cx, _preview_tx, preview_rx));
         view.update(cx, |peek, cx| {
             // In-memory only: a preview must never overwrite the real choice.
-            if std::env::var("PEEK_BACKEND").as_deref() == Ok("deeplx") {
-                peek.config.translation_backend = TranslationBackend::DeepLx;
-            }
+
             match page.as_str() {
                 // Not persisted: a preview must not overwrite the real choice.
                 "settings" => peek.settings = true,

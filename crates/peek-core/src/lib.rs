@@ -155,27 +155,112 @@ pub enum Protocol {
     Anthropic,
 }
 
-/// How a plain translation is produced.
+/// What kind of service a channel talks to.
 ///
-/// `Ai` routes through the configured provider like any other task. `DeepLx` is
-/// a DeepLX-compatible endpoint: a self-hosted proxy that speaks DeepL's free
-/// web API, needs no API key, and is only reachable at a URL the user runs.
+/// The kind decides both which fields a channel needs and where the app may
+/// offer it: an AI kind answers any task, while a translation-only kind such as
+/// DeepLX is offered for plain translation only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum TranslationBackend {
+#[serde(rename_all = "snake_case")]
+pub enum ChannelKind {
     #[default]
-    Ai,
+    ChatCompletions,
+    Responses,
+    Anthropic,
+    /// A DeepLX-compatible endpoint: a self-hosted proxy in front of DeepL's
+    /// free web API, so it needs no credential, only a reachable URL.
     DeepLx,
 }
 
-impl TranslationBackend {
-    pub const ALL: [Self; 2] = [Self::Ai, Self::DeepLx];
+impl ChannelKind {
+    pub const ALL: [Self; 4] = [
+        Self::ChatCompletions,
+        Self::Responses,
+        Self::Anthropic,
+        Self::DeepLx,
+    ];
 
-    /// Localisation key for the choice.
     pub fn label_key(self) -> &'static str {
         match self {
-            Self::Ai => "settings-backend-ai",
-            Self::DeepLx => "settings-backend-deeplx",
+            Self::ChatCompletions => "channel-kind-chat",
+            Self::Responses => "channel-kind-responses",
+            Self::Anthropic => "channel-kind-anthropic",
+            Self::DeepLx => "channel-kind-deeplx",
         }
+    }
+
+    /// AI kinds answer any task, including follow-ups and code explanations.
+    pub fn is_ai(self) -> bool {
+        !matches!(self, Self::DeepLx)
+    }
+
+    /// Only AI kinds need a keychain entry.
+    pub fn needs_credential(self) -> bool {
+        self.is_ai()
+    }
+
+    /// Only AI kinds need a model id.
+    pub fn needs_model(self) -> bool {
+        self.is_ai()
+    }
+
+    /// The wire protocol, for AI kinds.
+    pub fn protocol(self) -> Option<Protocol> {
+        match self {
+            Self::ChatCompletions => Some(Protocol::ChatCompletions),
+            Self::Responses => Some(Protocol::Responses),
+            Self::Anthropic => Some(Protocol::Anthropic),
+            Self::DeepLx => None,
+        }
+    }
+}
+
+/// One configured service. Several may exist side by side, and each place in
+/// the app picks the channel it uses by id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Channel {
+    /// Stable identifier referenced by the assignment fields.
+    pub id: String,
+    /// User-visible name.
+    pub name: String,
+    pub kind: ChannelKind,
+    /// Base URL for AI kinds, request URL for a translation-only kind.
+    pub endpoint: String,
+    pub model: String,
+    /// Reference only. The secret itself must not be serialized into config.
+    pub credential_id: String,
+    pub vision: bool,
+    pub max_output_tokens: u32,
+}
+
+impl Default for Channel {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            kind: ChannelKind::default(),
+            endpoint: "https://api.openai.com/v1".into(),
+            model: String::new(),
+            credential_id: String::new(),
+            vision: false,
+            max_output_tokens: 2048,
+        }
+    }
+}
+
+impl Channel {
+    /// The provider shape the network layer speaks, for AI kinds.
+    pub fn provider(&self) -> Option<Provider> {
+        Some(Provider {
+            name: self.name.clone(),
+            protocol: self.kind.protocol()?,
+            base_url: self.endpoint.clone(),
+            model: self.model.clone(),
+            credential_id: self.credential_id.clone(),
+            vision: self.vision,
+            max_output_tokens: self.max_output_tokens,
+        })
     }
 }
 
@@ -239,7 +324,12 @@ pub struct Config {
     pub onboarding_complete: bool,
     pub decision: DecisionConfig,
     pub schema_version: u32,
-    pub provider: Provider,
+    /// Configured services. Each place in the app picks one by id.
+    pub channels: Vec<Channel>,
+    /// Channel used for plain translation; empty means none chosen.
+    pub basic_channel: String,
+    /// Channel used for AI tasks, follow-ups and routing decisions.
+    pub ai_channel: String,
     pub target_language: String,
     pub chinese_target: String,
     pub blank_hotkey: String,
@@ -248,10 +338,6 @@ pub struct Config {
     pub hide_on_blur: bool,
     pub smart_mode: bool,
     pub ocr_auto_query: bool,
-    /// Which backend answers a plain translation.
-    pub translation_backend: TranslationBackend,
-    /// DeepLX endpoint, used when `translation_backend` is `DeepLx`.
-    pub deeplx_endpoint: String,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -268,9 +354,9 @@ impl Default for Config {
             onboarding_complete: false,
             decision: DecisionConfig::default(),
             schema_version: 1,
-            provider: Provider::default(),
-            translation_backend: TranslationBackend::default(),
-            deeplx_endpoint: "http://127.0.0.1:1188/translate".into(),
+            channels: Vec::new(),
+            basic_channel: String::new(),
+            ai_channel: String::new(),
             target_language: "Chinese".into(),
             chinese_target: "English".into(),
             blank_hotkey: format!("{modifier}+Shift+A"),
@@ -283,6 +369,37 @@ impl Default for Config {
     }
 }
 impl Config {
+    /// The channel with this id, if it is configured.
+    pub fn channel(&self, id: &str) -> Option<&Channel> {
+        if id.is_empty() {
+            return None;
+        }
+        self.channels.iter().find(|channel| channel.id == id)
+    }
+
+    /// The channel chosen for plain translation, when it is usable.
+    pub fn basic(&self) -> Option<&Channel> {
+        self.channel(&self.basic_channel)
+    }
+
+    /// The channel chosen for AI work, when it is usable. A translation-only
+    /// channel is rejected here even if it was somehow selected, because the AI
+    /// path needs a chat protocol.
+    pub fn ai(&self) -> Option<&Channel> {
+        self.channel(&self.ai_channel)
+            .filter(|channel| channel.kind.is_ai())
+    }
+
+    /// Channels that may be offered for plain translation.
+    pub fn basic_candidates(&self) -> impl Iterator<Item = &Channel> {
+        self.channels.iter()
+    }
+
+    /// Channels that may be offered for AI tasks.
+    pub fn ai_candidates(&self) -> impl Iterator<Item = &Channel> {
+        self.channels.iter().filter(|channel| channel.kind.is_ai())
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if !matches!(
             self.translation_style.as_str(),
@@ -308,10 +425,23 @@ impl Config {
         if self.target_language.trim().is_empty() || self.chinese_target.trim().is_empty() {
             return Err("error-config-language");
         }
-        if !(128..=16384).contains(&self.provider.max_output_tokens) {
-            return Err("error-config-tokens");
+        for channel in &self.channels {
+            validate_endpoint(&channel.endpoint, true)?;
+            if channel.kind.needs_model() && channel.model.trim().is_empty() {
+                return Err("error-config-channel-model");
+            }
+            if !(128..=16384).contains(&channel.max_output_tokens) {
+                return Err("error-config-tokens");
+            }
         }
-        validate_endpoint(&self.provider.base_url, true)?;
+        // A selection must point at a channel that still exists and can serve
+        // that place; otherwise the app would silently fall back.
+        if !self.basic_channel.is_empty() && self.basic().is_none() {
+            return Err("error-config-channel-missing");
+        }
+        if !self.ai_channel.is_empty() && self.ai().is_none() {
+            return Err("error-config-channel-missing");
+        }
         if self.decision.enabled {
             validate_endpoint(&self.decision.endpoint, true)?;
             if self.decision.model.trim().is_empty() {
@@ -524,7 +654,11 @@ mod tests {
         };
         assert!(c.validate().is_err());
         c.double_ctrl_ms = 350;
-        c.provider.base_url = "http://example.com".into();
+        c.channels.push(Channel {
+            id: "a".into(),
+            endpoint: "http://example.com".into(),
+            ..Channel::default()
+        });
         assert!(c.validate().is_err());
     }
 }
