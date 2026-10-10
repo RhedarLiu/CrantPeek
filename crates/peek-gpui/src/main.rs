@@ -55,14 +55,13 @@ use tokio_util::sync::CancellationToken;
 /// Panel geometry: compact until there is something to show, which keeps the
 /// default state a bare input box instead of a mostly empty card stack.
 const PANEL_WIDTH: f32 = 480.;
-/// Panel height with the input box at its two-row minimum: the zone above it,
-/// the input card, which carries its own controls, and the padding.
-const PANEL_COMPACT_BASE: f32 = 106.;
-/// Height of the zone above the input box.
-///
-/// It is always part of the window - it is the hover target even where there is
-/// nothing to see - and the title row fills it when revealed. The window never
-/// changes size for this, so the input box never moves.
+/// Panel height with the input box at its two-row minimum and the title row
+/// hidden: the padding and the input card, which carries its own controls.
+const PANEL_COMPACT_BASE: f32 = 72.;
+/// The hover target above the input box while the row is hidden.
+const PANEL_CHROME_STRIP: f32 = 12.;
+/// What the revealed title row adds: the extra top padding, the row and the gap
+/// that follows it.
 const PANEL_CHROME_HEIGHT: f32 = 34.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
@@ -105,6 +104,12 @@ thread_local! {
 }
 
 thread_local! {
+    /// Screen y of the panel's top edge while the title row is hidden.
+    ///
+    /// Revealing the row grows the window, and which way a platform grows one is
+    /// its own choice, so the position is measured and corrected rather than
+    /// assumed. Cleared on every show, since the panel is placed again then.
+    static ANCHOR_TOP: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
     /// Whether the strip may reveal the title row again.
     ///
     /// At the boundary between the input box and the row, hiding puts the
@@ -130,6 +135,7 @@ fn set_chrome_visible(visible: bool) {
 /// found it once must look the same as one opened for the first time.
 fn show_panel(window: &mut Window) {
     set_chrome_visible(false);
+    ANCHOR_TOP.with(|cell| cell.set(None));
     native_window::show(window);
     SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
 }
@@ -236,11 +242,6 @@ impl Peek {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
         native_window::hide_window_buttons(window);
-        // The hover zone above the input box must not read as an empty band.
-        // This is the switch that matters: the renderer clears the surface with
-        // this appearance, so clearing the NSWindow's own background was not
-        // enough - it was painted over every frame.
-        window.set_background_appearance(gpui_kit::WindowBackgroundAppearance::Transparent);
         let activation = cx.observe_window_activation(window, |this, window, _cx| {
             // A pinned window behaves like a normal window and stays put.
             if !this.pinned && !window.is_window_active() && !shown_recently() {
@@ -1352,6 +1353,9 @@ impl Peek {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Button {
         Button::new(id)
+            // Ghost: the title row is chrome over the panel, so bordered
+            // buttons there read as a toolbar bolted on.
+            .ghost()
             .icon(icon)
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _event, window, cx| on_click(this, window, cx)))
@@ -1452,11 +1456,41 @@ impl Render for Peek {
             // The textarea auto-grows between two and five rows, so the compact
             // panel follows it rather than guessing a single height.
             let rows = self.input.read(cx).value().lines().count().clamp(2, 5) as f32;
-            PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows
+            let chrome = if chrome_visible() {
+                PANEL_CHROME_HEIGHT
+            } else {
+                0.
+            };
+            PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows + chrome
         };
-        if self.applied_height != Some(height) {
+        // Where the panel's top edge sits while collapsed, so revealing the
+        // title row grows the window upwards and leaves the input box on the
+        // same line of the screen.
+        let top = window.bounds().origin.y.as_f32();
+        let anchor = ANCHOR_TOP.with(|cell| match cell.get() {
+            Some(anchor) => anchor,
+            None => {
+                let anchor = top
+                    + if chrome_visible() {
+                        PANEL_CHROME_HEIGHT
+                    } else {
+                        0.
+                    };
+                cell.set(Some(anchor));
+                anchor
+            }
+        });
+        let desired_top = anchor
+            - if chrome_visible() {
+                PANEL_CHROME_HEIGHT
+            } else {
+                0.
+            };
+        let drift = top - desired_top;
+        if self.applied_height != Some(height) || drift.abs() > 0.5 {
             self.applied_height = Some(height);
             window.resize(size(px(PANEL_WIDTH), px(height)));
+            native_window::move_up(window, drift);
         }
         if self.settings {
             return self.settings_page(cx).into_any_element();
@@ -1536,17 +1570,13 @@ impl Peek {
 
         v_flex()
             .size_full()
-            // No background: the window is see-through, so the hover zone above
-            // the input box is invisible and each card paints itself.
+            .bg(bg)
             .text_color(fg)
             // The sides hug the input box whether or not the title row is
             // showing; only the top needs room for it. The gap keeps the input,
             // the answer and the follow-up row from touching.
             .px(px(4.))
-            // The zone above the input box is part of the window whether or not
-            // the row is painted in it, which is what makes the trigger area
-            // larger than the panel appears to be.
-            .pt(px(PANEL_CHROME_HEIGHT))
+            .pt(px(if chrome_visible() { 5. } else { 4. }))
             .pb(px(6.))
             .gap(px(5.))
             // Esc hides the panel — "appear when needed, gone when done". A
@@ -1575,7 +1605,7 @@ impl Peek {
                         .top(px(0.))
                         .left(px(0.))
                         .right(px(0.))
-                        .h(px(PANEL_CHROME_HEIGHT))
+                        .h(px(PANEL_CHROME_STRIP))
                         .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
                             // An offscreen render parks the pointer at the
                             // origin, which is over this strip, so previews
@@ -1598,11 +1628,7 @@ impl Peek {
                 this.child(
                     h_flex()
                         .id("chrome-row")
-                        .absolute()
-                        .top(px(0.))
-                        .left(px(0.))
-                        .right(px(0.))
-                        .h(px(PANEL_CHROME_HEIGHT))
+                        .w_full()
                         .items_center()
                         .gap(px(10.))
                         // Inset so the title lines up with the text inside the
@@ -1622,7 +1648,6 @@ impl Peek {
                             // A tag rather than plain text, so the title and
                             // the buttons look like one row of controls.
                             Tag::secondary()
-                                .outline()
                                 .rounded(px(8.))
                                 .h(px(28.))
                                 .px(px(10.))
@@ -1644,6 +1669,7 @@ impl Peek {
                             DropdownButton::new("basic-channel")
                                 .button(
                                     Button::new("basic-channel-button")
+                                        .ghost()
                                         .icon(IconName::Cable)
                                         .tooltip(i18n::tr("channels-basic-pick")),
                                 )
@@ -1720,7 +1746,6 @@ impl Peek {
                     // fixed height here let it paint over the row below, and
                     // clipping keeps that from ever happening again.
                     .overflow_hidden()
-                    .bg(bg)
                     .border_1()
                     .border_color(border)
                     .rounded(px(16.))
@@ -1773,7 +1798,6 @@ impl Peek {
                         this.child(
                             div()
                                 .w_full()
-                                .bg(bg)
                                 .border_1()
                                 .border_color(border)
                                 .rounded(px(14.))
@@ -1789,7 +1813,6 @@ impl Peek {
                             .id("answer")
                             .w_full()
                             .flex_1()
-                            .bg(bg)
                             .border_1()
                             .border_color(border)
                             .rounded(px(16.))
