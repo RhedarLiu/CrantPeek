@@ -2024,7 +2024,14 @@ impl Render for Peek {
             // entire root at the new viewport size rather than reusing its cache.
             let handle = window.window_handle();
             cx.defer(move |cx| {
-                let _ = cx.update_window(handle, |_, window, _| window.refresh());
+                let _ = cx.update_window(handle, |_, window, cx| {
+                    if std::env::var("PEEK_RENDER").is_ok() {
+                        // The headless platform changes its bounds without a
+                        // resize callback; mirror the callback used by AppKit.
+                        window.bounds_changed(cx);
+                    }
+                    window.refresh();
+                });
             });
         }
         // Record the frame that is about to be shown, so the next pointer
