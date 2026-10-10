@@ -377,7 +377,11 @@ impl Peek {
             }
         });
 
-        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 5));
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(2, 5)
+                .submit_on_enter(true)
+        });
         // Same editor as the query box. A single-line `Input` never took the
         // IME session, so Chinese could not be selected, and Enter was not wired.
         let follow_up = cx.new(|cx| {
