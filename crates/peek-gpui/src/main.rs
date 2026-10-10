@@ -113,6 +113,16 @@ thread_local! {
     static ANCHOR_TOP: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// Whether the strip may reveal the title row again.
+    ///
+    /// At the boundary between the input box and the row, hiding puts the
+    /// pointer straight onto the strip, which would reveal the row again the
+    /// same instant: the two would flash at each other. The strip only counts
+    /// once the pointer has left it since the last hide.
+    static STRIP_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 /// Whether the title row is showing.
 fn chrome_visible() -> bool {
     CHROME_VISIBLE.with(std::cell::Cell::get)
@@ -1583,7 +1593,13 @@ impl Peek {
                             // origin, which is over this strip, so previews
                             // ignore it.
                             let preview = std::env::var("PEEK_RENDER").is_ok();
-                            if *hovered && !preview && !chrome_visible() {
+                            if !*hovered {
+                                // Left the strip: it is free to reveal again.
+                                STRIP_ARMED.with(|cell| cell.set(true));
+                            } else if !preview
+                                && !chrome_visible()
+                                && STRIP_ARMED.with(std::cell::Cell::get)
+                            {
                                 set_chrome_visible(true);
                                 cx.notify();
                             }
@@ -1606,6 +1622,7 @@ impl Peek {
                         .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
                             if !*hovered && chrome_visible() {
                                 set_chrome_visible(false);
+                                STRIP_ARMED.with(|cell| cell.set(false));
                                 cx.notify();
                             }
                         }))
