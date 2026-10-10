@@ -67,10 +67,17 @@ const PANEL_WIDTH: f32 = 480.;
 /// hidden: the padding and the input card, which carries its own controls.
 const PANEL_COMPACT_BASE: f32 = 72.;
 /// The hover target above the input box while the row is hidden.
-const PANEL_CHROME_STRIP: f32 = 12.;
+const PANEL_CHROME_STRIP: f32 = 16.;
+/// The revealed row's own height, which reaches past its visible content into
+/// the top of the input box.
+///
+/// That overlap is the point: revealing the row moves the window up, so the
+/// pointer that revealed it would otherwise end up just below the row, un-hover
+/// it, and start the two flashing at each other.
+const PANEL_CHROME_ROW: f32 = 50.;
 /// What the revealed title row adds: the extra top padding, the row and the gap
-/// that follows it.
-const PANEL_CHROME_HEIGHT: f32 = 34.;
+/// that follows it, less the padding the collapsed state already has.
+const PANEL_CHROME_HEIGHT: f32 = 40.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
@@ -1713,7 +1720,12 @@ impl Peek {
                     h_flex()
                         .id("chrome-row")
                         .w_full()
-                        .items_center()
+                        .h(px(PANEL_CHROME_ROW))
+                        // Content at the top, with the rest of the row left
+                        // empty so it still catches the pointer once the window
+                        // has moved up.
+                        .items_start()
+                        .pt(px(2.))
                         .gap(px(10.))
                         // Inset so the title lines up with the text inside the
                         // input box, whose own padding starts at the same place.
@@ -1826,6 +1838,9 @@ impl Peek {
                 div()
                     .relative()
                     .w_full()
+                    // Slid back under the row, so the overlap that steadies the
+                    // hover costs no visible space.
+                    .mt(px(if chrome_visible() { -16. } else { 0. }))
                     // The textarea grows with its content up to five rows; a
                     // fixed height here let it paint over the row below, and
                     // clipping keeps that from ever happening again.
