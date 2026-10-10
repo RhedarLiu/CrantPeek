@@ -20,6 +20,7 @@ mod snip;
 
 use std::time::Duration;
 
+use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
@@ -54,7 +55,11 @@ use tokio_util::sync::CancellationToken;
 const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum: header, input card,
 /// action row, padding and gaps.
-const PANEL_COMPACT_BASE: f32 = 138.;
+const PANEL_COMPACT_BASE: f32 = 136.;
+/// The hover target that reveals the title row while it is hidden.
+const PANEL_CHROME_STRIP: f32 = 12.;
+/// What the revealed title row adds to the panel.
+const PANEL_CHROME_HEIGHT: f32 = 28.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
@@ -156,6 +161,9 @@ struct Peek {
     /// Sends test results from the network task to the poll loop: the channel
     /// id, whether it failed, and the message to show.
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
+    /// Whether the title row is showing. It occupies no space while hidden: the
+    /// window is short, with only a thin strip to hover.
+    chrome_visible: bool,
     /// Editable global hotkeys, persisted as they are typed.
     blank_hotkey: Entity<InputState>,
     screenshot_hotkey: Entity<InputState>,
@@ -267,6 +275,7 @@ impl Peek {
             pending_toast: None,
             testing_channel: None,
             test_tx,
+            chrome_visible: false,
             blank_hotkey,
             screenshot_hotkey,
             editing_channel: None,
@@ -1385,7 +1394,12 @@ impl Render for Peek {
             // The textarea auto-grows between two and five rows, so the compact
             // panel follows it rather than guessing a single height.
             let rows = self.input.read(cx).value().lines().count().clamp(2, 5) as f32;
-            PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows
+            let chrome = if self.chrome_visible {
+                PANEL_CHROME_HEIGHT
+            } else {
+                PANEL_CHROME_STRIP
+            };
+            PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows + chrome
         };
         if self.applied_height != Some(height) {
             self.applied_height = Some(height);
@@ -1471,107 +1485,129 @@ impl Peek {
             .size_full()
             .bg(bg)
             .text_color(fg)
-            // Top padding is the strip the hidden title row overlays, so the
-            // window has no blank band above the input.
             .px(px(20.))
-            .pt(px(34.))
+            .pt(px(20.))
             .pb(px(20.))
             .gap(px(10.))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, _cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if !this.pinned && event.keystroke.key == "escape" {
                     native_window::hide(window);
+                    return;
+                }
+                // A keystroke means the user is working in the box, so the
+                // title row goes away again.
+                if this.chrome_visible {
+                    this.chrome_visible = false;
+                    cx.notify();
                 }
             }))
-            // Absolute, so the row costs no space: the pointer can still reach
-            // it, and it paints only while the pointer is over it.
-            .child(
-                h_flex()
-                    .absolute()
-                    .top(px(4.))
-                    .left(px(20.))
-                    .right(px(20.))
-                    .items_center()
-                    .gap(px(10.))
-                    .opacity(0.)
-                    .hover(|style| style.opacity(1.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .font_family(set.latin)
-                            .text_size(px(15.))
-                            .font_semibold()
-                            .child("Crant Peek"),
-                    )
-                    .child(
-                        // Which channel answers a plain translation. Only
-                        // channels that can translate are listed, and the same
-                        // choice can be made in settings.
-                        DropdownButton::new("basic-channel")
-                            .button(
-                                Button::new("basic-channel-button")
-                                    .icon(IconName::Languages)
-                                    .tooltip(i18n::tr("channels-basic-pick")),
-                            )
-                            .dropdown_menu(move |mut menu, _window, _cx| {
-                                if basic_choices.is_empty() {
-                                    return menu.item(
-                                        PopupMenuItem::new(i18n::tr("channels-none"))
-                                            .disabled(true),
-                                    );
-                                }
-                                for (id, name) in &basic_choices {
-                                    let target = basic_entity.clone();
-                                    let chosen = id.clone();
-                                    let selected = *id == basic_active;
-                                    menu = menu.item(
-                                        PopupMenuItem::new(name.clone())
-                                            .checked(selected)
-                                            .on_click(move |_event, _window, cx| {
-                                                target.update(cx, |peek, cx| {
-                                                    peek.assign_channel(false, chosen.clone(), cx);
-                                                });
-                                            }),
-                                    );
-                                }
-                                menu
-                            }),
-                    )
-                    .child(self.icon_button(
-                        "pin-window",
-                        if self.pinned {
-                            gpui_kit::assets::IconName::PinOff
-                        } else {
-                            gpui_kit::assets::IconName::Pin
-                        },
-                        if self.pinned {
-                            i18n::tr("action-unpin")
-                        } else {
-                            i18n::tr("action-pin")
-                        },
-                        cx,
-                        |this, window, cx| this.toggle_pinned(window, cx),
-                    ))
-                    .child(self.icon_button(
-                        "open-settings",
-                        gpui_kit::assets::IconName::Settings,
-                        i18n::tr("settings-title"),
-                        cx,
-                        |this, _window, cx| {
-                            this.settings = true;
-                            this.persist_prefs();
-                            cx.notify();
-                        },
-                    ))
-                    .child(self.icon_button(
-                        "close-panel",
-                        gpui_kit::assets::IconName::X,
-                        i18n::tr("action-close"),
-                        cx,
-                        |_this, window, _cx| native_window::hide(window),
-                    )),
-            )
+            // Hidden, the row is replaced by a thin strip that catches the
+            // pointer; the window is sized for whichever of the two is showing.
+            .when(!self.chrome_visible, |this| {
+                this.child(
+                    // A button, because a hover event can be observed there;
+                    // it is a bare strip with no label.
+                    Button::new("chrome-strip")
+                        .ghost()
+                        .w_full()
+                        .h(px(PANEL_CHROME_STRIP))
+                        .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                            if *hovered && !this.chrome_visible {
+                                this.chrome_visible = true;
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
+            .when(self.chrome_visible, |this| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_family(set.latin)
+                                .text_size(px(15.))
+                                .font_semibold()
+                                .child("Crant Peek"),
+                        )
+                        .child(
+                            // Which channel answers a plain translation. Only
+                            // channels that can translate are listed, and the same
+                            // choice can be made in settings.
+                            DropdownButton::new("basic-channel")
+                                .button(
+                                    Button::new("basic-channel-button")
+                                        .icon(IconName::Languages)
+                                        .tooltip(i18n::tr("channels-basic-pick")),
+                                )
+                                .dropdown_menu(move |mut menu, _window, _cx| {
+                                    if basic_choices.is_empty() {
+                                        return menu.item(
+                                            PopupMenuItem::new(i18n::tr("channels-none"))
+                                                .disabled(true),
+                                        );
+                                    }
+                                    for (id, name) in &basic_choices {
+                                        let target = basic_entity.clone();
+                                        let chosen = id.clone();
+                                        let selected = *id == basic_active;
+                                        menu = menu.item(
+                                            PopupMenuItem::new(name.clone())
+                                                .checked(selected)
+                                                .on_click(move |_event, _window, cx| {
+                                                    target.update(cx, |peek, cx| {
+                                                        peek.assign_channel(
+                                                            false,
+                                                            chosen.clone(),
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        )
+                        .child(self.icon_button(
+                            "pin-window",
+                            if self.pinned {
+                                gpui_kit::assets::IconName::PinOff
+                            } else {
+                                gpui_kit::assets::IconName::Pin
+                            },
+                            if self.pinned {
+                                i18n::tr("action-unpin")
+                            } else {
+                                i18n::tr("action-pin")
+                            },
+                            cx,
+                            |this, window, cx| this.toggle_pinned(window, cx),
+                        ))
+                        .child(self.icon_button(
+                            "open-settings",
+                            gpui_kit::assets::IconName::Settings,
+                            i18n::tr("settings-title"),
+                            cx,
+                            |this, _window, cx| {
+                                this.settings = true;
+                                this.persist_prefs();
+                                cx.notify();
+                            },
+                        ))
+                        .child(self.icon_button(
+                            "close-panel",
+                            gpui_kit::assets::IconName::X,
+                            i18n::tr("action-close"),
+                            cx,
+                            |_this, window, _cx| native_window::hide(window),
+                        )),
+                )
+            })
             // Source input. The controls sit inside its bottom corners, so
             // the panel is one box and nothing else until there is a result.
             .child(
@@ -2196,7 +2232,11 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                     }
                 }
                 // The default state: only the input box, nothing else.
-                "compact" => {}
+                "compact" => {
+                    if std::env::var("PEEK_CHROME").is_ok() {
+                        peek.chrome_visible = true;
+                    }
+                }
                 _ => {
                     peek.answer = SAMPLE_ANSWER.into();
                     // No status: a finished turn shows its answer and nothing
