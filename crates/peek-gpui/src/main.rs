@@ -1568,6 +1568,25 @@ impl Peek {
                     native_window::hide(window);
                     return;
                 }
+                if event.keystroke.key == "enter" {
+                    let modifiers = &event.keystroke.modifiers;
+                    // A bare Enter asks the question; a modified one is the
+                    // caller asking for a new line.
+                    let newline =
+                        modifiers.platform || modifiers.alt || modifiers.shift || modifiers.control;
+                    if !newline {
+                        cx.stop_propagation();
+                        // The textarea sees the key first, so its newline is
+                        // taken back out.
+                        this.input.update(cx, |state, cx| {
+                            let text = state.value().trim_end_matches('\n').to_string();
+                            state.set_value(text, window, cx);
+                        });
+                        this.start_query(window, cx);
+                        cx.notify();
+                        return;
+                    }
+                }
                 // A keystroke means the user is working in the box, so the
                 // title row goes away again.
                 if chrome_visible() {
