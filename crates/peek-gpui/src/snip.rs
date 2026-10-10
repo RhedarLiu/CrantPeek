@@ -134,10 +134,21 @@ impl Snip {
     /// The dragged region, normalised so any drag direction works.
     fn selection(&self) -> Option<Rect> {
         let (anchor, cursor) = (self.anchor?, self.cursor?);
-        Some(Rect::from_drag(
+        let raw = Rect::from_drag(
             [anchor.x.into(), anchor.y.into()],
             [cursor.x.into(), cursor.y.into()],
-        ))
+        );
+        // Snapped to whole points. The outline and the dimming bands are both
+        // derived from this rectangle, and half-point edges left a hairline
+        // between the selection and the band that follows it.
+        let min_x = raw.min[0].round();
+        let min_y = raw.min[1].round();
+        let width = (raw.max[0] - min_x).round().max(1.);
+        let height = (raw.max[1] - min_y).round().max(1.);
+        Some(Rect {
+            min: [min_x, min_y],
+            max: [min_x + width, min_y + height],
+        })
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
