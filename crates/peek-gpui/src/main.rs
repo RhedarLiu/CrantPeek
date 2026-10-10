@@ -34,7 +34,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tray_icon::Icon as TrayIconImage;
 use tray_icon::TrayIconBuilder;
@@ -156,6 +156,9 @@ struct Peek {
     /// Sends test results from the network task to the poll loop: the channel
     /// id, whether it failed, and the message to show.
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
+    /// Editable global hotkeys, persisted as they are typed.
+    blank_hotkey: Entity<InputState>,
+    screenshot_hotkey: Entity<InputState>,
     /// Channel being edited, or `None` when the dialog is adding one.
     editing_channel: Option<String>,
     /// Draft fields for the channel dialog.
@@ -202,6 +205,8 @@ impl Peek {
         let follow_up = cx.new(|cx| {
             InputState::new(window, cx).placeholder(i18n::tr("query-followup-placeholder"))
         });
+        let blank_hotkey = cx.new(|cx| InputState::new(window, cx));
+        let screenshot_hotkey = cx.new(|cx| InputState::new(window, cx));
         // Draft fields for adding a channel. One set is enough: the fields a
         // kind needs are shown or hidden as the type changes.
         let channel_name = cx.new(|cx| InputState::new(window, cx));
@@ -218,6 +223,32 @@ impl Peek {
         let (test_tx, test_rx) = std::sync::mpsc::channel();
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
+        for (input, value) in [
+            (&blank_hotkey, &config.blank_hotkey),
+            (&screenshot_hotkey, &config.screenshot_hotkey),
+        ] {
+            let value = value.clone();
+            input.update(cx, |state, cx| state.set_value(&value, window, cx));
+        }
+        // Persisted as they are typed. The running app keeps the hotkeys it
+        // registered at startup, which is why the page says a restart applies
+        // a change.
+        for (input, screenshot) in [(&blank_hotkey, false), (&screenshot_hotkey, true)] {
+            cx.observe(input, move |this, state, cx| {
+                let value = state.read(cx).value().trim().to_owned();
+                let slot = if screenshot {
+                    &mut this.config.screenshot_hotkey
+                } else {
+                    &mut this.config.blank_hotkey
+                };
+                if *slot != value {
+                    *slot = value;
+                    this.persist_config();
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
 
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
         let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx));
@@ -236,6 +267,8 @@ impl Peek {
             pending_toast: None,
             testing_channel: None,
             test_tx,
+            blank_hotkey,
+            screenshot_hotkey,
             editing_channel: None,
             channel_name,
             channel_endpoint,
@@ -613,9 +646,11 @@ impl Peek {
         let height = match self.settings_tab {
             // Font set: a label and two buttons.
             0 => SETTINGS_CHROME + 92.,
+            // Shortcuts: two fields and a hint.
+            1 => SETTINGS_CHROME + 130.,
             // Channels: the list, the add button, the copy switch and the
             // used-for pickers.
-            1 => SETTINGS_CHROME + 190. + SETTINGS_ROW * (channels + 2.),
+            2 => SETTINGS_CHROME + 190. + SETTINGS_ROW * (channels + 2.),
             // Permissions: one row per permission.
             _ => SETTINGS_CHROME + 24. + SETTINGS_ROW * self.permissions.len() as f32,
         };
@@ -1364,6 +1399,59 @@ impl Render for Peek {
 }
 
 impl Peek {
+    /// The task picker: one icon while it is closed, so the input box stays
+    /// nearly empty, and a labelled list when it opens.
+    fn task_picker(&self, cx: &Context<Self>) -> impl IntoElement {
+        let current = self.selected_task(cx);
+        let current_index = TASK_ORDER
+            .iter()
+            .position(|task| *task == current)
+            .unwrap_or(0);
+        let tasks = self.tasks.clone();
+        let entity = cx.entity();
+        DropdownButton::new("task-picker")
+            .button(
+                Button::new("task-picker-button")
+                    .icon(Self::task_icon(current))
+                    .tooltip(i18n::tr(TASK_KEYS[current_index])),
+            )
+            .dropdown_menu(move |mut menu, _window, _cx| {
+                for (index, task) in TASK_ORDER.iter().enumerate() {
+                    let target = entity.clone();
+                    let tasks = tasks.clone();
+                    let task = *task;
+                    menu = menu.item(
+                        PopupMenuItem::new(i18n::tr(TASK_KEYS[index]))
+                            .icon(Self::task_icon(task))
+                            .checked(task == current)
+                            .on_click(move |_event, window, cx| {
+                                tasks.update(cx, |state, cx| {
+                                    state.set_selected_index(
+                                        Some(IndexPath::new(index)),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                                target.update(cx, |_, cx| cx.notify());
+                            }),
+                    );
+                }
+                menu
+            })
+    }
+
+    /// The icon that stands for a task, so the picker can collapse to it.
+    fn task_icon(task: Task) -> gpui_kit::assets::IconName {
+        use gpui_kit::assets::IconName;
+        match task {
+            Task::Translate => IconName::Languages,
+            Task::Define => IconName::BookA,
+            Task::ExplainCode => IconName::Code,
+            Task::ExplainError => IconName::Bug,
+            Task::Explain => IconName::BookOpen,
+        }
+    }
+
     fn query_page(&self, cx: &Context<Self>) -> AnyElement {
         let basic_choices: Vec<(String, String)> = self
             .config
@@ -1397,6 +1485,11 @@ impl Peek {
                     .w_full()
                     .items_center()
                     .gap(px(10.))
+                    // "Appear when needed, gone when done" applies to this row
+                    // too: the window keeps its space so the pointer can reach
+                    // it, but it only paints while the pointer is over it.
+                    .opacity(0.)
+                    .hover(|style| style.opacity(1.))
                     .child(
                         div()
                             .flex_1()
@@ -1473,9 +1566,11 @@ impl Peek {
                         |_this, window, _cx| native_window::hide(window),
                     )),
             )
-            // Source input.
+            // Source input. The controls sit inside its bottom corners, so
+            // the panel is one box and nothing else until there is a result.
             .child(
                 div()
+                    .relative()
                     .w_full()
                     // The textarea grows with its content up to five rows; a
                     // fixed height here let it paint over the row below, and
@@ -1489,39 +1584,42 @@ impl Peek {
                         Textarea::new(&self.input)
                             .w_full()
                             .appearance(false)
-                            .bordered(false),
+                            .bordered(false)
+                            // Room for the controls drawn over the corner.
+                            .pb(px(34.)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(10.))
+                            .right(px(10.))
+                            .bottom(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(self.task_picker(cx))
+                            .child(div().flex_1())
+                            .when(self.busy, |this| {
+                                this.child(
+                                    Button::new("stop")
+                                        .icon(gpui_kit::assets::IconName::Square)
+                                        .tooltip(i18n::tr("query-stop"))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.stop();
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("look-up")
+                                    .icon(gpui_kit::assets::IconName::Send)
+                                    .tooltip(i18n::tr("query-run"))
+                                    .loading(self.busy)
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.start_query(window, cx);
+                                    })),
+                            ),
                     ),
-            )
-            // Task dropdown plus the primary action.
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        Select::new(&self.tasks)
-                            .id("task")
-                            .w(px(170.))
-                            .rounded(px(10.)),
-                    )
-                    .child(
-                        Button::new("look-up")
-                            .primary()
-                            .label(i18n::tr("query-run"))
-                            .loading(self.busy)
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.start_query(window, cx);
-                            })),
-                    )
-                    .when(self.busy, |this| {
-                        this.child(Button::new("stop").label(i18n::tr("query-stop")).on_click(
-                            cx.listener(|this, _event, _window, cx| {
-                                this.stop();
-                                this.status = i18n::tr("status-stopped");
-                                cx.notify();
-                            }),
-                        ))
-                    }),
             )
             .when(self.has_result(), |this| {
                 this
@@ -1686,6 +1784,7 @@ impl Peek {
                     .underline()
                     .children([
                         Tab::new().label(i18n::tr("settings-tab-appearance")),
+                        Tab::new().label(i18n::tr("settings-tab-shortcuts")),
                         Tab::new().label(i18n::tr("settings-tab-translation")),
                         Tab::new().label(i18n::tr("settings-tab-permissions")),
                     ])
@@ -1812,7 +1911,40 @@ impl Peek {
             })
             // Which channel serves which place, plus the copy behaviour that
             // belongs to the capture flow.
+            // Shortcuts: one editable field per global hotkey.
             .when(self.settings_tab == 1, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .font_family(set.latin)
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(i18n::tr("settings-section-shortcuts")),
+                        )
+                        .child(self.picker_row(
+                            i18n::tr("settings-shortcut-blank"),
+                            Input::new(&self.blank_hotkey).into_any_element(),
+                            set,
+                        ))
+                        .child(self.picker_row(
+                            i18n::tr("settings-shortcut-screenshot"),
+                            Input::new(&self.screenshot_hotkey).into_any_element(),
+                            set,
+                        ))
+                        .child(
+                            div()
+                                .font_family(set.latin)
+                                .text_size(px(10.5))
+                                .text_color(muted)
+                                .child(i18n::tr("settings-shortcuts-hint")),
+                        ),
+                )
+            })
+            // Which channel serves which place, plus the copy behaviour.
+            .when(self.settings_tab == 2, |this| {
                 this.child(
                     v_flex()
                         .w_full()
@@ -1880,7 +2012,7 @@ impl Peek {
                         }),
                 )
             })
-            .when(self.settings_tab == 2, |this| {
+            .when(self.settings_tab == 3, |this| {
                 this.child(
                     v_flex()
                         .w_full()
@@ -2304,19 +2436,40 @@ fn main() -> anyhow::Result<()> {
             Err(err) => eprintln!("tray icon failed: {err}"),
         }
 
-        // Command+Shift+A toggles the panel; Command+Shift+D starts the
-        // screenshot overlay.
-        let toggle_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
-        let snip_hotkey = HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyD);
-        let toggle_id = toggle_hotkey.id();
-        let snip_hotkey_id = snip_hotkey.id();
+        // Both hotkeys come from the configuration, so they can be changed in
+        // settings without rebuilding. A string the platform cannot parse is
+        // reported and skipped rather than stopping the app.
+        let hotkey_config = store::load().unwrap_or_default();
+        let parsed: Vec<(&str, Option<HotKey>)> = [
+            ("blank", hotkey_config.blank_hotkey.as_str()),
+            ("screenshot", hotkey_config.screenshot_hotkey.as_str()),
+        ]
+        .into_iter()
+        .map(|(name, text)| {
+            let parsed = text.parse::<HotKey>().map_err(|err| {
+                eprintln!("hotkey \"{text}\" for {name} is invalid: {err}");
+                err
+            });
+            (name, parsed.ok())
+        })
+        .collect();
+        let toggle_id = parsed
+            .iter()
+            .find(|(name, _)| *name == "blank")
+            .and_then(|(_, hotkey)| hotkey.as_ref())
+            .map(HotKey::id);
+        let snip_hotkey_id = parsed
+            .iter()
+            .find(|(name, _)| *name == "screenshot")
+            .and_then(|(_, hotkey)| hotkey.as_ref())
+            .map(HotKey::id);
         match GlobalHotKeyManager::new() {
             Ok(manager) => {
                 let mut registered = 0;
-                for hotkey in [toggle_hotkey, snip_hotkey] {
+                for (name, hotkey) in parsed.into_iter().filter_map(|(n, h)| h.map(|h| (n, h))) {
                     match manager.register(hotkey) {
                         Ok(()) => registered += 1,
-                        Err(err) => eprintln!("hotkey register failed: {err}"),
+                        Err(err) => eprintln!("hotkey register failed for {name}: {err}"),
                     }
                 }
                 println!("{registered} global hotkey(s) registered");
@@ -2379,9 +2532,9 @@ fn main() -> anyhow::Result<()> {
                     if event.state != HotKeyState::Pressed {
                         continue;
                     }
-                    if event.id == toggle_id {
+                    if Some(event.id) == toggle_id {
                         toggle = true;
-                    } else if event.id == snip_hotkey_id {
+                    } else if Some(event.id) == snip_hotkey_id {
                         screenshot = true;
                     }
                 }

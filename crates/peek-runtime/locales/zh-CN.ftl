@@ -127,6 +127,8 @@ error-config-decision-timeout = 决策超时需在 100–10000 ms
 error-config-decision-threshold = 决策阈值无效
 
 ## 设置
+settings-tab-shortcuts = 快捷键
+settings-shortcuts-hint = 格式如 Super+Shift+A（Mac 上 Super 即 Command）。修改后需重启生效。
 settings-tab-appearance = 外观
 settings-tab-translation = 翻译
 settings-tab-permissions = 权限
