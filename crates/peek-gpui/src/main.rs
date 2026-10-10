@@ -30,6 +30,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -58,8 +59,9 @@ const PANEL_WIDTH: f32 = 480.;
 const PANEL_COMPACT_BASE: f32 = 70.;
 /// The hover target that reveals the title row while it is hidden.
 const PANEL_CHROME_STRIP: f32 = 12.;
-/// What the revealed title row adds: the extra top padding, the row and the gap.
-const PANEL_CHROME_HEIGHT: f32 = 53.;
+/// What the revealed title row adds: the row and the gap that follows it, less
+/// the padding it shares with the collapsed state.
+const PANEL_CHROME_HEIGHT: f32 = 34.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
@@ -1508,7 +1510,7 @@ impl Peek {
             // showing; only the top needs room for it. The gap keeps the input,
             // the answer and the follow-up row from touching.
             .px(px(4.))
-            .pt(px(if chrome_visible() { 16. } else { 4. }))
+            .pt(px(if chrome_visible() { 5. } else { 4. }))
             .pb(px(4.))
             .gap(px(5.))
             // Esc hides the panel — "appear when needed, gone when done". A
@@ -1566,13 +1568,22 @@ impl Peek {
                         // input box, whose own padding starts at the same place.
                         .px(px(14.))
                         .child(
-                            div()
-                                .flex_1()
-                                .font_family(set.latin)
-                                .text_size(px(15.))
-                                .font_semibold()
-                                .child("Crant Peek"),
+                            // A tag rather than plain text, so the title and
+                            // the buttons look like one row of controls.
+                            Tag::secondary()
+                                .outline()
+                                .rounded(px(8.))
+                                .h(px(28.))
+                                .px(px(10.))
+                                .child(
+                                    div()
+                                        .font_family(set.latin)
+                                        .text_size(px(12.))
+                                        .font_semibold()
+                                        .child("Crant Peek"),
+                                ),
                         )
+                        .child(div().flex_1())
                         .child(
                             // Which channel answers a plain translation. Only
                             // channels that can translate are listed, and the same
