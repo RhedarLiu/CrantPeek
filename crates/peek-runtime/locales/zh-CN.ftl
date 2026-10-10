@@ -245,6 +245,7 @@ settings-permission-hint = 双击 Ctrl 只读取选区，无选区不弹窗。�
 settings-permission-windows = 无法读取高权限应用或安全输入；系统 OCR 需已安装语言包。
 settings-permission-restart = macOS 修改权限后可能需要重启 Peek。
 settings-open-privacy = 打开系统隐私设置
+settings-permission-open = 前往设置
 settings-permission-refresh = 重新检查
 settings-open-privacy-failed = 无法打开系统设置
 

@@ -3033,6 +3033,20 @@ impl Peek {
                                             "settings-permission-denied"
                                         })),
                                 )
+                                .child(
+                                    Button::new(SharedString::from(format!("open-{key}")))
+                                        .icon(IconName::ExternalLink)
+                                        .label(i18n::tr("settings-permission-open"))
+                                        .on_click(cx.listener({
+                                            let key = *key;
+                                            move |this, _event, _window, cx| {
+                                                if let Err(err) = peek_runtime::permissions::open_permission_settings(key) {
+                                                    this.notify_error(err);
+                                                }
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
                                 .into_any_element()
                         }))
                         .child(
@@ -3040,18 +3054,6 @@ impl Peek {
                                 .w_full()
                                 .gap(px(8.))
                                 .pt(px(8.))
-                                .child(
-                                    Button::new("open-privacy")
-                                        .label(i18n::tr("settings-open-privacy"))
-                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                            if let Err(err) =
-                                                peek_runtime::permissions::open_settings()
-                                            {
-                                                this.notify_error(err);
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
                                 .child(
                                     Button::new("refresh-permissions")
                                         .label(i18n::tr("settings-permission-refresh"))

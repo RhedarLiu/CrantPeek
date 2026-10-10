@@ -224,6 +224,7 @@ settings-permission-hint = Double Ctrl reads selections only. If the app does no
 settings-permission-windows = Elevated apps and secure inputs are inaccessible; OS OCR needs installed language packs.
 settings-permission-restart = You may need to restart Peek after changing macOS permissions.
 settings-open-privacy = Open system privacy settings
+settings-permission-open = Open settings
 settings-permission-refresh = Check again
 settings-open-privacy-failed = Cannot open system settings.
 welcome-title = Welcome to Crant Peek
