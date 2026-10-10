@@ -346,3 +346,5 @@ channels-add-quick = 添加渠道
 channels-up = 上移
 channels-down = 下移
 channels-remove-quick = 从快速翻译移除
+
+status-config-save-error = 配置保存失败：{ $error }

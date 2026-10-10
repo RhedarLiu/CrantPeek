@@ -7,11 +7,13 @@
 - [ ] macOS：`bash tools/package-macos.sh`，双击 app 启动，菜单栏图标正常；不出现 Dock 主应用入口。
 - [ ] Windows：从 GitHub Actions 下载 exe，正常启动；托盘图标和退出菜单可用。
 - [ ] 首次启动欢迎页可读，保存后下次不重复欢迎。
-- [ ] 设置重复保存及重新启动后读取成功；凭据在系统安全存储，不在配置 JSON 中。
+- [ ] 设置重复保存及重新启动后读取成功；当前渠道 key 保存在用户配置 JSON 中；系统安全存储迁移仍待完成。
 
-macOS 打包只做本地 ad-hoc 签名，**没有公证**。CI 测试包默认不含词库，需按 README 构建；Windows 可以把词库放在 exe 旁边，macOS 可以放在配置目录或 app 的 Resources。
+macOS 本地打包默认使用稳定开发证书，CI 为 ad-hoc，**没有公证**。Windows 使用便携 ZIP 包。两个平台的打包脚本都携带已有本地词库；CI 默认不下载词库，需按 README 构建。
 
 ## 三个入口（必须互不混淆）
+
+当前主程序使用组合键取词，双击 Ctrl 钩子未启动；以下双击 Ctrl 项目属于旧规划，需在重新启用时验收。当前默认选区入口为 macOS ⌘E / Windows Alt+E，读取失败打开输入窗。
 
 - [ ] 无选区双击 Ctrl：不弹窗，不产生模型请求。
 - [ ] 选中词双击 Ctrl：准确读取当前选区，不读取旧剪贴板。
@@ -61,3 +63,43 @@ macOS 打包只做本地 ad-hoc 签名，**没有公证**。CI 测试包默认�
 `[snip] ocr ok: N chars`。
 
 Windows 需要安装支持英语的 OCR 语言包；尚未在 Windows 执行上述命令。
+
+## 2026-10-10 完成度与平台代码审查
+
+以当前 GPUI 主程序的实际调用为准，网络层、旧钩子或配置字段存在不等于界面已交付。
+
+| macOS 已开发功能 | Windows 对应处理 | 还需注意 |
+| --- | --- | --- |
+| 全局选区、空白、截图快捷键 | 同一 global-hotkey 注册及动作分发，默认 Alt 修饰键 | 注册失败仅写日志，设置未显示冲突状态；修改需重启 |
+| 读取当前文字选区 | UI Automation GetFocusedElement / TextPattern / GetSelection | 回退路径少于 macOS；不同应用兼容性仍待验证 |
+| 显隐、弹出置顶、顶部扩展、卡片/结果高度 | Win32 ShowWindow / SetWindowPos，GPUI PopUp 置顶无标题栏；UI 共用 | 顶部扩展仍是先移动再 resize，尚无 Windows 同帧行为证据 |
+| 主输入和追问中文输入法 | GPUI Windows 文本输入处理；macOS 额外刷新 AppKit inputContext | 无 Windows 实机输入法测试，不将 macOS 专用补丁认定为功能缺失 |
+| 截图框选与就地翻译 | xcap + 同一 Snip UI/裁剪/翻译流程 | GPUI Windows PopUp 已有 WS_EX_TOPMOST / WS_EX_TOOLWINDOW，无需重复加遮罩置顶代码 |
+| 本地 OCR | Windows.Media.Ocr / SoftwareBitmap / WinRT 初始化 | 依赖系统 OCR 语言包 |
+| 权限逐项跳转 | Windows 使用平台限制说明，系统隐私设置接口保留 | 没有对应 macOS TCC 的三项授权检测；不显示虚假的已授权标记 |
+| 字体、设置、全部渠道、排序/回退、DeepSeek 强度、追问、token 设置、任务判断 | 相同业务和 UI 代码；字体有 Windows 系统回退 | 真实服务及长会话需补实测 |
+| 单实例、配置存取、词典定位 | Windows 文件锁错误处理、原子替换、配置目录、exe 旁词库查找 | 第二次启动只退出，未唤起已有实例 |
+| app 打包带资源 | 新增 Windows PowerShell ZIP 打包及 CI 调用 | PowerShell 打包需 Windows CI/本机执行确认；词库并非自动下载 |
+
+本轮修复：Google 连接测试遗漏、渠道类型变化后决策引用失效、编辑重置渠道能力、渠道保存失败无反馈、截图启动失败只有日志、网络错误暴露 URL 查询原文、未配渠道时离线词典被错误阻断，以及 Windows 发布版控制台窗口与打包入口缺口。新增回归测试覆盖渠道角色修复和错误 URL 脱敏；CI 纳入 GUI 几何单元测试。
+
+### 距离可交付首版的剩余工作
+
+1. 优先补齐设置闭环：目标语种/方向及风格、界面语言、主题/缩放；快捷键注册失败应在界面可见。首次引导、托盘设置及暂停入口没有接通。
+2. 图片理解：网络层有实现但 UI 没有图片任务、vision 配置或明确上传确认入口；不能算已交付的截图多模态功能。
+3. 故障恢复：配置读取失败当前回退默认值，后续保存可能覆盖原配置；需保留坏文件并阻止无提示覆盖。截图遮罩关闭后尚未直接取消其网络请求。重复取词线程的晚到结果没有统一入口代次检查。
+4. 生命周期：空白入口实际保留当前内容；失焦/关闭隐藏不会停止网络请求。应确定是否需要严格“打开空白即新建”和“关闭即取消”，再与用户当前使用习惯统一。
+5. 安全及交付：当前渠道 key 明文存用户配置；完善安全存储/迁移与删除。发布签名、公证、安装/升级、词库获取和许可展示尚未闭环。
+6. 验收及性能：真实服务错误恢复，Windows 输入法/显示器/DPI/选区和截图，全平台隐藏待机与峰值资源实测。现有性能记录不是当前版本的完整基准。
+
+功能审查完成不等于这些项目已实现；不把可选扩展（收藏、发音、云同步等）算作当前必须完成的核心缺口。
+
+### 本轮验证结果
+
+- macOS 全工作区 80 项单元/HTTP 集成测试通过，严格 clippy、格式和差异检查通过。
+- Windows runtime（包含选区、截图/OCR、配置、权限）目标严格 clippy 通过；修复了 macOS 诊断函数在 Windows 的 dead-code 错误。
+- 尝试完整 Windows GUI 交叉检查，在第三方 GPUI 资源构建阶段因本机缺少 `llvm-rc` 中止；不宣称 GUI 目标已通过。Windows 原生 CI 已保留完整构建、测试和新增打包步骤，本轮未执行远端 CI。
+- 隔离预览 `PEEK_RENDER=/tmp/peek-offline-audit.png PEEK_OFFLINE_SELFTEST=1 target/release/peek-gpui` 通过：使用空渠道配置，词典命中，无网络任务，无缺渠道错误。测试要求本地已有词库。
+- release 通过稳定开发证书打包及签名验证，并按固定的打包、关闭旧实例、open 启动、进程确认流程重启。
+
+Windows 窗口/选区的系统边界可参考 [SetWindowPos 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos) 和 [高权限应用的 UI Automation 限制](https://learn.microsoft.com/en-us/power-automate/desktop-flows/how-to/enable-ui-access)。本项目未开启 UIAccess 或自动提高权限。

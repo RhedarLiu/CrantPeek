@@ -9,13 +9,20 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Network request failed: {0}")]
-    Network(#[from] reqwest::Error),
+    Network(reqwest::Error),
     #[error("Service returned HTTP {0}")]
     Http(u16),
     #[error("Invalid service response: {0}")]
     Invalid(String),
     #[error("Request cancelled")]
     Cancelled,
+}
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        // Query strings can contain source text (Google), tokens or credentials.
+        // Keep transport diagnostics without exposing request URLs in errors.
+        Self::Network(error.without_url())
+    }
 }
 impl Error {
     /// Stable presentation code. Details are supplied separately by the UI.
@@ -681,6 +688,29 @@ impl Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn transport_errors_do_not_expose_source_text_or_query_tokens() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::new()
+            .get(format!(
+                "http://{address}/translate?q=private-source&token=private-key"
+            ))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.url().is_some());
+        let error = Error::from(error);
+        assert!(!error.to_string().contains("private-source"));
+        assert!(!error.to_string().contains("private-key"));
+        if let Error::Network(error) = error {
+            assert!(error.url().is_none());
+        } else {
+            panic!("transport error expected");
+        }
+    }
+
     fn test_image() -> ImageInput {
         use base64::Engine;
         ImageInput {

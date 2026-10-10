@@ -651,6 +651,34 @@ impl Config {
         changed
     }
 
+    /// Repair role assignments after removing a channel or changing its kind.
+    /// An intentionally empty role stays empty; only invalid references fall back.
+    pub fn repair_channel_assignments(&mut self) {
+        let valid: Vec<_> = self.quick_candidates().map(|c| c.id.clone()).collect();
+        if let Some(ids) = &mut self.quick_channels {
+            ids.retain(|id| valid.contains(id));
+        }
+        if !self.basic_channel.is_empty() && self.basic().is_none() {
+            self.basic_channel.clear();
+        }
+        if !self.ai_channel.is_empty() && self.ai().is_none() {
+            let fallback = self
+                .ai_candidates()
+                .next()
+                .map(|c| c.id.clone())
+                .unwrap_or_default();
+            self.ai_channel = fallback;
+        }
+        if !self.decision_channel.is_empty() && self.decision_service().is_none() {
+            let fallback = self
+                .decision_candidates()
+                .next()
+                .map(|c| c.id.clone())
+                .unwrap_or_default();
+            self.decision_channel = fallback;
+        }
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if !matches!(
             self.translation_style.as_str(),
@@ -792,6 +820,44 @@ pub fn bound_history(messages: &mut Vec<Message>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changing_channel_kinds_repairs_all_roles_without_changing_order() {
+        let mut config = Config {
+            channels: vec![
+                Channel {
+                    id: "old".into(),
+                    kind: ChannelKind::GoogleFree,
+                    ..Channel::default()
+                },
+                Channel {
+                    id: "llm".into(),
+                    model: "model".into(),
+                    ..Channel::default()
+                },
+                Channel {
+                    id: "judge".into(),
+                    kind: ChannelKind::Decision,
+                    model: "judge".into(),
+                    ..Channel::default()
+                },
+            ],
+            quick_channels: Some(vec!["old".into(), "judge".into(), "llm".into()]),
+            ai_channel: "old".into(),
+            decision_channel: "old".into(),
+            ..Config::default()
+        };
+        config.repair_channel_assignments();
+        assert_eq!(config.quick_channels.as_ref().unwrap(), &["old", "llm"]);
+        assert_eq!(config.ai_channel, "llm");
+        assert_eq!(config.decision_channel, "judge");
+        config.validate().unwrap();
+        config.channels.clear();
+        config.repair_channel_assignments();
+        assert!(config.quick_channels.unwrap().is_empty());
+        assert!(config.ai_channel.is_empty());
+        assert!(config.decision_channel.is_empty());
+    }
+
     #[test]
     fn explicit_target_overrides_automatic_and_whitespace_does_not() {
         assert_eq!(super::effective_target("Chinese", " Japanese "), "Japanese");

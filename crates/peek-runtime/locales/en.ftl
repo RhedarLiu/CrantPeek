@@ -321,3 +321,5 @@ channels-add-quick = Add channel
 channels-up = Move up
 channels-down = Move down
 channels-remove-quick = Remove from quick translation
+
+status-config-save-error = Could not save settings: { $error }

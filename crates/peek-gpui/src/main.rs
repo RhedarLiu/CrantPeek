@@ -14,6 +14,8 @@
 //! Modes:
 //!   PEEK_SELFTEST=1   show the panel, verify visibility, hide it, quit
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod fonts;
 mod native_window;
 mod snip;
@@ -690,7 +692,13 @@ impl Peek {
                                         .detach();
                                     }
                                 }
-                                Err(err) => println!("[snip] overlay NOT opened: {err}"),
+                                Err(err) => {
+                                    this.update(cx, |peek, cx| {
+                                        peek.notify_error(i18n::diagnostic(&err));
+                                        cx.notify();
+                                    }).ok();
+                                    let _ = cx.update_window(panel_handle, |_, window, _| show_panel(window));
+                                }
                             }
                         }
                         Action::Translate { text, replies } => {
@@ -1548,6 +1556,8 @@ impl Peek {
         } else {
             key
         };
+        let old_config = self.config.clone();
+        let existing = editing.as_deref().and_then(|id| self.config.channel(id));
         let saved = Channel {
             id: id.clone(),
             name,
@@ -1555,8 +1565,10 @@ impl Peek {
             endpoint,
             model,
             api_key,
-            credential_id: String::new(),
-            vision: false,
+            credential_id: existing
+                .map(|c| c.credential_id.clone())
+                .unwrap_or_default(),
+            vision: kind.is_ai() && existing.is_some_and(|c| c.vision),
             max_output_tokens,
             reasoning_effort: if kind == ChannelKind::DeepSeek {
                 self.channel_effort
@@ -1599,27 +1611,13 @@ impl Peek {
                 }
             }
         }
-        // A channel that changed kind may no longer be able to serve its place.
-        if self.config.ai().is_none() {
-            // Resolved first: the iterator borrows the config.
-            let fallback = self
-                .config
-                .ai_candidates()
-                .next()
-                .map(|channel| channel.id.clone())
-                .unwrap_or_default();
-            self.config.ai_channel = fallback;
-        }
-        let valid: Vec<_> = self
-            .config
-            .quick_candidates()
-            .map(|c| c.id.clone())
-            .collect();
-        if let Some(ids) = &mut self.config.quick_channels {
-            ids.retain(|id| valid.contains(id));
+        self.config.repair_channel_assignments();
+        if !self.persist_config() {
+            self.config = old_config;
+            cx.notify();
+            return false;
         }
         self.editing_channel = None;
-        self.persist_config();
         for input in [
             &self.channel_name,
             &self.channel_endpoint,
@@ -1679,6 +1677,14 @@ impl Peek {
                     ),
                     Err(err) => (true, told(&url, &err)),
                 }
+            } else if channel.kind == ChannelKind::GoogleFree {
+                match client
+                    .translate_google("hello", "Chinese", CancellationToken::new())
+                    .await
+                {
+                    Ok(_) => (false, locale.text("channels-test-ok")),
+                    Err(err) => (true, told(&channel.endpoint, &err)),
+                }
             } else if channel.kind == ChannelKind::DeepLx {
                 let url = channel.endpoint.clone();
                 match client
@@ -1716,35 +1722,7 @@ impl Peek {
         if let Some(ids) = &mut self.config.quick_channels {
             ids.retain(|old| old != id);
         }
-        if self.config.basic_channel == id {
-            // Resolved before the assignment: the iterator borrows the config.
-            let fallback = self
-                .config
-                .quick_candidates()
-                .next()
-                .map(|channel| channel.id.clone())
-                .unwrap_or_default();
-            self.config.basic_channel = fallback;
-        }
-        if self.config.ai_channel == id {
-            // Resolved before the assignment: the iterator borrows the config.
-            let fallback = self
-                .config
-                .ai_candidates()
-                .next()
-                .map(|channel| channel.id.clone())
-                .unwrap_or_default();
-            self.config.ai_channel = fallback;
-        }
-        if self.config.decision_channel == id {
-            let fallback = self
-                .config
-                .decision_candidates()
-                .next()
-                .map(|channel| channel.id.clone())
-                .unwrap_or_default();
-            self.config.decision_channel = fallback;
-        }
+        self.config.repair_channel_assignments();
         self.persist_config();
         cx.notify();
     }
@@ -1772,10 +1750,12 @@ impl Peek {
         cx.notify();
     }
 
-    fn persist_config(&mut self) {
+    fn persist_config(&mut self) -> bool {
         if let Err(err) = store::save(&self.config) {
-            eprintln!("config save failed: {err}");
+            self.notify_error(i18n::format("status-config-save-error", &[("error", &err)]));
+            return false;
         }
+        true
     }
 
     /// Sends the follow-up box, continuing the current conversation.
@@ -1871,17 +1851,26 @@ impl Peek {
         let target = effective_target(&route.target, "").to_owned();
         // A follow-up continues the conversation, which a translation-only
         // endpoint cannot do. The first translation may still use DeepLX.
-        let channels = self.config.answer_channels(task, followup);
-        if channels.is_empty() {
-            self.fail_turn(isolated, i18n::tr("status-channel-missing"), cx);
-            return false;
-        }
-
         if !isolated && !followup {
             self.dictionary_note.clear();
             if let Some(entry) = self.lookup_word(&text) {
                 self.dictionary_note = dictionary_text(&entry);
             }
+        }
+
+        let channels = self.config.answer_channels(task, followup);
+        if channels.is_empty() {
+            if !isolated && !followup && !self.dictionary_note.is_empty() {
+                // Offline lookup must work before any service is configured.
+                self.bubbles.clear();
+                self.messages.clear();
+                self.original_query = text;
+                self.status.clear();
+                cx.notify();
+                return true;
+            }
+            self.fail_turn(isolated, i18n::tr("status-channel-missing"), cx);
+            return false;
         }
 
         let instruction = task.styled_instruction(&target, &self.config.translation_style);
@@ -3194,6 +3183,10 @@ impl Peek {
                                 .text_color(muted)
                                 .child(i18n::tr("settings-permissions")),
                         )
+                        .when(cfg!(windows), |this| {
+                            this.child(div().text_size(px(11.)).text_color(muted)
+                                .child(i18n::tr("settings-permission-windows")))
+                        })
                         // One row per permission with a status chip, rather
                         // than a sentence with a dash in it.
                         .children(self.permissions.iter().map(|(key, granted)| {
@@ -3377,6 +3370,26 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         *publish_target.borrow_mut() = Some(view.clone());
         view.update(cx, |peek, cx| {
             // In-memory only: a preview must never overwrite the real choice.
+
+            if std::env::var("PEEK_OFFLINE_SELFTEST").is_ok() {
+                peek.config = Config::default();
+                peek.pending_input = Some("ephemeral".into());
+                assert!(peek.begin_turn("ephemeral".into(), false, cx));
+                assert!(
+                    !peek.dictionary_note.is_empty(),
+                    "offline dictionary must answer without channels"
+                );
+                assert!(
+                    peek.receiver.is_none(),
+                    "offline query must not start a network request"
+                );
+                assert!(
+                    peek.pending_toast.is_none(),
+                    "offline lookup must not report a missing channel"
+                );
+                println!("[selftest] offline lookup without channels passed");
+                return;
+            }
 
             match page.as_str() {
                 // Not persisted: a preview must not overwrite the real choice.

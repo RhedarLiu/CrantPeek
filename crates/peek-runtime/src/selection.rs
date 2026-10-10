@@ -267,6 +267,7 @@ pub fn read() -> Option<String> {
 /// `eprintln!` alone is not enough when a bundle is launched with `open`: it
 /// has no terminal, and its stderr pipe can hold output back. Setting
 /// `PEEK_SELECTION_LOG` to a path also appends every note to that file.
+#[cfg(target_os = "macos")]
 pub(crate) fn note(message: &str) {
     eprintln!("{message}");
     if let Ok(path) = std::env::var("PEEK_SELECTION_LOG") {

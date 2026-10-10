@@ -19,19 +19,21 @@ jobs:
       # --all-targets lints every crate including peek-gpui, which is how a
       # Windows-only import error was caught here.
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # peek-gpui has no tests of its own; skipping its test binary avoids
-      # building the whole GPUI tree twice. Its release build below is the real
-      # "does it compile on this platform" check.
-      - run: cargo test --workspace --exclude peek-gpui
+      # Include GUI geometry tests as well as runtime/network tests.
+      - run: cargo test --workspace
       - run: cargo build --workspace --release
       - name: Package macOS app
         if: runner.os == 'macOS'
         run: bash tools/package-macos.sh
+      - name: Package Windows portable app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/package-windows.ps1 -SkipBuild
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: Crant-Peek-Windows-test
-          path: target/release/peek-gpui.exe
+          path: dist/Crant-Peek-Windows.zip
       - name: Archive macOS app
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Crant Peek.app" dist/Crant-Peek-macOS.zip
