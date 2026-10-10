@@ -55,11 +55,11 @@ use tokio_util::sync::CancellationToken;
 const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum: header, input card,
 /// action row, padding and gaps.
-const PANEL_COMPACT_BASE: f32 = 136.;
+const PANEL_COMPACT_BASE: f32 = 70.;
 /// The hover target that reveals the title row while it is hidden.
 const PANEL_CHROME_STRIP: f32 = 12.;
-/// What the revealed title row adds to the panel.
-const PANEL_CHROME_HEIGHT: f32 = 28.;
+/// What the revealed title row adds: the wider padding, the row and the gap.
+const PANEL_CHROME_HEIGHT: f32 = 70.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
@@ -1397,7 +1397,7 @@ impl Render for Peek {
             let chrome = if self.chrome_visible {
                 PANEL_CHROME_HEIGHT
             } else {
-                PANEL_CHROME_STRIP
+                0.
             };
             PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows + chrome
         };
@@ -1485,10 +1485,13 @@ impl Peek {
             .size_full()
             .bg(bg)
             .text_color(fg)
-            .px(px(20.))
-            .pt(px(20.))
-            .pb(px(20.))
-            .gap(px(10.))
+            // Hidden, the panel hugs the input box; revealed, it needs room
+            // for the title row above it.
+            .relative()
+            .px(px(if self.chrome_visible { 20. } else { 4. }))
+            .pt(px(if self.chrome_visible { 20. } else { 4. }))
+            .pb(px(if self.chrome_visible { 20. } else { 4. }))
+            .gap(px(if self.chrome_visible { 10. } else { 0. }))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -1507,18 +1510,31 @@ impl Peek {
             // pointer; the window is sized for whichever of the two is showing.
             .when(!self.chrome_visible, |this| {
                 this.child(
-                    // A button, because a hover event can be observed there;
-                    // it is a bare strip with no label.
-                    Button::new("chrome-strip")
-                        .ghost()
-                        .w_full()
+                    // An overlay, so the hidden panel can hug the input box
+                    // while still offering something to hover.
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
                         .h(px(PANEL_CHROME_STRIP))
-                        .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                            if *hovered && !this.chrome_visible {
-                                this.chrome_visible = true;
-                                cx.notify();
-                            }
-                        })),
+                        .child(
+                            // A button, because that is where a hover event can
+                            // be observed; it is a bare strip with no label.
+                            Button::new("chrome-strip")
+                                .ghost()
+                                .w_full()
+                                .h_full()
+                                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                                    // An offscreen render parks the pointer at the origin, which
+                                    // is over this strip, so previews ignore it.
+                                    let preview = std::env::var("PEEK_RENDER").is_ok();
+                                    if *hovered && !preview && !this.chrome_visible {
+                                        this.chrome_visible = true;
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
                 )
             })
             .when(self.chrome_visible, |this| {
