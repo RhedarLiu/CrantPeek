@@ -105,10 +105,20 @@ pub fn multimodal_body(
     Ok(body)
 }
 
+fn apply_reasoning_effort(provider: &Provider, body: &mut Value) {
+    if provider.protocol == Protocol::ChatCompletions
+        && let Some(effort) = provider.reasoning_effort
+    {
+        body["reasoning_effort"] = json!(effort);
+    }
+}
+
 pub fn request_body(provider: &Provider, messages: &[Message]) -> Value {
     match provider.protocol {
         Protocol::ChatCompletions => {
-            json!({"model": provider.model, "messages": messages, "max_tokens":provider.max_output_tokens, "stream": true})
+            let mut body = json!({"model": provider.model, "messages": messages, "max_tokens":provider.max_output_tokens, "stream": true});
+            apply_reasoning_effort(provider, &mut body);
+            body
         }
         Protocol::Responses => {
             json!({"model": provider.model, "input": messages, "max_output_tokens":provider.max_output_tokens, "stream": true})
@@ -501,12 +511,16 @@ async fn within_deadline<T>(
 /// A one-token request in the shape the configured protocol actually accepts.
 fn probe_body(provider: &Provider) -> Value {
     match provider.protocol {
-        Protocol::ChatCompletions => json!({
+        Protocol::ChatCompletions => {
+            let mut body = json!({
             "model": provider.model,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 1,
             "stream": false,
-        }),
+            });
+            apply_reasoning_effort(provider, &mut body);
+            body
+        }
         Protocol::Responses => json!({
             "model": provider.model,
             "input": "ping",
@@ -657,6 +671,24 @@ mod tests {
             ));
         }
     }
+    #[test]
+    fn deepseek_effort_is_sent_for_answers_and_probes_only_when_configured() {
+        for effort in peek_core::DeepSeekEffort::ALL {
+            let provider = Provider {
+                reasoning_effort: Some(effort),
+                ..Provider::default()
+            };
+            assert_eq!(
+                request_body(&provider, &[])["reasoning_effort"],
+                json!(effort)
+            );
+            assert_eq!(probe_body(&provider)["reasoning_effort"], json!(effort));
+        }
+        let normal = Provider::default();
+        assert!(request_body(&normal, &[]).get("reasoning_effort").is_none());
+        assert!(probe_body(&normal).get("reasoning_effort").is_none());
+    }
+
     #[test]
     fn probe_uses_each_protocol_shape() {
         for (protocol, field) in [

@@ -155,6 +155,7 @@ settings-theme-light = 浅色
 settings-theme-dark = 深色
 settings-zoom = 界面缩放
 channel-kind-chat = OpenAI Chat Completions
+channel-kind-deepseek = DeepSeek
 channel-kind-responses = OpenAI Responses
 channel-kind-anthropic = Anthropic Messages
 channel-kind-deeplx = DeepLX
@@ -330,3 +331,10 @@ protocol-anthropic = Anthropic · Messages
 
 preview-source = The best tools respect your attention.
 error-instance = 无法获取应用实例锁：{ $detail }
+
+channels-reasoning-effort = 思考强度
+channels-reasoning-off = 关闭
+channels-reasoning-low = 低
+channels-reasoning-high = 高
+channels-reasoning-max = 最高
+channels-reasoning-hint = 翻译建议关闭思考，以便快速返回。

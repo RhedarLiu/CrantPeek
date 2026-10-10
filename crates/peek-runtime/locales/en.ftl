@@ -134,6 +134,7 @@ settings-theme-light = Light
 settings-theme-dark = Dark
 settings-zoom = Interface scale
 channel-kind-chat = OpenAI Chat Completions
+channel-kind-deepseek = DeepSeek
 channel-kind-responses = OpenAI Responses
 channel-kind-anthropic = Anthropic Messages
 channel-kind-deeplx = DeepLX
@@ -305,3 +306,10 @@ protocol-anthropic = Anthropic · Messages
 
 preview-source = The best tools respect your attention.
 error-instance = Cannot acquire application instance lock: { $detail }
+
+channels-reasoning-effort = Reasoning effort
+channels-reasoning-off = Off
+channels-reasoning-low = Low
+channels-reasoning-high = High
+channels-reasoning-max = Max
+channels-reasoning-hint = Off is recommended for quick translation.

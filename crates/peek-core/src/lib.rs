@@ -211,6 +211,7 @@ pub enum Protocol {
 pub enum ChannelKind {
     #[default]
     ChatCompletions,
+    DeepSeek,
     Responses,
     Anthropic,
     /// A DeepLX-compatible endpoint: a self-hosted proxy in front of DeepL's
@@ -224,8 +225,9 @@ pub enum ChannelKind {
 }
 
 impl ChannelKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ChatCompletions,
+        Self::DeepSeek,
         Self::Responses,
         Self::Anthropic,
         Self::DeepLx,
@@ -236,6 +238,7 @@ impl ChannelKind {
     pub fn label_key(self) -> &'static str {
         match self {
             Self::ChatCompletions => "channel-kind-chat",
+            Self::DeepSeek => "channel-kind-deepseek",
             Self::Responses => "channel-kind-responses",
             Self::Anthropic => "channel-kind-anthropic",
             Self::DeepLx => "channel-kind-deeplx",
@@ -253,7 +256,7 @@ impl ChannelKind {
     pub fn is_ai(self) -> bool {
         matches!(
             self,
-            Self::ChatCompletions | Self::Responses | Self::Anthropic
+            Self::ChatCompletions | Self::DeepSeek | Self::Responses | Self::Anthropic
         )
     }
 
@@ -282,10 +285,36 @@ impl ChannelKind {
     /// The wire protocol, for AI kinds.
     pub fn protocol(self) -> Option<Protocol> {
         match self {
-            Self::ChatCompletions => Some(Protocol::ChatCompletions),
+            Self::ChatCompletions | Self::DeepSeek => Some(Protocol::ChatCompletions),
             Self::Responses => Some(Protocol::Responses),
             Self::Anthropic => Some(Protocol::Anthropic),
             Self::DeepLx | Self::Decision | Self::GoogleFree => None,
+        }
+    }
+}
+
+/// DeepSeek's Chat Completions reasoning levels. New channels default to
+/// non-thinking mode for fast translation; ordinary providers omit this field.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepSeekEffort {
+    #[default]
+    #[serde(rename = "none")]
+    Off,
+    Low,
+    High,
+    Max,
+}
+
+impl DeepSeekEffort {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Low, Self::High, Self::Max];
+
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Off => "channels-reasoning-off",
+            Self::Low => "channels-reasoning-low",
+            Self::High => "channels-reasoning-high",
+            Self::Max => "channels-reasoning-max",
         }
     }
 }
@@ -316,6 +345,7 @@ pub struct Channel {
     pub credential_id: String,
     pub vision: bool,
     pub max_output_tokens: u32,
+    pub reasoning_effort: DeepSeekEffort,
 }
 
 impl Default for Channel {
@@ -330,6 +360,7 @@ impl Default for Channel {
             credential_id: String::new(),
             vision: false,
             max_output_tokens: 2048,
+            reasoning_effort: DeepSeekEffort::Off,
         }
     }
 }
@@ -345,6 +376,7 @@ impl Channel {
             credential_id: self.credential_id.clone(),
             vision: self.vision,
             max_output_tokens: self.max_output_tokens,
+            reasoning_effort: (self.kind == ChannelKind::DeepSeek).then_some(self.reasoning_effort),
         })
     }
 }
@@ -360,6 +392,7 @@ pub struct Provider {
     pub credential_id: String,
     pub vision: bool,
     pub max_output_tokens: u32,
+    pub reasoning_effort: Option<DeepSeekEffort>,
 }
 impl Default for Provider {
     fn default() -> Self {
@@ -371,6 +404,7 @@ impl Default for Provider {
             credential_id: "answer-default".into(),
             vision: false,
             max_output_tokens: 2048,
+            reasoning_effort: None,
         }
     }
 }
@@ -547,6 +581,7 @@ impl Config {
                 credential_id: String::new(),
                 vision: false,
                 max_output_tokens: 2048,
+                reasoning_effort: DeepSeekEffort::Off,
             });
             if self.decision_channel.is_empty() {
                 self.decision_channel = id;
@@ -860,6 +895,26 @@ mod tests {
             endpoint: "https://example.com/v1".into(),
             model: "m".into(),
             ..Channel::default()
+        }
+    }
+
+    #[test]
+    fn deepseek_effort_roundtrips_and_old_channels_keep_their_defaults() {
+        let old: Channel = serde_json::from_str(r#"{"kind":"chat_completions"}"#).unwrap();
+        assert!(old.provider().unwrap().reasoning_effort.is_none());
+        let mut channel = channel("deepseek", ChannelKind::DeepSeek);
+        assert!(channel.kind.is_ai());
+        assert!(channel.kind.needs_credential());
+        assert_eq!(channel.kind.protocol(), Some(Protocol::ChatCompletions));
+        assert_eq!(
+            channel.provider().unwrap().reasoning_effort,
+            Some(DeepSeekEffort::Off)
+        );
+        for effort in DeepSeekEffort::ALL {
+            channel.reasoning_effort = effort;
+            let saved = serde_json::to_string(&channel).unwrap();
+            let restored: Channel = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.provider().unwrap().reasoning_effort, Some(effort));
         }
     }
 

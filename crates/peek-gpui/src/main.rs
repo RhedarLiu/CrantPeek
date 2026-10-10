@@ -28,7 +28,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
@@ -43,7 +43,9 @@ use tray_icon::Icon as TrayIconImage;
 use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
-use peek_core::{Channel, ChannelKind, Config, Message, Task, effective_target, local_route};
+use peek_core::{
+    Channel, ChannelKind, Config, DeepSeekEffort, Message, Task, effective_target, local_route,
+};
 use peek_network::{Client, Event};
 use peek_runtime::action::{Action, OverlayEvent};
 use peek_runtime::{i18n, store};
@@ -332,6 +334,7 @@ struct Peek {
     channel_model: Entity<InputState>,
     channel_key: Entity<InputState>,
     channel_kind: Entity<SelectState<Vec<SharedString>>>,
+    channel_effort: Entity<SelectState<Vec<SharedString>>>,
     /// Which settings tab is showing.
     settings_tab: usize,
     /// Laid-out height of the settings page, measured from its children.
@@ -405,6 +408,32 @@ impl Peek {
             .collect();
         let channel_kind =
             cx.new(|cx| SelectState::new(kinds, Some(IndexPath::new(0)), window, cx));
+
+        let efforts: Vec<SharedString> = DeepSeekEffort::ALL
+            .iter()
+            .map(|effort| i18n::tr(effort.label_key()).into())
+            .collect();
+        let channel_effort =
+            cx.new(|cx| SelectState::new(efforts, Some(IndexPath::new(0)), window, cx));
+        cx.subscribe_in(
+            &channel_kind,
+            window,
+            |this, _, _: &SelectEvent<Vec<SharedString>>, window, cx| {
+                if this.draft_kind(cx) == ChannelKind::DeepSeek {
+                    for (field, value) in [
+                        (&this.channel_name, "DeepSeek"),
+                        (&this.channel_endpoint, "https://api.deepseek.com"),
+                        (&this.channel_model, "deepseek-flash"),
+                    ] {
+                        if field.read(cx).value().trim().is_empty() {
+                            field.update(cx, |state, cx| state.set_value(value, window, cx));
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        )
+        .detach();
 
         let (test_tx, test_rx) = std::sync::mpsc::channel();
         let (route_tx, route_rx) = std::sync::mpsc::channel();
@@ -505,6 +534,7 @@ impl Peek {
             channel_model,
             channel_key,
             channel_kind,
+            channel_effort,
             tasks,
             answer: String::new(),
             applied_height: None,
@@ -1201,6 +1231,17 @@ impl Peek {
         });
 
         self.dialog_measured = 0.;
+        let effort = existing
+            .as_ref()
+            .map(|c| c.reasoning_effort)
+            .unwrap_or_default();
+        let effort_index = DeepSeekEffort::ALL
+            .iter()
+            .position(|candidate| *candidate == effort)
+            .unwrap_or(0);
+        self.channel_effort.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::new(effort_index)), window, cx);
+        });
         let entity = cx.entity();
         let title = i18n::tr(if self.editing_channel.is_some() {
             "channels-edit-title"
@@ -1286,6 +1327,20 @@ impl Peek {
                                     i18n::tr("channels-model"),
                                     Input::new(&peek.channel_model).into_any_element(),
                                 ))
+                            })
+                            .when(kind == ChannelKind::DeepSeek, |this| {
+                                this.child(field(
+                                    i18n::tr("channels-reasoning-effort"),
+                                    Select::new(&peek.channel_effort)
+                                        .id("channel-effort-dialog")
+                                        .into_any_element(),
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(muted)
+                                        .child(i18n::tr("channels-reasoning-hint")),
+                                )
                             })
                             .when(kind.supports_decision(), |this| {
                                 this.child(
@@ -1388,6 +1443,16 @@ impl Peek {
             credential_id: String::new(),
             vision: false,
             max_output_tokens: 2048,
+            reasoning_effort: if kind == ChannelKind::DeepSeek {
+                self.channel_effort
+                    .read(cx)
+                    .selected_index(cx)
+                    .and_then(|index| DeepSeekEffort::ALL.get(index.row))
+                    .copied()
+                    .unwrap_or_default()
+            } else {
+                DeepSeekEffort::Off
+            },
         };
         match editing {
             Some(_) => {
