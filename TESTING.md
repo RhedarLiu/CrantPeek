@@ -110,3 +110,11 @@ Windows 窗口/选区的系统边界可参考 [SetWindowPos 文档](https://lear
 - 悬停显示任务、本地规则或决策渠道/模型、模型返回的置信度；低置信度/服务不可用时明确说明本地回退。本地规则不伪造置信度。
 - 追问保留原查询的自动决策任务和信息；新的查询更新，过期决策由入口代次丢弃。决策请求期间切换手动任务时，手动选择优先。
 - 回归测试覆盖模型成功、低置信度、失败回退及中英文详情；隔离预览可设置 `PEEK_DECISION_PREVIEW=1` 检查回答/对话卡片的图标位置，不调用真实服务。
+
+## Google 翻译系统代理回归
+
+2026-10-10：已开启系统 HTTP/HTTPS/SOCKS 代理时，Google 固定测试词直连超时，通过系统 HTTPS 代理返回 HTTP 200。原项目关闭 reqwest 默认功能后没有显式启用 `system-proxy`，导致 GUI 进程不使用已配置的系统代理。本轮显式开启 `system-proxy` 和 `socks`；同一请求客户端覆盖 macOS/Windows。
+
+可选联网测试：`cargo test -p peek-network google_uses_the_desktop_transport -- --ignored`。它仅发送固定测试词 hello；默认 CI 不运行，以免受 Google 网络可达性影响。无需额外填写 Google 地址或 key，不修改系统代理配置。
+
+本机 DeepLX/LLM 地址（localhost、IPv4/IPv6 回环）使用不经过代理的客户端，防止启用系统代理后本机服务也被转发。回归测试覆盖回环识别和基础翻译/LLM 请求。

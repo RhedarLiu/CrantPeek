@@ -234,20 +234,52 @@ pub fn decode_event(protocol: Protocol, data: &str) -> Result<Option<Event>, Err
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
+    local_http: reqwest::Client,
+}
+
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    peek_core::validate_endpoint(endpoint, true)
+        .ok()
+        .is_some_and(|url| {
+            url.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            })
+        })
 }
 impl Default for Client {
     fn default() -> Self {
-        Self {
-            http: reqwest::Client::builder()
+        let builder = || {
+            reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(120))
                 .redirect(reqwest::redirect::Policy::none())
+        };
+        Self {
+            // GUI launches do not inherit a terminal's HTTPS_PROXY. Cargo
+            // explicitly enables system-proxy and socks for macOS/Windows.
+            http: builder().build().expect("TLS client construction"),
+            // Keep local DeepLX/LLM services local even if the system proxy's
+            // bypass list does not include loopback addresses.
+            local_http: builder()
+                .no_proxy()
                 .build()
-                .expect("TLS client construction"),
+                .expect("local TLS client construction"),
         }
     }
 }
 impl Client {
+    fn transport(&self, endpoint: &str) -> &reqwest::Client {
+        if is_loopback_endpoint(endpoint) {
+            &self.local_http
+        } else {
+            &self.http
+        }
+    }
+
     /// Try services in priority order, falling back only before output begins.
     pub async fn stream_channels(
         &self,
@@ -383,7 +415,7 @@ impl Client {
     pub async fn probe(&self, provider: &Provider, key: &str) -> Result<(), Error> {
         let url = endpoint_url(provider)?;
         let body = probe_body(provider);
-        let mut request = self.http.post(url).json(&body);
+        let mut request = self.transport(&url).post(url).json(&body);
         if provider.protocol == Protocol::Anthropic {
             request = request
                 .header("x-api-key", key)
@@ -407,7 +439,7 @@ impl Client {
         cancel: CancellationToken,
     ) -> Result<(), Error> {
         let url = endpoint_url(provider)?;
-        let mut request = self.http.post(url).json(&body);
+        let mut request = self.transport(&url).post(url).json(&body);
         if provider.protocol == Protocol::Anthropic {
             request = request
                 .header("x-api-key", key)
@@ -518,7 +550,7 @@ impl Client {
             "source_lang": "auto",
             "target_lang": deeplx_language_code(target_language),
         });
-        let request = self.http.post(endpoint).json(&body);
+        let request = self.transport(endpoint).post(endpoint).json(&body);
         let request = if key.trim().is_empty() {
             request
         } else {
@@ -558,7 +590,7 @@ impl Client {
         cancel: CancellationToken,
     ) -> Result<Decision, Error> {
         peek_core::validate_endpoint(endpoint, true).map_err(|e| Error::Invalid(e.into()))?;
-        let response = tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), r = self.http.post(endpoint).bearer_auth(key).json(&body).send() => r? };
+        let response = tokio::select! { _ = cancel.cancelled() => return Err(Error::Cancelled), r = self.transport(endpoint).post(endpoint).bearer_auth(key).json(&body).send() => r? };
         if !response.status().is_success() {
             return Err(Error::Http(response.status().as_u16()));
         }
@@ -688,12 +720,47 @@ impl Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_explicit_loopback_services_bypass_the_system_proxy() {
+        for endpoint in [
+            "http://localhost:1188/translate",
+            "https://127.0.0.2/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            assert!(is_loopback_endpoint(endpoint));
+        }
+        for endpoint in [
+            "https://translate.googleapis.com/translate_a/single",
+            "https://localhost.example/v1",
+            "https://example.com/localhost",
+            "https://example.com/?host=127.0.0.1",
+        ] {
+            assert!(!is_loopback_endpoint(endpoint));
+        }
+    }
+
+    /// Opt-in smoke test through the same client as the desktop app.
+    /// Only a fixed public word is sent; no credentials or user input are read.
+    #[tokio::test]
+    #[ignore = "Requires access to Google through the configured network or system proxy"]
+    async fn google_uses_the_desktop_transport() {
+        let translated = Client::default()
+            .translate_google("hello", "Chinese", CancellationToken::new())
+            .await
+            .expect("Google translation request failed");
+        assert!(!translated.trim().is_empty());
+        assert_ne!(translated.trim().to_ascii_lowercase(), "hello");
+    }
+
     #[tokio::test]
     async fn transport_errors_do_not_expose_source_text_or_query_tokens() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        let error = reqwest::Client::new()
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
             .get(format!(
                 "http://{address}/translate?q=private-source&token=private-key"
             ))
