@@ -71,6 +71,8 @@ enum ChannelSlot {
 /// Panel geometry: compact until there is something to show, which keeps the
 /// default state a bare input box instead of a mostly empty card stack.
 const PANEL_WIDTH: f32 = 480.;
+/// Shared right-hand control column for settings rows.
+const SETTINGS_CONTROL_WIDTH: f32 = 260.;
 /// Panel height with the input box at its two-row minimum and the title row
 /// hidden: the padding and the input card, which carries its own controls.
 const PANEL_COMPACT_BASE: f32 = 78.;
@@ -1040,7 +1042,8 @@ impl Peek {
         height.clamp(220., 900.)
     }
 
-    /// A label and the dropdown that chooses for it.
+    /// Settings labels share the left column; controls have a fixed width
+    /// aligned with the right edge, independent of the translated label.
     fn picker_row(
         &self,
         label: String,
@@ -1054,12 +1057,18 @@ impl Peek {
             .gap(px(10.))
             .child(
                 div()
-                    .flex_none()
+                    .flex_1()
+                    .min_w(px(0.))
                     .font_family(set.latin)
                     .text_size(px(12.))
                     .child(label),
             )
-            .child(div().flex_1().child(picker))
+            .child(
+                div()
+                    .w(px(SETTINGS_CONTROL_WIDTH))
+                    .flex_none()
+                    .child(picker),
+            )
             .into_any_element()
     }
 
@@ -1080,6 +1089,7 @@ impl Peek {
             .map(|(_, name)| name.clone())
             .unwrap_or_else(|| i18n::tr("channels-none"));
         DropdownButton::new(id)
+            .w_full()
             .button(
                 // The dropdown draws its own chevron beside the button, so the
                 // button sizes to the row instead of claiming the full width.
