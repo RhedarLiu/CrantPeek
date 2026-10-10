@@ -336,6 +336,10 @@ struct Peek {
     settings_measured: f32,
     /// Actual input card height, including wrapped text and corner controls.
     input_measured: f32,
+    answer_measured: f32,
+    query_measured: f32,
+    follow_height: f32,
+    dialog_measured: f32,
     /// Vertical space currently added above the input by the toolbar.
     chrome_offset: f32,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
@@ -498,6 +502,10 @@ impl Peek {
             answer: String::new(),
             applied_height: None,
             input_measured: 0.,
+            answer_measured: 0.,
+            query_measured: 0.,
+            follow_height: 38.,
+            dialog_measured: 0.,
             chrome_offset: 0.,
             pinned: false,
             overlay: None,
@@ -768,33 +776,12 @@ impl Peek {
 
     /// Panel height while there is a result, following how much has streamed in.
     ///
-    /// Wrapping is estimated from the character count, so the panel grows with
-    /// the answer instead of opening at a fixed size and leaving it empty.
+    /// Uses the laid-out Markdown or conversation, including the input and
+    /// follow-up controls. Long answers scroll at the panel's reading limit.
     fn result_height(&self) -> f32 {
-        // Bubbles are narrower than the panel, so fewer characters fit a line.
-        let columns = 34.0;
-        let rows: f32 = if let Some(text) = self.plain_answer() {
-            text.lines()
-                .map(|line| (line.chars().count() as f32 / columns).ceil().max(1.0))
-                .sum()
-        } else {
-            self.bubbles
-                .iter()
-                .map(|(_, text)| text)
-                .chain(std::iter::once(&self.answer))
-                .flat_map(|text| text.lines())
-                .map(|line| (line.chars().count() as f32 / columns).ceil().max(1.0))
-                .sum::<f32>()
-                + self.bubbles.len() as f32 * 0.6
-        };
-        let dictionary = if self.dictionary_note.is_empty() {
-            0.0
-        } else {
-            96.0
-        };
-        let chrome =
-            (self.input_measured + 8.).max(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.0) + 96.0;
-        (chrome + dictionary + rows * 26.0).clamp(chrome, PANEL_RESULT_MAX_HEIGHT)
+        self.query_measured
+            .max(self.input_measured + 80.)
+            .clamp(180., PANEL_RESULT_MAX_HEIGHT)
     }
 
     /// The chosen task, or `None` for the automatic choice.
@@ -1162,6 +1149,7 @@ impl Peek {
             state.set_selected_index(Some(IndexPath::new(index)), window, cx);
         });
 
+        self.dialog_measured = 0.;
         let entity = cx.entity();
         let title = i18n::tr(if self.editing_channel.is_some() {
             "channels-edit-title"
@@ -1175,6 +1163,7 @@ impl Peek {
             let ok_entity = entity.clone();
             dialog
                 .title(title.clone())
+                .margin_top(px(16.))
                 .w(px(420.))
                 .content(move |content, _window, cx| {
                     let peek = content_entity.read(cx);
@@ -1190,6 +1179,24 @@ impl Peek {
                     };
                     content.child(
                         v_flex()
+                            .on_children_prepainted({
+                                let entity = content_entity.clone();
+                                move |bounds, _window, cx| {
+                                    let height =
+                                        bounds.iter().map(|b| b.size.height.as_f32()).sum::<f32>()
+                                            + 10. * bounds.len().saturating_sub(1) as f32
+                                            + 112.;
+                                    let entity = entity.clone();
+                                    cx.defer(move |cx| {
+                                        entity.update(cx, |this, cx| {
+                                            if (this.dialog_measured - height).abs() > 0.5 {
+                                                this.dialog_measured = height;
+                                                cx.notify();
+                                            }
+                                        })
+                                    });
+                                }
+                            })
                             .w_full()
                             .gap(px(10.))
                             .child(field(
@@ -1202,10 +1209,12 @@ impl Peek {
                                 i18n::tr("channels-name"),
                                 Input::new(&peek.channel_name).into_any_element(),
                             ))
-                            .child(field(
-                                i18n::tr("channels-endpoint"),
-                                Input::new(&peek.channel_endpoint).into_any_element(),
-                            ))
+                            .when(kind != ChannelKind::GoogleFree, |this| {
+                                this.child(field(
+                                    i18n::tr("channels-endpoint"),
+                                    Input::new(&peek.channel_endpoint).into_any_element(),
+                                ))
+                            })
                             .when(kind.needs_credential(), |this| {
                                 this.child(field(
                                     if peek.editing_channel.is_some() {
@@ -1275,7 +1284,11 @@ impl Peek {
     fn save_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let kind = self.draft_kind(cx);
         let name = self.channel_name.read(cx).value().trim().to_owned();
-        let endpoint = self.channel_endpoint.read(cx).value().trim().to_owned();
+        let endpoint = if kind == ChannelKind::GoogleFree {
+            "https://translate.googleapis.com/translate_a/single".to_owned()
+        } else {
+            self.channel_endpoint.read(cx).value().trim().to_owned()
+        };
         let model = self.channel_model.read(cx).value().trim().to_owned();
         let key = self.channel_key.read(cx).value().to_string();
         if name.is_empty() || endpoint.is_empty() {
@@ -1982,7 +1995,16 @@ impl Render for Peek {
         // Dialogs need enough viewport space for their fields and popup menus.
         // Closing the dialog restores the height of the underlying settings tab.
         if window.has_active_dialog(cx) {
-            height = height.max(620.);
+            let fallback = if self.draft_kind(cx) == ChannelKind::GoogleFree {
+                240.
+            } else {
+                450.
+            };
+            height = height.max(if self.dialog_measured > 0. {
+                self.dialog_measured + 32.
+            } else {
+                fallback
+            });
         }
         let chrome_offset = if !self.settings && chrome_visible() {
             PANEL_CHROME_HEIGHT
@@ -1998,6 +2020,12 @@ impl Render for Peek {
         if self.applied_height != Some(height) {
             self.applied_height = Some(height);
             window.resize(size(px(PANEL_WIDTH), px(height)));
+            // Resize notifications can arrive after this frame. Repaint the
+            // entire root at the new viewport size rather than reusing its cache.
+            let handle = window.window_handle();
+            cx.defer(move |cx| {
+                let _ = cx.update_window(handle, |_, window, _| window.refresh());
+            });
         }
         // Record the frame that is about to be shown, so the next pointer
         // sample uses the same origin as that frame.
@@ -2104,6 +2132,31 @@ impl Peek {
         }
     }
 
+    fn result_body(&self, children: Vec<AnyElement>, cx: &Context<Self>) -> AnyElement {
+        v_flex()
+            .on_children_prepainted({
+                let entity = cx.entity();
+                move |bounds, _window, cx| {
+                    let height = bounds.iter().map(|b| b.size.height.as_f32()).sum::<f32>()
+                        + 8. * bounds.len().saturating_sub(1) as f32;
+                    let entity = entity.clone();
+                    cx.defer(move |cx| {
+                        entity.update(cx, |this, cx| {
+                            if (this.answer_measured - height).abs() > 0.5 {
+                                this.answer_measured = height;
+                                cx.notify();
+                            }
+                        })
+                    });
+                }
+            })
+            .w_full()
+            .flex_none()
+            .gap(px(8.))
+            .children(children)
+            .into_any_element()
+    }
+
     fn query_page(&self, cx: &Context<Self>) -> AnyElement {
         let basic_choices: Vec<(String, String)> = self
             .config
@@ -2140,6 +2193,7 @@ impl Peek {
             };
             h_flex()
                 .w_full()
+                .flex_none()
                 .when(from_user, |this| this.justify_end())
                 .when(!from_user, |this| this.justify_start())
                 .child(
@@ -2156,6 +2210,46 @@ impl Peek {
         };
 
         v_flex()
+            .on_children_prepainted({
+                let entity = cx.entity();
+                let has_result = self.has_result();
+                let has_answer = self.conversation() || self.plain_answer().is_some();
+                let answer_index = (if self.dictionary_note.is_empty() {
+                    1
+                } else {
+                    2
+                }) + usize::from(chrome_visible());
+                let answer_height = self.answer_measured + 30.;
+                move |bounds, _window, cx| {
+                    if !has_result {
+                        return;
+                    }
+                    let height = bounds
+                        .iter()
+                        .enumerate()
+                        .map(|(index, b)| {
+                            if has_answer && index == answer_index {
+                                answer_height
+                            } else {
+                                b.size.height.as_f32()
+                            }
+                        })
+                        .sum::<f32>()
+                        + 8.
+                        + 5. * bounds.len().saturating_sub(1) as f32;
+                    let entity = entity.clone();
+                    cx.defer(move |cx| {
+                        entity.update(cx, |this, cx| {
+                            // The chrome is tracked separately by the render path.
+                            let height = height - this.chrome_offset;
+                            if (this.query_measured - height).abs() > 0.5 {
+                                this.query_measured = height;
+                                cx.notify();
+                            }
+                        })
+                    });
+                }
+            })
             .id("panel")
             .size_full()
             .bg(bg)
@@ -2398,6 +2492,7 @@ impl Peek {
                                 .border_color(border)
                                 .rounded(px(14.))
                                 .p(px(14.))
+                                .flex_none()
                                 .font_family(set.sc)
                                 .text_size(px(13.))
                                 .child(self.dictionary_note.clone()),
@@ -2411,20 +2506,32 @@ impl Peek {
                                 .id("answer")
                                 .w_full()
                                 .flex_1()
-                                .gap(px(8.))
+                                .border_1()
+                                .border_color(border)
+                                .rounded(px(14.))
+                                .p(px(14.))
                                 .overflow_y_scroll()
-                                .children(self.bubbles.iter().enumerate().map(
-                                    |(index, (from_user, text))| {
-                                        bubble(index, *from_user, text.clone())
+                                .child(self.result_body(
+                                    {
+                                        let mut children: Vec<AnyElement> = self
+                                            .bubbles
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(index, (from_user, text))| {
+                                                bubble(index, *from_user, text.clone())
+                                            })
+                                            .collect();
+                                        if !self.answer.is_empty() {
+                                            children.push(bubble(
+                                                self.bubbles.len(),
+                                                false,
+                                                self.answer.clone(),
+                                            ));
+                                        }
+                                        children
                                     },
-                                ))
-                                .when(!self.answer.is_empty(), |this| {
-                                    this.child(bubble(
-                                        self.bubbles.len(),
-                                        false,
-                                        self.answer.clone(),
-                                    ))
-                                }),
+                                    cx,
+                                )),
                         )
                     })
                     .when(!conversation && plain.is_some(), |this| {
@@ -2439,19 +2546,46 @@ impl Peek {
                                 .border_color(border)
                                 .rounded(px(14.))
                                 .p(px(14.))
-                                .child(TextView::markdown("plain-answer", text).text_size(px(13.))),
+                                .child(self.result_body(
+                                    vec![
+                                            TextView::markdown("plain-answer", text)
+                                                .text_size(px(13.))
+                                                .into_any_element(),
+                                        ],
+                                    cx,
+                                )),
                         )
                     })
                     // Follow-up turn, continuing the same conversation.
                     .child(
                         h_flex()
+                            .on_children_prepainted({
+                                let entity = cx.entity();
+                                move |bounds, _window, cx| {
+                                    let Some(input) = bounds.first() else {
+                                        return;
+                                    };
+                                    let height = input.size.height.as_f32();
+                                    let entity = entity.clone();
+                                    cx.defer(move |cx| {
+                                        entity.update(cx, |this, cx| {
+                                            if (this.follow_height - height).abs() > 0.5 {
+                                                this.follow_height = height;
+                                                cx.notify();
+                                            }
+                                        })
+                                    });
+                                }
+                            })
                             .w_full()
+                            .flex_none()
                             .items_end()
                             .gap(px(8.))
                             .child(Textarea::new(&self.follow_up).flex_1().rounded(px(10.)))
                             .when(self.busy && self.follow_up_turn, |this| {
                                 this.child(
                                     Button::new("follow-stop")
+                                        .h(px(self.follow_height))
                                         .icon(gpui_kit::assets::IconName::Square)
                                         .tooltip(i18n::tr("query-stop"))
                                         .on_click(cx.listener(|this, _event, _window, cx| {
@@ -2462,6 +2596,7 @@ impl Peek {
                             })
                             .child(
                                 Button::new("follow-send")
+                                    .h(px(self.follow_height))
                                     .icon(gpui_kit::assets::IconName::Send)
                                     .tooltip(i18n::tr("query-send"))
                                     .loading(self.busy && self.follow_up_turn)
@@ -3049,6 +3184,10 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                         (false, SAMPLE_ANSWER.to_string()),
                     ];
                     peek.dictionary_note = "stream   /striːm/\n流；溪流".to_string();
+                    if let Ok(answer) = std::env::var("PEEK_ANSWER") {
+                        peek.bubbles = vec![(true, "asdsad".into()), (false, answer)];
+                        peek.dictionary_note.clear();
+                    }
                     if std::env::var("PEEK_CHROME").is_ok() {
                         set_chrome_visible(true);
                     }
@@ -3082,7 +3221,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
 
     // A few turns: settings measures its children after the first paint and
     // resizes, and the next paint has to fill that new window.
-    for _ in 0..4 {
+    for _ in 0..8 {
         cx.run_until_parked();
     }
     // The channel dialog is opened by a click, so a preview opens it directly.
@@ -3092,7 +3231,17 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         && let Some(view) = published.borrow().clone()
     {
         cx.update_window(window.into(), |_, window, cx| {
-            view.update(cx, |peek, cx| peek.open_channel_dialog(None, window, cx));
+            view.update(cx, |peek, cx| {
+                peek.open_channel_dialog(None, window, cx);
+                if let Ok(kind) = std::env::var("PEEK_DIALOG_KIND")
+                    && let Some(index) = ChannelKind::ALL.iter().position(|k| k.label_key() == kind)
+                {
+                    peek.channel_kind.update(cx, |state, cx| {
+                        state.set_selected_index(Some(IndexPath::new(index)), window, cx);
+                    });
+                    cx.notify();
+                }
+            });
         })?;
         for _ in 0..4 {
             cx.run_until_parked();

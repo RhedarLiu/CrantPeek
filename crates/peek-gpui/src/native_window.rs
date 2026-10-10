@@ -54,6 +54,9 @@ pub fn move_up(window: &Window, distance: f32) {
             if native.is_null() {
                 return;
             }
+            // Keep AppKit from displaying the intermediate moved frame before
+            // GPUI has resized and painted the newly revealed toolbar.
+            let _: () = msg_send![native, disableScreenUpdatesUntilFlush];
             let frame: NSRect = msg_send![native, frame];
             let mut origin = frame.origin;
             origin.y += f64::from(distance);
