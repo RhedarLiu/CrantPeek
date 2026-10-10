@@ -58,8 +58,8 @@ const PANEL_WIDTH: f32 = 480.;
 const PANEL_COMPACT_BASE: f32 = 70.;
 /// The hover target that reveals the title row while it is hidden.
 const PANEL_CHROME_STRIP: f32 = 12.;
-/// What the revealed title row adds: the wider padding, the row and the gap.
-const PANEL_CHROME_HEIGHT: f32 = 70.;
+/// What the revealed title row adds: the extra top padding, the row and the gap.
+const PANEL_CHROME_HEIGHT: f32 = 53.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
@@ -1504,13 +1504,13 @@ impl Peek {
             .size_full()
             .bg(bg)
             .text_color(fg)
-            // Hidden, the panel hugs the input box; revealed, it needs room
-            // for the title row above it.
-            .relative()
-            .px(px(if chrome_visible() { 20. } else { 4. }))
-            .pt(px(if chrome_visible() { 20. } else { 4. }))
-            .pb(px(if chrome_visible() { 20. } else { 4. }))
-            .gap(px(if chrome_visible() { 10. } else { 0. }))
+            // The sides hug the input box whether or not the title row is
+            // showing; only the top needs room for it. The gap keeps the input,
+            // the answer and the follow-up row from touching.
+            .px(px(4.))
+            .pt(px(if chrome_visible() { 16. } else { 4. }))
+            .pb(px(4.))
+            .gap(px(5.))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
