@@ -25,7 +25,7 @@ use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectState};
@@ -263,6 +263,18 @@ impl Peek {
             cx.new(|cx| SelectState::new(kinds, Some(IndexPath::new(0)), window, cx));
 
         let (test_tx, test_rx) = std::sync::mpsc::channel();
+        // Enter is handled inside the input, so it is picked up from its event
+        // rather than from a key listener above it, which never sees the key.
+        cx.subscribe(&input, |this, _input, event: &InputEvent, cx| {
+            if let InputEvent::PressEnter { secondary, shift } = event
+                && !*secondary
+                && !*shift
+            {
+                this.submit(cx);
+                cx.notify();
+            }
+        })
+        .detach();
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
         for (input, value) in [
@@ -626,6 +638,14 @@ impl Peek {
 
     /// Reads the input box and starts a turn, clearing it only if one began.
     fn start_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.submit(cx);
+    }
+
+    /// Sends whatever is in the box.
+    ///
+    /// Split from the button handler because the input reports Enter through an
+    /// event, and that arrives without a Window.
+    fn submit(&mut self, cx: &mut Context<Self>) {
         // The text stays in the box: clearing it before there is a result takes
         // away what the user just wrote, and they may want to edit it.
         let text = self.input.read(cx).value().trim().to_owned();
@@ -1529,25 +1549,6 @@ impl Peek {
                 if !this.pinned && event.keystroke.key == "escape" {
                     native_window::hide(window);
                     return;
-                }
-                if event.keystroke.key == "enter" {
-                    let modifiers = &event.keystroke.modifiers;
-                    // A bare Enter asks the question; a modified one is the
-                    // caller asking for a new line.
-                    let newline =
-                        modifiers.platform || modifiers.alt || modifiers.shift || modifiers.control;
-                    if !newline {
-                        cx.stop_propagation();
-                        // The textarea sees the key first, so its newline is
-                        // taken back out.
-                        this.input.update(cx, |state, cx| {
-                            let text = state.value().trim_end_matches('\n').to_string();
-                            state.set_value(text, window, cx);
-                        });
-                        this.start_query(window, cx);
-                        cx.notify();
-                        return;
-                    }
                 }
                 // A keystroke means the user is working in the box, so the
                 // title row goes away again.
