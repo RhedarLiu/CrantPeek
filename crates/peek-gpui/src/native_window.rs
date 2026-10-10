@@ -15,7 +15,7 @@
 //! This project already carries per-platform code for the hotkey hook, selection
 //! reading and OCR, so a window-visibility shim is consistent with its shape.
 
-use gpui_kit::Window;
+use gpui_kit::{AppContext as _, Window};
 
 /// Shows and focuses the peek window.
 pub fn show(window: &mut Window) {
@@ -35,6 +35,76 @@ pub fn hide(window: &mut Window) {
 /// Whether the window is currently on screen, as the platform reports it.
 pub fn is_visible(window: &Window) -> bool {
     window.is_visible()
+}
+
+/// Applies a panel size and toolbar offset before publishing the new layout.
+/// The native operation runs outside an App borrow, so synchronous AppKit
+/// resize callbacks can update GPUI's viewport and Metal drawable normally.
+pub fn resize_panel(
+    window: &mut Window,
+    size: gpui_kit::Size<gpui_kit::Pixels>,
+    upward: f32,
+    cx: &mut gpui_kit::App,
+    on_resized: impl FnOnce(&mut Window, &mut gpui_kit::App) + 'static,
+) {
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        #[cfg(target_os = "macos")]
+        let native_resized = {
+            let view = cx
+                .update_window(handle, |_, window, _| macos_view(window))
+                .ok()
+                .flatten();
+            if let Some(view) = view {
+                // No await between retrieving the view and changing its frame:
+                // the window cannot be removed midway through this main-thread operation.
+                unsafe {
+                    use objc2::{msg_send, runtime::AnyObject};
+                    use objc2_foundation::{NSRect, NSSize};
+                    let view = view as *mut AnyObject;
+                    let native: *mut AnyObject = msg_send![view, window];
+                    if native.is_null() {
+                        false
+                    } else {
+                        let _: () = msg_send![native, disableScreenUpdatesUntilFlush];
+                        let mut frame: NSRect = msg_send![native, frame];
+                        let content = NSRect {
+                            origin: Default::default(),
+                            size: NSSize::new(
+                                f64::from(size.width.as_f32()),
+                                f64::from(size.height.as_f32()),
+                            ),
+                        };
+                        let new_frame: NSRect = msg_send![native, frameRectForContentRect: content];
+                        // AppKit's y-axis points upward. Preserve the old top
+                        // edge, then raise it by exactly the added toolbar height.
+                        frame.origin.y +=
+                            f64::from(upward) + frame.size.height - new_frame.size.height;
+                        frame.size = new_frame.size;
+                        // One frame change, rather than move now / resize on
+                        // the next executor turn. GPUI's view callback updates
+                        // the drawable size as part of this operation.
+                        let _: () = msg_send![native, setFrame: frame, display: false];
+                        true
+                    }
+                }
+            } else {
+                false
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let native_resized = false;
+        let _ = cx.update_window(handle, |_, window, cx| {
+            if !native_resized {
+                move_up(window, upward);
+                window.resize(size);
+            }
+            // Also covers the headless platform, which emits no resize callback.
+            window.bounds_changed(cx);
+            on_resized(window, cx);
+        });
+    })
+    .detach();
 }
 
 /// Moves the window upward without changing the renderer's content size.

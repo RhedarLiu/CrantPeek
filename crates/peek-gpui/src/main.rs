@@ -342,6 +342,7 @@ struct Peek {
     dialog_measured: f32,
     /// Vertical space currently added above the input by the toolbar.
     chrome_offset: f32,
+    geometry_pending: bool,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
@@ -507,6 +508,7 @@ impl Peek {
             follow_height: 38.,
             dialog_measured: 0.,
             chrome_offset: 0.,
+            geometry_pending: false,
             pinned: false,
             overlay: None,
             pending_input: None,
@@ -741,6 +743,41 @@ impl Peek {
                 .ok();
             })
             .detach();
+        }
+
+        // Exercise native toolbar transitions without submitting any query.
+        if std::env::var("PEEK_CHROME_SELFTEST").is_ok() {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                cx.update_window(panel_handle, |_, window, _| show_panel(window)).ok();
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let mut anchor: Option<f32> = None;
+                let mut passed = true;
+                for open in [false, true, false, true, false, true, false] {
+                    this.update(cx, |_, cx| {
+                        set_chrome_visible(open);
+                        cx.notify();
+                    }).ok();
+                    cx.background_executor().timer(Duration::from_millis(250)).await;
+                    let offset = this.update(cx, |peek, _| peek.chrome_offset).unwrap_or_default();
+                    if let Ok((y, frame_height, viewport_height)) = cx.update_window(panel_handle, |_, window, _| {
+                        (window.bounds().origin.y.as_f32() + offset,
+                         window.bounds().size.height.as_f32(),
+                         window.viewport_size().height.as_f32())
+                    }) {
+                        let baseline = *anchor.get_or_insert(y);
+                        let stable = (y - baseline).abs() < 0.5
+                            && (frame_height - viewport_height).abs() < 0.5
+                            && (offset - if open { PANEL_CHROME_HEIGHT } else { 0. }).abs() < 0.5;
+                        passed &= stable;
+                        println!("[chrome-test] open={open} input_y={y:.1} frame={frame_height:.1} viewport={viewport_height:.1} stable={stable}");
+                    } else {
+                        passed = false;
+                    }
+                }
+                println!("[chrome-test] passed={passed}");
+                cx.update(quit_now);
+            }).detach();
         }
 
         this
@@ -2011,32 +2048,32 @@ impl Render for Peek {
         } else {
             0.
         };
-        if self.chrome_offset != chrome_offset {
-            native_window::move_up(window, chrome_offset - self.chrome_offset);
-            self.chrome_offset = chrome_offset;
-        }
-        // GPUI owns the window size. A second native frame change leaves a
-        // strip the renderer never paints, which shows up black under the panel.
-        if self.applied_height != Some(height) {
-            self.applied_height = Some(height);
-            window.resize(size(px(PANEL_WIDTH), px(height)));
-            // Resize notifications can arrive after this frame. Repaint the
-            // entire root at the new viewport size rather than reusing its cache.
-            let handle = window.window_handle();
-            cx.defer(move |cx| {
-                let _ = cx.update_window(handle, |_, window, cx| {
-                    if std::env::var("PEEK_RENDER").is_ok() {
-                        // The headless platform changes its bounds without a
-                        // resize callback; mirror the callback used by AppKit.
-                        window.bounds_changed(cx);
-                    }
+        // Keep the currently painted layout until the native frame has moved
+        // and resized. Rendering the new toolbar into the old viewport produces
+        // a visible intermediate frame, even with AppKit updates suppressed.
+        if !self.geometry_pending
+            && (self.applied_height != Some(height) || self.chrome_offset != chrome_offset)
+        {
+            self.geometry_pending = true;
+            let entity = cx.entity();
+            native_window::resize_panel(
+                window,
+                size(px(PANEL_WIDTH), px(height)),
+                chrome_offset - self.chrome_offset,
+                cx,
+                move |window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.applied_height = Some(height);
+                        this.chrome_offset = chrome_offset;
+                        this.geometry_pending = false;
+                        cx.notify();
+                    });
                     window.refresh();
-                });
-            });
+                },
+            );
         }
-        // Record the frame that is about to be shown, so the next pointer
-        // sample uses the same origin as that frame.
-        set_chrome_in_frame(!self.settings && chrome_visible());
+        // The pointer zone follows the frame actually painted, not the request.
+        set_chrome_in_frame(!self.settings && self.chrome_offset > 0.);
         if self.settings {
             return self.settings_page(cx).into_any_element();
         }
@@ -2225,7 +2262,7 @@ impl Peek {
                     1
                 } else {
                     2
-                }) + usize::from(chrome_visible());
+                }) + usize::from(self.chrome_offset > 0.);
                 let answer_height = self.answer_measured + 30.;
                 move |bounds, _window, cx| {
                     if !has_result {
@@ -2307,7 +2344,7 @@ impl Peek {
                     cx.notify();
                 }
             }))
-            .when(chrome_visible(), |this| {
+            .when(self.chrome_offset > 0., |this| {
                 this.child(
                     h_flex()
                         .id("chrome-row")
@@ -3036,7 +3073,8 @@ impl Peek {
                                 .child(
                                     Button::new(SharedString::from(format!("open-{key}")))
                                         .icon(IconName::ExternalLink)
-                                        .label(i18n::tr("settings-permission-open"))
+                                        .tooltip(i18n::tr("settings-permission-open"))
+                                        .accessibility_label(i18n::tr("settings-permission-open"))
                                         .on_click(cx.listener({
                                             let key = *key;
                                             move |this, _event, _window, cx| {
