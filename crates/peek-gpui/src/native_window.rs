@@ -99,34 +99,6 @@ pub fn make_capture_overlay(window: &mut Window) {
     let _ = window;
 }
 
-/// Lets the window show through where nothing is painted.
-///
-/// The panel keeps a zone above the input box as a hover target. Painted with
-/// the window's own background, that zone reads as an empty band, so the window
-/// is see-through and each card paints its own background instead.
-#[cfg(target_os = "macos")]
-pub fn make_transparent(window: &mut Window) {
-    let Some(ns_view) = macos_view(window) else {
-        return;
-    };
-    unsafe {
-        use objc2::msg_send;
-        use objc2::runtime::AnyObject;
-        let view = ns_view as *mut AnyObject;
-        let ns_window: *mut AnyObject = msg_send![view, window];
-        if ns_window.is_null() {
-            return;
-        }
-        let _: () = msg_send![ns_window, setOpaque: false];
-        let clear: *mut AnyObject = msg_send![objc2::class!(NSColor), clearColor];
-        let _: () = msg_send![ns_window, setBackgroundColor: clear];
-    }
-}
-
-/// Does nothing where the platform has no such notion.
-#[cfg(not(target_os = "macos"))]
-pub fn make_transparent(_window: &mut Window) {}
-
 /// Hides the close/minimise/zoom buttons.
 ///
 /// The panel is a titled window, so macOS draws traffic lights in its corner.

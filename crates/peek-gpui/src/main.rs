@@ -237,7 +237,10 @@ impl Peek {
         // the state is read back from the window itself.
         native_window::hide_window_buttons(window);
         // The hover zone above the input box must not read as an empty band.
-        native_window::make_transparent(window);
+        // This is the switch that matters: the renderer clears the surface with
+        // this appearance, so clearing the NSWindow's own background was not
+        // enough - it was painted over every frame.
+        window.set_background_appearance(gpui_kit::WindowBackgroundAppearance::Transparent);
         let activation = cx.observe_window_activation(window, |this, window, _cx| {
             // A pinned window behaves like a normal window and stays put.
             if !this.pinned && !window.is_window_active() && !shown_recently() {
