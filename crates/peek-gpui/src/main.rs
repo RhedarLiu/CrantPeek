@@ -236,6 +236,8 @@ impl Peek {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
         native_window::hide_window_buttons(window);
+        // The hover zone above the input box must not read as an empty band.
+        native_window::make_transparent(window);
         let activation = cx.observe_window_activation(window, |this, window, _cx| {
             // A pinned window behaves like a normal window and stays put.
             if !this.pinned && !window.is_window_active() && !shown_recently() {
@@ -1531,7 +1533,8 @@ impl Peek {
 
         v_flex()
             .size_full()
-            .bg(bg)
+            // No background: the window is see-through, so the hover zone above
+            // the input box is invisible and each card paints itself.
             .text_color(fg)
             // The sides hug the input box whether or not the title row is
             // showing; only the top needs room for it. The gap keeps the input,
@@ -1714,6 +1717,7 @@ impl Peek {
                     // fixed height here let it paint over the row below, and
                     // clipping keeps that from ever happening again.
                     .overflow_hidden()
+                    .bg(bg)
                     .border_1()
                     .border_color(border)
                     .rounded(px(16.))
@@ -1766,6 +1770,7 @@ impl Peek {
                         this.child(
                             div()
                                 .w_full()
+                                .bg(bg)
                                 .border_1()
                                 .border_color(border)
                                 .rounded(px(14.))
@@ -1781,6 +1786,7 @@ impl Peek {
                             .id("answer")
                             .w_full()
                             .flex_1()
+                            .bg(bg)
                             .border_1()
                             .border_color(border)
                             .rounded(px(16.))
