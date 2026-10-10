@@ -536,7 +536,7 @@ mod win {
     }
 }
 #[cfg(windows)]
-pub use win::listen;
+pub use win::{listen, read};
 
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn listen(_interval: u64, _tx: std::sync::mpsc::Sender<crate::action::Action>, _wake: Wake) {}
