@@ -1660,9 +1660,21 @@ impl Peek {
         let muted = theme.muted_foreground;
 
         v_flex()
+            .id("panel")
             .size_full()
             .bg(bg)
             .text_color(fg)
+            // The whole panel is the hover area, not the row: revealing the row
+            // moves the window, and a transition caused by that layout change
+            // reads as the pointer leaving the row, which made the two flash.
+            .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
+                let preview = std::env::var("PEEK_RENDER").is_ok();
+                if !*hovered && !preview && chrome_visible() {
+                    set_chrome_visible(false);
+                    STRIP_ARMED.with(|cell| cell.set(false));
+                    cx.notify();
+                }
+            }))
             // The sides hug the input box whether or not the title row is
             // showing; only the top needs room for it. The gap keeps the input,
             // the answer and the follow-up row from touching.
@@ -1730,16 +1742,6 @@ impl Peek {
                         // Inset so the title lines up with the text inside the
                         // input box, whose own padding starts at the same place.
                         .px(px(14.))
-                        // The row is only there while the pointer is on it.
-                        // Leaving downwards lands past the strip, so the two do
-                        // not take turns reappearing.
-                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
-                            if !*hovered && chrome_visible() {
-                                set_chrome_visible(false);
-                                STRIP_ARMED.with(|cell| cell.set(false));
-                                cx.notify();
-                            }
-                        }))
                         .child(
                             // A tag rather than plain text, so the title and
                             // the buttons look like one row of controls.
