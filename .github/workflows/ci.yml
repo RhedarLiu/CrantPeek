@@ -9,8 +9,6 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,7 +28,14 @@ jobs:
           ref: bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b
           path: local-assets/ecdict
       - run: cargo run --release -p peek-dict --bin build-dict -- local-assets/ecdict/ecdict.csv local-assets/ecdict.pkd
-      - run: cargo build --workspace --release
+      - name: Build macOS release
+        if: runner.os == 'macOS'
+        run: cargo build --workspace --release
+      - name: Build Windows release with static runtime
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+        run: cargo build --release -p peek-gpui --target x86_64-pc-windows-msvc
       - name: Package macOS app
         if: runner.os == 'macOS'
         run: bash tools/package-macos.sh

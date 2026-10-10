@@ -21,11 +21,11 @@ try {
         $previousRustFlags = $env:RUSTFLAGS
         try {
             $env:RUSTFLAGS = "$previousRustFlags -C target-feature=+crt-static"
-            cargo build --release -p peek-gpui
+            cargo build --release -p peek-gpui --target x86_64-pc-windows-msvc
         } finally { $env:RUSTFLAGS = $previousRustFlags }
         if ($LASTEXITCODE -ne 0) { throw 'Release build failed' }
     }
-    $executable = Join-Path $root 'target/release/peek-gpui.exe'
+    $executable = Join-Path $root 'target/x86_64-pc-windows-msvc/release/peek-gpui.exe'
     if (-not (Test-Path $executable)) { throw 'Release executable is missing' }
     $destination = Join-Path $root 'dist/Crant-Peek-Windows'
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
