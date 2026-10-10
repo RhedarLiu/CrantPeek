@@ -1592,10 +1592,9 @@ impl Peek {
                 {
                     Ok(decision) => (
                         false,
-                        format!(
-                            "{} · {}",
-                            locale.text("channels-test-ok"),
-                            locale.task(decision.task)
+                        locale.format(
+                            "channels-decision-result",
+                            &[("task", &locale.task(decision.task))],
                         ),
                     ),
                     Err(err) => (true, told(&url, &err)),
