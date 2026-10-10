@@ -65,7 +65,7 @@ enum DecisionField {
 const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum and the title row
 /// hidden: the padding and the input card, which carries its own controls.
-const PANEL_COMPACT_BASE: f32 = 72.;
+const PANEL_COMPACT_BASE: f32 = 70.;
 /// The hover target above the input box while the row is hidden.
 const PANEL_CHROME_STRIP: f32 = 16.;
 /// The revealed row's own height, which reaches past its visible content into
@@ -1680,7 +1680,7 @@ impl Peek {
             // the answer and the follow-up row from touching.
             .px(px(4.))
             .pt(px(if chrome_visible() { 5. } else { 4. }))
-            .pb(px(6.))
+            .pb(px(4.))
             .gap(px(5.))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
