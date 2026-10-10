@@ -158,6 +158,7 @@ channel-kind-chat = OpenAI Chat Completions
 channel-kind-responses = OpenAI Responses
 channel-kind-anthropic = Anthropic Messages
 channel-kind-deeplx = DeepLX
+channel-kind-google = Google 翻译（免费）
 channel-kind-decision = 决策模型
 channels-add-title = 添加渠道
 channels-edit-title = 编辑渠道

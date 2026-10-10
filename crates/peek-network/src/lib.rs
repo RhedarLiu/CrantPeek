@@ -658,7 +658,6 @@ mod tests {
         }
     }
     #[test]
-    #[test]
     fn probe_uses_each_protocol_shape() {
         for (protocol, field) in [
             (Protocol::ChatCompletions, "messages"),

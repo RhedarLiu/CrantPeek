@@ -37,6 +37,57 @@ pub fn is_visible(window: &Window) -> bool {
     window.is_visible()
 }
 
+/// Moves the window upward without changing the renderer's content size.
+/// GPUI's resize preserves the macOS top edge; moving that edge by the toolbar
+/// height keeps the input at the same screen position when the row appears.
+pub fn move_up(window: &Window, distance: f32) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(view) = macos_view(window) else {
+            return;
+        };
+        unsafe {
+            use objc2::{msg_send, runtime::AnyObject};
+            use objc2_foundation::NSRect;
+            let view = view as *mut AnyObject;
+            let native: *mut AnyObject = msg_send![view, window];
+            if native.is_null() {
+                return;
+            }
+            let frame: NSRect = msg_send![native, frame];
+            let mut origin = frame.origin;
+            origin.y += f64::from(distance);
+            let _: () = msg_send![native, setFrameOrigin: origin];
+        }
+    }
+    #[cfg(windows)]
+    if let Some(handle) = hwnd(window) {
+        use windows::Win32::{
+            Foundation::{HWND, RECT},
+            UI::WindowsAndMessaging::{
+                GetWindowRect, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+            },
+        };
+        unsafe {
+            let handle = HWND(handle);
+            let mut rect = RECT::default();
+            if GetWindowRect(handle, &mut rect).is_ok() {
+                let _ = SetWindowPos(
+                    handle,
+                    None,
+                    rect.left,
+                    rect.top - (distance * window.scale_factor()).round() as i32,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = (window, distance);
+}
+
 #[cfg(target_os = "macos")]
 fn macos_view(window: &Window) -> Option<*mut std::ffi::c_void> {
     use raw_window_handle::RawWindowHandle;

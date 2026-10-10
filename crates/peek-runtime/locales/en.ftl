@@ -137,6 +137,7 @@ channel-kind-chat = OpenAI Chat Completions
 channel-kind-responses = OpenAI Responses
 channel-kind-anthropic = Anthropic Messages
 channel-kind-deeplx = DeepLX
+channel-kind-google = Google Translate (free)
 channel-kind-decision = Decision model
 channels-add-title = Add a channel
 channels-edit-title = Edit channel

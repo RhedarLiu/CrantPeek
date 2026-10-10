@@ -73,7 +73,7 @@ enum ChannelSlot {
 const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum and the title row
 /// hidden: the padding and the input card, which carries its own controls.
-const PANEL_COMPACT_BASE: f32 = 70.;
+const PANEL_COMPACT_BASE: f32 = 78.;
 /// What the revealed title row adds: the extra top padding, the row and the gap
 /// that follows it, less the padding the collapsed state already has.
 const PANEL_CHROME_HEIGHT: f32 = 40.;
@@ -334,6 +334,10 @@ struct Peek {
     settings_tab: usize,
     /// Laid-out height of the settings page, measured from its children.
     settings_measured: f32,
+    /// Actual input card height, including wrapped text and corner controls.
+    input_measured: f32,
+    /// Vertical space currently added above the input by the toolbar.
+    chrome_offset: f32,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
@@ -493,6 +497,8 @@ impl Peek {
             tasks,
             answer: String::new(),
             applied_height: None,
+            input_measured: 0.,
+            chrome_offset: 0.,
             pinned: false,
             overlay: None,
             pending_input: None,
@@ -786,7 +792,8 @@ impl Peek {
         } else {
             96.0
         };
-        let chrome = PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.0 + 96.0;
+        let chrome =
+            (self.input_measured + 8.).max(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.0) + 96.0;
         (chrome + dictionary + rows * 26.0).clamp(chrome, PANEL_RESULT_MAX_HEIGHT)
     }
 
@@ -841,8 +848,7 @@ impl Peek {
                 role: "assistant".into(),
                 content: self.answer.clone(),
             });
-            self.bubbles
-                .push((false, std::mem::take(&mut self.answer)));
+            self.bubbles.push((false, std::mem::take(&mut self.answer)));
             peek_core::bound_history(&mut self.messages);
             return;
         }
@@ -1889,8 +1895,7 @@ impl Peek {
                             role: "assistant".into(),
                             content: self.answer.clone(),
                         });
-                        self.bubbles
-                            .push((false, std::mem::take(&mut self.answer)));
+                        self.bubbles.push((false, std::mem::take(&mut self.answer)));
                         peek_core::bound_history(&mut self.messages);
                     }
                     self.status.clear();
@@ -1957,7 +1962,7 @@ impl Render for Peek {
             } else {
                 0.
             };
-            PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows + chrome
+            (self.input_measured + 8.).max(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows) + chrome
         };
         // The task list hangs down from the button. A compact panel ends at
         // that button, so the window has to grow while the list is open.
@@ -1967,10 +1972,26 @@ impl Render for Peek {
             } else {
                 0.
             };
-            let needed = PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2. + chrome + 240.;
+            let needed = (self.input_measured + 8.).max(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.)
+                + chrome
+                + 240.;
             if height < needed {
                 height = needed;
             }
+        }
+        // Dialogs need enough viewport space for their fields and popup menus.
+        // Closing the dialog restores the height of the underlying settings tab.
+        if window.has_active_dialog(cx) {
+            height = height.max(620.);
+        }
+        let chrome_offset = if !self.settings && chrome_visible() {
+            PANEL_CHROME_HEIGHT
+        } else {
+            0.
+        };
+        if self.chrome_offset != chrome_offset {
+            native_window::move_up(window, chrome_offset - self.chrome_offset);
+            self.chrome_offset = chrome_offset;
         }
         // GPUI owns the window size. A second native frame change leaves a
         // strip the renderer never paints, which shows up black under the panel.
@@ -2166,7 +2187,7 @@ impl Peek {
             // showing; only the top needs room for it. The gap keeps the input,
             // the answer and the follow-up row from touching.
             .px(px(4.))
-            .pt(px(if chrome_visible() { 5. } else { 4. }))
+            .pt(px(4.))
             .pb(px(4.))
             .gap(px(5.))
             // Esc hides the panel — "appear when needed, gone when done". A
@@ -2179,11 +2200,7 @@ impl Peek {
                 // A keystroke in the query box dismisses the title row. Doing
                 // that while the follow-up is focused resizes the window under
                 // the caret and macOS drops the Chinese input session.
-                let follow_up_focused = this
-                    .follow_up
-                    .read(cx)
-                    .focus_handle(cx)
-                    .is_focused(window);
+                let follow_up_focused = this.follow_up.read(cx).focus_handle(cx).is_focused(window);
                 if !this.pinned && chrome_visible() && !follow_up_focused {
                     set_chrome_visible(false);
                     cx.notify();
@@ -2193,6 +2210,8 @@ impl Peek {
                 this.child(
                     h_flex()
                         .id("chrome-row")
+                        .h(px(PANEL_CHROME_HEIGHT - 5.))
+                        .flex_none()
                         .w_full()
                         .items_center()
                         .gap(px(10.))
@@ -2295,7 +2314,27 @@ impl Peek {
             // the panel is one box and nothing else until there is a result.
             .child(
                 div()
+                    .on_children_prepainted({
+                        let entity = cx.entity();
+                        move |bounds, _window, cx| {
+                            let Some(text) = bounds.first() else {
+                                return;
+                            };
+                            // Card padding (14 per edge) and its border (1 per edge).
+                            let needed = text.size.height.as_f32() + 30.;
+                            let entity = entity.clone();
+                            cx.defer(move |cx| {
+                                entity.update(cx, |this, cx| {
+                                    if (this.input_measured - needed).abs() > 0.5 {
+                                        this.input_measured = needed;
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                        }
+                    })
                     .relative()
+                    .flex_none()
                     .w_full()
                     .border_1()
                     .border_color(border)
@@ -2400,9 +2439,7 @@ impl Peek {
                                 .border_color(border)
                                 .rounded(px(14.))
                                 .p(px(14.))
-                                .child(
-                                    TextView::markdown("plain-answer", text).text_size(px(13.)),
-                                ),
+                                .child(TextView::markdown("plain-answer", text).text_size(px(13.))),
                         )
                     })
                     // Follow-up turn, continuing the same conversation.
@@ -2411,11 +2448,7 @@ impl Peek {
                             .w_full()
                             .items_end()
                             .gap(px(8.))
-                            .child(
-                                Textarea::new(&self.follow_up)
-                                    .flex_1()
-                                    .rounded(px(10.)),
-                            )
+                            .child(Textarea::new(&self.follow_up).flex_1().rounded(px(10.)))
                             .when(self.busy && self.follow_up_turn, |this| {
                                 this.child(
                                     Button::new("follow-stop")
@@ -2555,25 +2588,25 @@ impl Peek {
             )
             .child(
                 div().w_full().flex_none().child(
-                TabBar::new("settings_tabs")
-                    // The default filled-tab strip reads as a different design
-                    // language; an underline row matches a flat settings page.
-                    .underline()
-                    .children([
-                        Tab::new().label(i18n::tr("settings-tab-appearance")),
-                        Tab::new().label(i18n::tr("settings-tab-shortcuts")),
-                        Tab::new().label(i18n::tr("settings-tab-channels")),
-                        Tab::new().label(i18n::tr("settings-tab-translation")),
-                        Tab::new().label(i18n::tr("settings-tab-permissions")),
-                    ])
-                    .selected_index(self.settings_tab)
-                    .on_click(cx.listener(|this, index: &usize, _window, cx| {
-                        this.settings_tab = *index;
-                        if *index == 4 {
-                            this.permissions = peek_runtime::permissions::status();
-                        }
-                        cx.notify();
-                    })),
+                    TabBar::new("settings_tabs")
+                        // The default filled-tab strip reads as a different design
+                        // language; an underline row matches a flat settings page.
+                        .underline()
+                        .children([
+                            Tab::new().label(i18n::tr("settings-tab-appearance")),
+                            Tab::new().label(i18n::tr("settings-tab-shortcuts")),
+                            Tab::new().label(i18n::tr("settings-tab-channels")),
+                            Tab::new().label(i18n::tr("settings-tab-translation")),
+                            Tab::new().label(i18n::tr("settings-tab-permissions")),
+                        ])
+                        .selected_index(self.settings_tab)
+                        .on_click(cx.listener(|this, index: &usize, _window, cx| {
+                            this.settings_tab = *index;
+                            if *index == 4 {
+                                this.permissions = peek_runtime::permissions::status();
+                            }
+                            cx.notify();
+                        })),
                 ),
             )
             .when(self.settings_tab == 0, |this| {
@@ -2763,19 +2796,17 @@ impl Peek {
                                 ),
                         )
                         .child(self.section_label(i18n::tr("channels-usage"), set, muted))
-                        .child(
-                            self.picker_row(
-                                i18n::tr("channels-basic"),
-                                self.channel_picker(
-                                    "basic_picker",
-                                    basic_channels.clone(),
-                                    basic_active.clone(),
-                                    ChannelSlot::Basic,
-                                    cx,
-                                ),
-                                set,
+                        .child(self.picker_row(
+                            i18n::tr("channels-basic"),
+                            self.channel_picker(
+                                "basic_picker",
+                                basic_channels.clone(),
+                                basic_active.clone(),
+                                ChannelSlot::Basic,
+                                cx,
                             ),
-                        )
+                            set,
+                        ))
                         .child(self.picker_row(
                             i18n::tr("channels-ai"),
                             self.channel_picker(
@@ -3063,7 +3094,9 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         cx.update_window(window.into(), |_, window, cx| {
             view.update(cx, |peek, cx| peek.open_channel_dialog(None, window, cx));
         })?;
-        cx.run_until_parked();
+        for _ in 0..4 {
+            cx.run_until_parked();
+        }
     }
     // A notification needs the window's root, which the component layer
     // registers on the first frame, so the push has to wait for one. This is
@@ -3494,7 +3527,9 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod chrome_zone_tests {
-    use super::{INPUT_CORNER_HEIGHT, INPUT_CORNER_SLOP, PANEL_CHROME_HEIGHT, chrome_zone_contains};
+    use super::{
+        INPUT_CORNER_HEIGHT, INPUT_CORNER_SLOP, PANEL_CHROME_HEIGHT, chrome_zone_contains,
+    };
 
     #[test]
     fn the_corner_does_not_grow_when_the_panel_does() {

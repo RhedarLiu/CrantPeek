@@ -190,6 +190,7 @@ mod tests {
                     continue;
                 }
                 if [
+                    "channel-kind-",
                     "query-",
                     "header-",
                     "settings-",
