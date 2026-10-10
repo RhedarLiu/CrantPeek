@@ -1587,11 +1587,13 @@ impl Peek {
                         .child(
                             // Which channel answers a plain translation. Only
                             // channels that can translate are listed, and the same
-                            // choice can be made in settings.
+                            // choice can be made in settings. The icon says
+                            // "channel", not "translate": the input box already
+                            // uses the language icon for the task picker.
                             DropdownButton::new("basic-channel")
                                 .button(
                                     Button::new("basic-channel-button")
-                                        .icon(IconName::Languages)
+                                        .icon(IconName::Cable)
                                         .tooltip(i18n::tr("channels-basic-pick")),
                                 )
                                 .dropdown_menu(move |mut menu, _window, _cx| {
