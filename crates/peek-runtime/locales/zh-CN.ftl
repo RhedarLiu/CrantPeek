@@ -32,6 +32,8 @@ query-empty-hint = 选中文字后双击 Ctrl，或在上方输入内容。{ $su
 query-section-answer = AI 回答
 
 ## 任务
+task-auto = 自动
+task-auto-tooltip = 根据内容自动判断类型
 task-translate = 翻译
 task-define = 查词
 task-explain-code = 代码解释
@@ -127,6 +129,8 @@ error-config-decision-timeout = 决策超时需在 100–10000 ms
 error-config-decision-threshold = 决策阈值无效
 
 ## 设置
+settings-decision = 决策模型
+settings-decision-enabled = 启用（自动判断类型，判断不了就用本地规则）
 settings-tab-shortcuts = 快捷键
 settings-shortcuts-hint = 格式如 Super+Shift+A（Mac 上 Super 即 Command）。修改后需重启生效。
 settings-tab-appearance = 外观

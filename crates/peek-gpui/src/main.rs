@@ -52,6 +52,14 @@ use tokio_util::sync::CancellationToken;
 
 /// Poll interval for the tray/hotkey channels. Both crates deliver events on
 /// their own channels rather than through GPUI, so they are drained on a timer.
+/// Which part of the decision service an input edits.
+#[derive(Clone, Copy)]
+enum DecisionField {
+    Endpoint,
+    Model,
+    Key,
+}
+
 /// Panel geometry: compact until there is something to show, which keeps the
 /// default state a bare input box instead of a mostly empty card stack.
 const PANEL_WIDTH: f32 = 480.;
@@ -70,9 +78,9 @@ const PANEL_INPUT_ROW: f32 = 22.;
 /// reading window; the card scrolls beyond it.
 const PANEL_RESULT_MAX_HEIGHT: f32 = 620.;
 /// Chrome the settings page always shows: header, tab row, padding and gaps.
-const SETTINGS_CHROME: f32 = 168.;
-/// One row of the channel list, or a channel button in the used-for pickers.
-const SETTINGS_ROW: f32 = 42.;
+const SETTINGS_CHROME: f32 = 130.;
+/// One row of the channel list, the add button, or a picker row.
+const SETTINGS_ROW: f32 = 46.;
 
 const POLL: Duration = Duration::from_millis(60);
 /// How often streamed answer text is moved from the network channel into the view.
@@ -156,12 +164,16 @@ const TASK_ORDER: &[Task] = &[
     Task::ExplainError,
     Task::Explain,
 ];
+/// The picker's last entry: let the content decide. Kept apart from `Task`
+/// because it is a choice about the choice, not a task.
+const TASK_AUTO_INDEX: usize = TASK_ORDER.len();
 const TASK_KEYS: &[&str] = &[
     "task-translate",
     "task-define",
     "task-explain-code",
     "task-explain-error",
     "task-explain",
+    "task-auto",
 ];
 
 struct Peek {
@@ -204,6 +216,10 @@ struct Peek {
     /// Sends test results from the network task to the poll loop: the channel
     /// id, whether it failed, and the message to show.
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
+    /// Editable decision-service settings, persisted as they are typed.
+    decision_endpoint: Entity<InputState>,
+    decision_model: Entity<InputState>,
+    decision_key: Entity<InputState>,
     /// Editable global hotkeys, persisted as they are typed.
     blank_hotkey: Entity<InputState>,
     screenshot_hotkey: Entity<InputState>,
@@ -253,6 +269,9 @@ impl Peek {
         let follow_up = cx.new(|cx| {
             InputState::new(window, cx).placeholder(i18n::tr("query-followup-placeholder"))
         });
+        let decision_endpoint = cx.new(|cx| InputState::new(window, cx));
+        let decision_model = cx.new(|cx| InputState::new(window, cx));
+        let decision_key = cx.new(|cx| InputState::new(window, cx).masked(true));
         let blank_hotkey = cx.new(|cx| InputState::new(window, cx));
         let screenshot_hotkey = cx.new(|cx| InputState::new(window, cx));
         // Draft fields for adding a channel. One set is enough: the fields a
@@ -284,6 +303,9 @@ impl Peek {
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
         for (input, value) in [
+            (&decision_endpoint, &config.decision.endpoint),
+            (&decision_model, &config.decision.model),
+            (&decision_key, &config.decision.credential_id),
             (&blank_hotkey, &config.blank_hotkey),
             (&screenshot_hotkey, &config.screenshot_hotkey),
         ] {
@@ -293,6 +315,28 @@ impl Peek {
         // Persisted as they are typed. The running app keeps the hotkeys it
         // registered at startup, which is why the page says a restart applies
         // a change.
+        // The decision service is reached with its own endpoint, model and
+        // credential, separate from any channel.
+        for (input, field) in [
+            (&decision_endpoint, DecisionField::Endpoint),
+            (&decision_model, DecisionField::Model),
+            (&decision_key, DecisionField::Key),
+        ] {
+            cx.observe(input, move |this, state, cx| {
+                let value = state.read(cx).value().trim().to_owned();
+                let slot = match field {
+                    DecisionField::Endpoint => &mut this.config.decision.endpoint,
+                    DecisionField::Model => &mut this.config.decision.model,
+                    DecisionField::Key => &mut this.config.decision.credential_id,
+                };
+                if *slot != value {
+                    *slot = value;
+                    this.persist_config();
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         for (input, screenshot) in [(&blank_hotkey, false), (&screenshot_hotkey, true)] {
             cx.observe(input, move |this, state, cx| {
                 let value = state.read(cx).value().trim().to_owned();
@@ -311,7 +355,14 @@ impl Peek {
         }
 
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
-        let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(0)), window, cx));
+        // The configuration's `smart_mode` now only decides where the picker
+        // starts: automatic, or a fixed task. Either way the user can change it.
+        let initial = if config.smart_mode {
+            TASK_AUTO_INDEX
+        } else {
+            0
+        };
+        let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(initial)), window, cx));
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -327,6 +378,9 @@ impl Peek {
             pending_toast: None,
             testing_channel: None,
             test_tx,
+            decision_endpoint,
+            decision_model,
+            decision_key,
             blank_hotkey,
             screenshot_hotkey,
             editing_channel: None,
@@ -592,13 +646,13 @@ impl Peek {
         (chrome + dictionary + rows * 26.0).clamp(chrome, PANEL_RESULT_MAX_HEIGHT)
     }
 
-    fn selected_task(&self, cx: &App) -> Task {
+    /// The chosen task, or `None` for the automatic choice.
+    fn selected_task(&self, cx: &App) -> Option<Task> {
         self.tasks
             .read(cx)
             .selected_index(cx)
             .and_then(|index| TASK_ORDER.get(index.row))
             .copied()
-            .unwrap_or(Task::Translate)
     }
 
     /// Offline dictionary first: instant, and independent of any API key.
@@ -716,13 +770,15 @@ impl Peek {
             0 => SETTINGS_CHROME + 92.,
             // Shortcuts: two fields and a hint.
             1 => SETTINGS_CHROME + 130.,
-            // Channels: the list, the add button, the copy switch and the
-            // used-for pickers.
-            2 => SETTINGS_CHROME + 190. + SETTINGS_ROW * (channels + 2.),
+            // Channels: the list, the add button, the copy switch, the
+            // used-for pickers and the decision service.
+            2 => SETTINGS_CHROME + 320. + SETTINGS_ROW * (channels + 4.),
             // Permissions: one row per permission.
             _ => SETTINGS_CHROME + 24. + SETTINGS_ROW * self.permissions.len() as f32,
         };
-        height.clamp(240., 720.)
+        // The translation tab carries the channel list, the pickers and the
+        // decision service, so its ceiling is higher than the others'.
+        height.clamp(240., 900.)
     }
 
     /// A label and the dropdown that chooses for it.
@@ -1210,11 +1266,9 @@ impl Peek {
             &self.config.target_language,
             &self.config.chinese_target,
         );
-        let task = if self.config.smart_mode {
-            route.task
-        } else {
-            self.selected_task(cx)
-        };
+        // The picker is authoritative. Automatic is now one of its entries
+        // rather than a hidden setting that overrode the choice.
+        let task = self.selected_task(cx).unwrap_or(route.task);
         let target = effective_target(&route.target, "").to_owned();
 
         // Plain translation may go through a basic channel such as DeepLX;
@@ -1503,18 +1557,31 @@ impl Peek {
     /// The task picker: one icon while it is closed, so the input box stays
     /// nearly empty, and a labelled list when it opens.
     fn task_picker(&self, cx: &Context<Self>) -> impl IntoElement {
+        // `None` is the automatic choice, which the content decides.
         let current = self.selected_task(cx);
-        let current_index = TASK_ORDER
-            .iter()
-            .position(|task| *task == current)
-            .unwrap_or(0);
         let tasks = self.tasks.clone();
         let entity = cx.entity();
+        let automatic = current.is_none();
+        let (icon, tooltip) = match current {
+            Some(task) => (
+                Self::task_icon(task),
+                i18n::tr(
+                    TASK_KEYS[TASK_ORDER
+                        .iter()
+                        .position(|candidate| *candidate == task)
+                        .unwrap_or(0)],
+                ),
+            ),
+            None => (
+                gpui_kit::assets::IconName::Sparkles,
+                i18n::tr("task-auto-tooltip"),
+            ),
+        };
         DropdownButton::new("task-picker")
             .button(
                 Button::new("task-picker-button")
-                    .icon(Self::task_icon(current))
-                    .tooltip(i18n::tr(TASK_KEYS[current_index])),
+                    .icon(icon)
+                    .tooltip(tooltip),
             )
             .dropdown_menu(move |mut menu, _window, _cx| {
                 for (index, task) in TASK_ORDER.iter().enumerate() {
@@ -1524,7 +1591,7 @@ impl Peek {
                     menu = menu.item(
                         PopupMenuItem::new(i18n::tr(TASK_KEYS[index]))
                             .icon(Self::task_icon(task))
-                            .checked(task == current)
+                            .checked(current == Some(task))
                             .on_click(move |_event, window, cx| {
                                 tasks.update(cx, |state, cx| {
                                     state.set_selected_index(
@@ -1537,6 +1604,23 @@ impl Peek {
                             }),
                     );
                 }
+                let target = entity.clone();
+                let tasks = tasks.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(i18n::tr("task-auto"))
+                        .icon(gpui_kit::assets::IconName::Sparkles)
+                        .checked(automatic)
+                        .on_click(move |_event, window, cx| {
+                            tasks.update(cx, |state, cx| {
+                                state.set_selected_index(
+                                    Some(IndexPath::new(TASK_AUTO_INDEX)),
+                                    window,
+                                    cx,
+                                );
+                            });
+                            target.update(cx, |_, cx| cx.notify());
+                        }),
+                );
                 menu
             })
     }
@@ -2177,7 +2261,49 @@ impl Peek {
                                     .text_color(muted)
                                     .child(i18n::tr("channels-none")),
                             )
-                        }),
+                        })
+                        // The routing decision service: which model decides
+                        // what a piece of content is asking for.
+                        .child(self.section_label(i18n::tr("settings-decision"), set, muted))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_family(set.latin)
+                                        .text_size(px(12.))
+                                        .child(i18n::tr("settings-decision-enabled")),
+                                )
+                                .child(
+                                    Switch::new("decision_enabled")
+                                        .checked(self.config.decision.enabled)
+                                        .on_click(cx.listener(
+                                            |this, checked: &bool, _window, cx| {
+                                                this.config.decision.enabled = *checked;
+                                                this.persist_config();
+                                                cx.notify();
+                                            },
+                                        )),
+                                ),
+                        )
+                        .child(self.picker_row(
+                            i18n::tr("channels-endpoint"),
+                            Input::new(&self.decision_endpoint).into_any_element(),
+                            set,
+                        ))
+                        .child(self.picker_row(
+                            i18n::tr("channels-model"),
+                            Input::new(&self.decision_model).into_any_element(),
+                            set,
+                        ))
+                        .child(self.picker_row(
+                            i18n::tr("channels-key"),
+                            Input::new(&self.decision_key).into_any_element(),
+                            set,
+                        )),
                 )
             })
             .when(self.settings_tab == 3, |this| {
