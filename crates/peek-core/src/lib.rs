@@ -453,6 +453,9 @@ pub struct Config {
     pub channels: Vec<Channel>,
     /// Channel used for plain translation; empty means none chosen.
     pub basic_channel: String,
+    /// Ordered first-answer services; None identifies a legacy configuration.
+    #[serde(default)]
+    pub quick_channels: Option<Vec<String>>,
     /// Channel used for LLM tasks and follow-ups.
     pub ai_channel: String,
     /// Decision-model channel. Empty means automatic mode uses local rules.
@@ -492,6 +495,7 @@ impl Default for Config {
             output_limit_upgraded: true,
             channels: Vec::new(),
             basic_channel: String::new(),
+            quick_channels: Some(Vec::new()),
             ai_channel: String::new(),
             decision_channel: String::new(),
             snip_close_on_copy: true,
@@ -534,6 +538,31 @@ impl Config {
             .filter(|channel| channel.kind.supports_decision())
     }
 
+    pub fn quick_candidates(&self) -> impl Iterator<Item = &Channel> {
+        self.channels
+            .iter()
+            .filter(|c| c.kind.is_ai() || c.kind.supports_basic())
+    }
+
+    pub fn answer_channels(&self, task: Task, followup: bool) -> Vec<Channel> {
+        if followup {
+            return self.ai().cloned().into_iter().collect();
+        }
+        let mut channels: Vec<_> = self
+            .quick_channels
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|id| self.channel(id))
+            .filter(|c| c.kind.is_ai() || (task == Task::Translate && c.kind.supports_basic()))
+            .cloned()
+            .collect();
+        if task != Task::Translate && channels.is_empty() {
+            channels.extend(self.ai().cloned());
+        }
+        channels
+    }
+
     /// Channels that may be offered for plain translation.
     pub fn basic_candidates(&self) -> impl Iterator<Item = &Channel> {
         self.channels
@@ -557,6 +586,17 @@ impl Config {
     /// and give Clef enough time to answer.
     pub fn migrate(&mut self) -> bool {
         let mut changed = false;
+        if self.quick_channels.is_none() {
+            let mut ids = Vec::new();
+            for id in [&self.basic_channel, &self.ai_channel] {
+                if !id.is_empty() && !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+            self.quick_channels = Some(ids);
+            self.basic_channel.clear();
+            changed = true;
+        }
         if !self.output_limit_upgraded {
             for channel in &mut self.channels {
                 if channel.kind.is_ai() && channel.max_output_tokens == 2048 {
@@ -647,6 +687,18 @@ impl Config {
             }
             if !(128..=MAX_OUTPUT_TOKENS).contains(&channel.max_output_tokens) {
                 return Err("error-config-tokens");
+            }
+        }
+        if let Some(ids) = &self.quick_channels {
+            let mut seen = std::collections::HashSet::new();
+            for id in ids {
+                if !seen.insert(id)
+                    || !self
+                        .channel(id)
+                        .is_some_and(|c| c.kind.is_ai() || c.kind.supports_basic())
+                {
+                    return Err("error-config-channel-missing");
+                }
             }
         }
         // A selection must point at a channel that still exists and can serve
@@ -1031,5 +1083,40 @@ mod tests {
         let mut restored: Config = serde_json::from_str(&saved).unwrap();
         assert!(!restored.migrate());
         assert_eq!(restored.channels[0].max_output_tokens, 2048);
+    }
+
+    #[test]
+    fn quick_priority_migrates_and_followup_stays_independent() {
+        let mut config = Config {
+            channels: vec![
+                channel("google", ChannelKind::GoogleFree),
+                channel("llm", ChannelKind::DeepSeek),
+                channel("other", ChannelKind::ChatCompletions),
+            ],
+            basic_channel: "google".into(),
+            ai_channel: "llm".into(),
+            quick_channels: None,
+            ..Config::default()
+        };
+        assert!(config.migrate());
+        assert_eq!(config.quick_channels.as_deref().unwrap(), ["google", "llm"]);
+        assert_eq!(
+            config
+                .answer_channels(Task::Translate, false)
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["google", "llm"]
+        );
+        config.quick_channels = Some(vec!["other".into(), "google".into()]);
+        assert_eq!(
+            config.answer_channels(Task::Translate, false)[0].id,
+            "other"
+        );
+        assert_eq!(config.answer_channels(Task::Translate, true)[0].id, "llm");
+        assert_eq!(config.answer_channels(Task::Define, false).len(), 1);
+        config.quick_channels = Some(vec![]);
+        assert!(!config.migrate());
+        assert!(config.answer_channels(Task::Translate, false).is_empty());
     }
 }

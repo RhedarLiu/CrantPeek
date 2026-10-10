@@ -23,6 +23,7 @@ use std::time::Duration;
 // Needed for `on_hover` on an element that carries an id.
 use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -65,7 +66,8 @@ enum HotkeyField {
 /// Which assignment a channel dropdown writes.
 #[derive(Clone, Copy)]
 enum ChannelSlot {
-    Basic,
+    QuickFirst,
+    QuickAdd,
     Llm,
     Decision,
 }
@@ -1036,53 +1038,6 @@ impl Peek {
         });
     }
 
-    /// Translates through the configured DeepLX endpoint.
-    ///
-    /// It reuses the same event channel as an AI turn, so the panel and the
-    /// screenshot overlay need no separate path; the endpoint answers in one
-    /// piece rather than as a stream.
-    fn begin_translation(
-        &mut self,
-        (kind, endpoint, key): (ChannelKind, String, String),
-        text: String,
-        target: String,
-        panel: bool,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if panel {
-            self.busy = true;
-        }
-        let (tx, rx) = mpsc::channel(8);
-        self.receiver = Some(rx);
-        let cancel = CancellationToken::new();
-        self.cancel = Some(cancel.clone());
-        let client = self.client.clone();
-        let ui_language = self.config.ui_language.clone();
-        self.runtime.spawn(async move {
-            let locale = i18n::I18n::new(&ui_language);
-            let result = match kind {
-                ChannelKind::GoogleFree => client.translate_google(&text, &target, cancel).await,
-                _ => {
-                    client
-                        .translate_deeplx(&endpoint, &key, &text, &target, cancel)
-                        .await
-                }
-            };
-            match result {
-                Ok(translated) => {
-                    let _ = tx.send(Event::Text(translated)).await;
-                    let _ = tx.send(Event::Done).await;
-                }
-                Err(err) => {
-                    let _ = tx.send(Event::Failed(locale.network_error(&err))).await;
-                }
-            }
-        });
-        self.spawn_drain(cx);
-        cx.notify();
-        true
-    }
-
     /// Height for the settings page's current tab.
     ///
     /// The number comes from the laid-out children, so a short tab does not
@@ -1178,6 +1133,120 @@ impl Peek {
                 }
                 menu
             })
+    }
+
+    fn move_quick_channel(&mut self, id: &str, direction: isize, cx: &mut Context<Self>) {
+        if let Some(ids) = &mut self.config.quick_channels
+            && let Some(index) = ids.iter().position(|old| old == id)
+            && let Some(next) = index.checked_add_signed(direction)
+            && next < ids.len()
+        {
+            ids.swap(index, next);
+            self.persist_config();
+            cx.notify();
+        }
+    }
+
+    fn quick_channel_list(&self, cx: &Context<Self>) -> AnyElement {
+        let ids = self.config.quick_channels.as_deref().unwrap_or_default();
+        let choices = self
+            .config
+            .quick_candidates()
+            .filter(|c| !ids.contains(&c.id))
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect();
+        v_flex()
+            .w_full()
+            .gap(px(8.))
+            .child(self.section_label(
+                i18n::tr("channels-quick"),
+                self.set,
+                cx.theme().muted_foreground,
+            ))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(i18n::tr("channels-quick-hint")),
+            )
+            .child(
+                v_flex()
+                    .id("quick-priority-list")
+                    .w_full()
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .gap(px(4.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(10.))
+                    .p(px(8.))
+                    .when(ids.is_empty(), |this| {
+                        this.child(div().text_size(px(12.)).child(i18n::tr("channels-none")))
+                    })
+                    .children(ids.iter().enumerate().filter_map(|(index, id)| {
+                        let channel = self.config.channel(id)?;
+                        let up = id.clone();
+                        let down = id.clone();
+                        let remove = id.clone();
+                        Some(
+                            h_flex()
+                                .w_full()
+                                .flex_none()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(div().flex_1().text_size(px(12.)).child(format!(
+                                    "{}. {}",
+                                    index + 1,
+                                    channel.name
+                                )))
+                                .child(
+                                    Button::new(SharedString::from(format!("quick-up-{id}")))
+                                        .ghost()
+                                        .icon(IconName::ArrowUp)
+                                        .disabled(index == 0)
+                                        .tooltip(i18n::tr("channels-up"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.move_quick_channel(&up, -1, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("quick-down-{id}")))
+                                        .ghost()
+                                        .icon(IconName::ArrowDown)
+                                        .disabled(index + 1 == ids.len())
+                                        .tooltip(i18n::tr("channels-down"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.move_quick_channel(&down, 1, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("quick-remove-{id}")))
+                                        .ghost()
+                                        .icon(IconName::X)
+                                        .tooltip(i18n::tr("channels-remove-quick"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(ids) = &mut this.config.quick_channels {
+                                                ids.retain(|id| id != &remove);
+                                            }
+                                            this.persist_config();
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })),
+            )
+            .child(self.picker_row(
+                i18n::tr("channels-add-quick"),
+                self.channel_picker(
+                    "quick-add",
+                    choices,
+                    String::new(),
+                    ChannelSlot::QuickAdd,
+                    cx,
+                ),
+                self.set,
+            ))
+            .into_any_element()
     }
 
     /// A small muted section label, used across the settings page.
@@ -1516,8 +1585,11 @@ impl Peek {
                 // The first usable channel becomes the default for a place
                 // that has nothing chosen yet. A decision model is not a
                 // translator and not an LLM.
-                if self.config.basic_channel.is_empty() && kind.supports_basic() {
-                    self.config.basic_channel = id.clone();
+                if kind.is_ai() || kind.supports_basic() {
+                    self.config
+                        .quick_channels
+                        .get_or_insert_with(Vec::new)
+                        .push(id.clone());
                 }
                 if self.config.ai_channel.is_empty() && kind.is_ai() {
                     self.config.ai_channel = id.clone();
@@ -1537,6 +1609,14 @@ impl Peek {
                 .map(|channel| channel.id.clone())
                 .unwrap_or_default();
             self.config.ai_channel = fallback;
+        }
+        let valid: Vec<_> = self
+            .config
+            .quick_candidates()
+            .map(|c| c.id.clone())
+            .collect();
+        if let Some(ids) = &mut self.config.quick_channels {
+            ids.retain(|id| valid.contains(id));
         }
         self.editing_channel = None;
         self.persist_config();
@@ -1633,11 +1713,14 @@ impl Peek {
     /// Removes a channel and clears any selection that pointed at it.
     fn remove_channel(&mut self, id: &str, cx: &mut Context<Self>) {
         self.config.channels.retain(|channel| channel.id != id);
+        if let Some(ids) = &mut self.config.quick_channels {
+            ids.retain(|old| old != id);
+        }
         if self.config.basic_channel == id {
             // Resolved before the assignment: the iterator borrows the config.
             let fallback = self
                 .config
-                .basic_candidates()
+                .quick_candidates()
                 .next()
                 .map(|channel| channel.id.clone())
                 .unwrap_or_default();
@@ -1669,7 +1752,19 @@ impl Peek {
     /// Points a place in the app at a channel.
     fn assign_channel(&mut self, slot: ChannelSlot, id: String, cx: &mut Context<Self>) {
         match slot {
-            ChannelSlot::Basic => self.config.basic_channel = id,
+            ChannelSlot::QuickFirst => {
+                let ids = self.config.quick_channels.get_or_insert_with(Vec::new);
+                ids.retain(|old| old != &id);
+                if !id.is_empty() {
+                    ids.insert(0, id);
+                }
+            }
+            ChannelSlot::QuickAdd => {
+                let ids = self.config.quick_channels.get_or_insert_with(Vec::new);
+                if !id.is_empty() && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
             ChannelSlot::Llm => self.config.ai_channel = id,
             ChannelSlot::Decision => self.config.decision_channel = id,
         }
@@ -1776,15 +1871,11 @@ impl Peek {
         let target = effective_target(&route.target, "").to_owned();
         // A follow-up continues the conversation, which a translation-only
         // endpoint cannot do. The first translation may still use DeepLX.
-        let chosen = if followup || task != Task::Translate {
-            self.config.ai().cloned()
-        } else {
-            self.config.basic().or_else(|| self.config.ai()).cloned()
-        };
-        let Some(channel) = chosen else {
+        let channels = self.config.answer_channels(task, followup);
+        if channels.is_empty() {
             self.fail_turn(isolated, i18n::tr("status-channel-missing"), cx);
             return false;
-        };
+        }
 
         if !isolated && !followup {
             self.dictionary_note.clear();
@@ -1819,32 +1910,6 @@ impl Peek {
         }
 
         self.follow_up_turn = followup && !isolated;
-        if channel.kind.is_translation_only() {
-            return self.begin_translation(
-                (
-                    channel.kind,
-                    channel.endpoint.clone(),
-                    channel.api_key.clone(),
-                ),
-                text,
-                target,
-                !isolated,
-                cx,
-            );
-        }
-        let Some(provider) = channel.provider() else {
-            self.follow_up_turn = false;
-            self.rollback_unsent(isolated);
-            self.fail_turn(isolated, i18n::tr("status-channel-missing"), cx);
-            return false;
-        };
-        let key = channel.api_key.clone();
-        if channel.kind.needs_credential() && key.trim().is_empty() {
-            self.follow_up_turn = false;
-            self.rollback_unsent(isolated);
-            self.fail_turn(isolated, i18n::tr("status-key-missing"), cx);
-            return false;
-        }
         let messages = if isolated {
             vec![
                 Message {
@@ -1859,17 +1924,8 @@ impl Peek {
         } else {
             self.messages.clone()
         };
-        self.launch_stream(provider, key, messages, !isolated, cx);
+        self.launch_stream(channels, text, target, messages, !isolated, cx);
         true
-    }
-
-    /// Drops the user turn just recorded when the request never left.
-    fn rollback_unsent(&mut self, isolated: bool) {
-        if isolated {
-            return;
-        }
-        self.answer.clear();
-        self.settle_stopped_turn();
     }
 
     fn fail_turn(&mut self, isolated: bool, message: String, cx: &mut Context<Self>) {
@@ -1886,8 +1942,9 @@ impl Peek {
 
     fn launch_stream(
         &mut self,
-        provider: peek_core::Provider,
-        key: String,
+        channels: Vec<Channel>,
+        text: String,
+        target: String,
         messages: Vec<Message>,
         panel: bool,
         cx: &mut Context<Self>,
@@ -1906,7 +1963,7 @@ impl Peek {
             let (net_tx, mut net_rx) = mpsc::channel(32);
             let worker = tokio::spawn(async move {
                 client
-                    .stream(&provider, &key, &messages, net_tx, cancel)
+                    .stream_channels(&channels, &text, &target, &messages, net_tx, cancel)
                     .await
             });
             while let Some(event) = net_rx.recv().await {
@@ -2328,10 +2385,16 @@ impl Peek {
     fn query_page(&self, cx: &Context<Self>) -> AnyElement {
         let basic_choices: Vec<(String, String)> = self
             .config
-            .basic_candidates()
+            .quick_candidates()
             .map(|channel| (channel.id.clone(), channel.name.clone()))
             .collect();
-        let basic_active = self.config.basic_channel.clone();
+        let basic_active = self
+            .config
+            .quick_channels
+            .as_ref()
+            .and_then(|ids| ids.first())
+            .cloned()
+            .unwrap_or_default();
         let basic_entity = cx.entity();
         let theme = cx.theme();
         let set = self.set;
@@ -2526,7 +2589,7 @@ impl Peek {
                                                 .on_click(move |_event, _window, cx| {
                                                     target.update(cx, |peek, cx| {
                                                         peek.assign_channel(
-                                                            ChannelSlot::Basic,
+                                                            ChannelSlot::QuickFirst,
                                                             chosen.clone(),
                                                             cx,
                                                         );
@@ -2796,11 +2859,6 @@ impl Peek {
                 )
             })
             .collect();
-        let basic_channels: Vec<(String, String)> = self
-            .config
-            .basic_candidates()
-            .map(|channel| (channel.id.clone(), channel.name.clone()))
-            .collect();
         let ai_channels: Vec<(String, String)> = self
             .config
             .ai_candidates()
@@ -2811,7 +2869,6 @@ impl Peek {
             .decision_candidates()
             .map(|channel| (channel.id.clone(), channel.name.clone()))
             .collect();
-        let basic_active = self.config.basic_channel.clone();
         let ai_active = self.config.ai_channel.clone();
         let decision_active = self.config.decision_channel.clone();
         let theme = cx.theme();
@@ -3099,19 +3156,9 @@ impl Peek {
                                 ),
                         )
                         .child(self.section_label(i18n::tr("channels-usage"), set, muted))
+                        .child(self.quick_channel_list(cx))
                         .child(self.picker_row(
-                            i18n::tr("channels-basic"),
-                            self.channel_picker(
-                                "basic_picker",
-                                basic_channels.clone(),
-                                basic_active.clone(),
-                                ChannelSlot::Basic,
-                                cx,
-                            ),
-                            set,
-                        ))
-                        .child(self.picker_row(
-                            i18n::tr("channels-ai"),
+                            i18n::tr("channels-followup"),
                             self.channel_picker(
                                 "ai_picker",
                                 ai_channels,

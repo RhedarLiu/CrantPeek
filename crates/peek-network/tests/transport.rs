@@ -209,3 +209,123 @@ async fn decision_accepts_direct_and_cloudflare_envelopes() {
         server.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn ordered_channels_fall_back_from_basic_to_llm() {
+    use peek_core::{Channel, ChannelKind};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for first in [true, false] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 8192];
+            let n = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..n]);
+            if first {
+                assert!(request.starts_with("POST /translate"));
+                socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            } else {
+                assert!(request.starts_with("POST /v1/chat/completions"));
+                assert!(request.contains("original prompt"));
+                let body = "data: {\"choices\":[{\"delta\":{\"content\":\"备用回答\"}}]}\n\ndata: [DONE]\n\n";
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let channels = [
+        Channel {
+            kind: ChannelKind::DeepLx,
+            endpoint: format!("http://{address}/translate"),
+            ..Channel::default()
+        },
+        Channel {
+            endpoint: format!("http://{address}/v1"),
+            model: "test".into(),
+            api_key: "test-key".into(),
+            ..Channel::default()
+        },
+    ];
+    let (tx, mut rx) = mpsc::channel(8);
+    Client::default()
+        .stream_channels(
+            &channels,
+            "hello",
+            "Chinese",
+            &[Message {
+                role: "user".into(),
+                content: "original prompt".into(),
+            }],
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rx.recv().await, Some(Event::Text("备用回答".into())));
+    assert_eq!(rx.recv().await, Some(Event::Done));
+    assert_eq!(rx.recv().await, None);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn partial_answer_never_switches_to_another_channel() {
+    use peek_core::Channel;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 8192];
+        assert!(socket.read(&mut buffer).await.unwrap() > 0);
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"部分回答\"}}]}\n\n";
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    });
+    let channels = [
+        Channel {
+            endpoint: format!("http://{address}/v1"),
+            model: "test".into(),
+            api_key: "test-key".into(),
+            ..Channel::default()
+        },
+        Channel {
+            endpoint: "http://127.0.0.1:1".into(),
+            model: "test".into(),
+            api_key: "test-key".into(),
+            ..Channel::default()
+        },
+    ];
+    let (tx, mut rx) = mpsc::channel(8);
+    let error = Client::default()
+        .stream_channels(
+            &channels,
+            "hello",
+            "Chinese",
+            &[],
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.message_key(), "error-stream-ended");
+    assert_eq!(rx.recv().await, Some(Event::Text("部分回答".into())));
+    assert_eq!(rx.recv().await, None);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_priority_request_never_starts_a_channel() {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let (tx, mut rx) = mpsc::channel(8);
+    let error = Client::default()
+        .stream_channels(
+            &[peek_core::Channel::default()],
+            "hello",
+            "Chinese",
+            &[],
+            tx,
+            cancel,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.message_key(), "error-cancelled");
+    assert_eq!(rx.recv().await, None);
+}

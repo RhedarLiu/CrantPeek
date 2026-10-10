@@ -241,6 +241,101 @@ impl Default for Client {
     }
 }
 impl Client {
+    /// Try services in priority order, falling back only before output begins.
+    pub async fn stream_channels(
+        &self,
+        channels: &[peek_core::Channel],
+        text: &str,
+        target: &str,
+        messages: &[Message],
+        tx: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(), Error> {
+        let mut last_error = Error::Invalid("status-channel-missing".into());
+        for channel in channels {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if channel.kind.is_ai() && channel.api_key.trim().is_empty() {
+                last_error = Error::Invalid("status-key-missing".into());
+                continue;
+            }
+            if channel.kind.is_translation_only() {
+                let result = if channel.kind == peek_core::ChannelKind::GoogleFree {
+                    self.translate_google(text, target, cancel.clone()).await
+                } else {
+                    self.translate_deeplx(
+                        &channel.endpoint,
+                        &channel.api_key,
+                        text,
+                        target,
+                        cancel.clone(),
+                    )
+                    .await
+                };
+                match result {
+                    Ok(answer) => {
+                        tx.send(Event::Text(answer))
+                            .await
+                            .map_err(|_| Error::Cancelled)?;
+                        tx.send(Event::Done).await.map_err(|_| Error::Cancelled)?;
+                        return Ok(());
+                    }
+                    Err(Error::Cancelled) => return Err(Error::Cancelled),
+                    Err(error) => {
+                        last_error = error;
+                        continue;
+                    }
+                }
+            }
+            let Some(provider) = channel.provider() else {
+                continue;
+            };
+            let (net_tx, mut net_rx) = mpsc::channel(32);
+            let request = self.stream(
+                &provider,
+                &channel.api_key,
+                messages,
+                net_tx,
+                cancel.clone(),
+            );
+            let drain = async {
+                let mut output = false;
+                let mut failed = None;
+                while let Some(event) = net_rx.recv().await {
+                    match &event {
+                        Event::Text(text) => output |= !text.is_empty(),
+                        Event::Failed(code) => {
+                            failed = Some(code.clone());
+                            if !output {
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if tx.send(event).await.is_err() {
+                        return Err(Error::Cancelled);
+                    }
+                }
+                Ok((output, failed))
+            };
+            let (result, drained) = tokio::join!(request, drain);
+            let (output, failed) = drained?;
+            if matches!(result, Err(Error::Cancelled)) {
+                return Err(Error::Cancelled);
+            }
+            if output {
+                return result;
+            }
+            match (result, failed) {
+                (Ok(()), None) => return Ok(()),
+                (Ok(()), Some(code)) => last_error = Error::Invalid(code),
+                (Err(error), _) => last_error = error,
+            }
+        }
+        Err(last_error)
+    }
+
     pub async fn stream(
         &self,
         provider: &Provider,
