@@ -66,8 +66,6 @@ const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum and the title row
 /// hidden: the padding and the input card, which carries its own controls.
 const PANEL_COMPACT_BASE: f32 = 70.;
-/// The hover target above the input box while the row is hidden.
-const PANEL_CHROME_STRIP: f32 = 16.;
 /// The revealed row's own height, which reaches past its visible content into
 /// the top of the input box.
 ///
@@ -1667,11 +1665,17 @@ impl Peek {
             // The whole panel is the hover area, not the row: revealing the row
             // moves the window, and a transition caused by that layout change
             // reads as the pointer leaving the row, which made the two flash.
+            // The whole panel is both the target and the boundary: hovering
+            // anywhere reveals the row, and only leaving the panel hides it. A
+            // narrow strip at the top was hard to hit, and deciding from inside
+            // the panel meant the window's own move could cross the boundary.
             .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
                 let preview = std::env::var("PEEK_RENDER").is_ok();
-                if !*hovered && !preview && chrome_visible() {
-                    set_chrome_visible(false);
-                    STRIP_ARMED.with(|cell| cell.set(false));
+                if preview {
+                    return;
+                }
+                if *hovered != chrome_visible() {
+                    set_chrome_visible(*hovered);
                     cx.notify();
                 }
             }))
@@ -1698,35 +1702,6 @@ impl Peek {
             }))
             // Hidden, the row is replaced by a thin strip that catches the
             // pointer; the window is sized for whichever of the two is showing.
-            .when(!chrome_visible(), |this| {
-                this.child(
-                    // An overlay, so the hidden panel can hug the input box
-                    // while still offering something to hover.
-                    div()
-                        .id("chrome-strip")
-                        .absolute()
-                        .top(px(0.))
-                        .left(px(0.))
-                        .right(px(0.))
-                        .h(px(PANEL_CHROME_STRIP))
-                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
-                            // An offscreen render parks the pointer at the
-                            // origin, which is over this strip, so previews
-                            // ignore it.
-                            let preview = std::env::var("PEEK_RENDER").is_ok();
-                            if !*hovered {
-                                // Left the strip: it is free to reveal again.
-                                STRIP_ARMED.with(|cell| cell.set(true));
-                            } else if !preview
-                                && !chrome_visible()
-                                && STRIP_ARMED.with(std::cell::Cell::get)
-                            {
-                                set_chrome_visible(true);
-                                cx.notify();
-                            }
-                        })),
-                )
-            })
             .when(chrome_visible(), |this| {
                 this.child(
                     h_flex()
