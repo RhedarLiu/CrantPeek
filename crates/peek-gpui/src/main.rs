@@ -385,14 +385,32 @@ impl Peek {
                 .auto_grow(2, 5)
                 .submit_on_enter(true)
         });
-        // Same editor as the query box. A single-line `Input` never took the
-        // IME session, so Chinese could not be selected, and Enter was not wired.
+        // Same editor as the query box, including IME composition and submit.
         let follow_up = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 4)
                 .submit_on_enter(true)
                 .placeholder(i18n::tr("query-followup-placeholder"))
         });
+        // The quick panel is nonactivating. ASCII key events still reach it,
+        // but macOS can leave the input-source switcher attached to the prior
+        // app. Start a native text session when the user focuses follow-up.
+        cx.on_focus(
+            &follow_up.read(cx).focus_handle(cx),
+            window,
+            |this, window, cx| {
+                cx.activate(true);
+                SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
+                native_window::show(window);
+                let focus = this.follow_up.read(cx).focus_handle(cx);
+                window.on_next_frame(move |window, cx| {
+                    if focus.is_focused(window) {
+                        native_window::activate_text_input(window, cx);
+                    }
+                });
+            },
+        )
+        .detach();
         let blank_hotkey = cx.new(|cx| InputState::new(window, cx));
         let screenshot_hotkey = cx.new(|cx| InputState::new(window, cx));
         let selection_hotkey = cx.new(|cx| InputState::new(window, cx));
@@ -3349,6 +3367,39 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     // resizes, and the next paint has to fill that new window.
     for _ in 0..8 {
         cx.run_until_parked();
+    }
+    // Exercise editor focus transfer without contacting a translation service.
+    if std::env::var("PEEK_INPUT_SELFTEST").is_ok()
+        && let Some(view) = published.borrow().clone()
+    {
+        use gpui_kit::test::TestWindowExt as _;
+        for follow in [false, true] {
+            cx.update_window(window.into(), |_, window, cx| {
+                let state = if follow {
+                    view.read(cx).follow_up.clone()
+                } else {
+                    view.read(cx).input.clone()
+                };
+                let id = ElementId::from(("input", state.entity_id()));
+                window.click_at(id, point(px(12.), px(12.)), cx);
+            })?;
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| {
+                let state = if follow {
+                    view.read(cx).follow_up.clone()
+                } else {
+                    view.read(cx).input.clone()
+                };
+                window.render_frame(cx);
+                assert!(
+                    state.read(cx).focus_handle(cx).is_focused(window),
+                    "editor focus missing (follow={follow})"
+                );
+                window.input("中文", cx);
+                assert!(state.read(cx).value().contains("中文"));
+            })?;
+        }
+        println!("[input-selftest] main and follow-up accept Chinese text after clicking");
     }
     // The channel dialog is opened by a click, so a preview opens it directly.
     // It has to wait for the first frame: the component layer registers the

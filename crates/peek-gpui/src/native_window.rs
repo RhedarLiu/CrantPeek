@@ -24,6 +24,36 @@ pub fn show(window: &mut Window) {
     window.activate_window();
 }
 
+/// Refresh AppKit's input context after GPUI has focused a text editor.
+/// Run outside the App borrow: querying the context can synchronously ask
+/// GPUI's input handler for its current selection.
+pub fn activate_text_input(window: &mut Window, cx: &mut gpui_kit::App) {
+    #[cfg(target_os = "macos")]
+    {
+        let handle = window.window_handle();
+        cx.spawn(async move |cx| {
+            let view = cx
+                .update_window(handle, |_, window, _| macos_view(window))
+                .ok()
+                .flatten();
+            if let Some(view) = view {
+                unsafe {
+                    use objc2::{msg_send, runtime::AnyObject};
+                    let view = view as *mut AnyObject;
+                    let context: *mut AnyObject = msg_send![view, inputContext];
+                    if !context.is_null() {
+                        let _: () = msg_send![context, activate];
+                        let _: () = msg_send![context, invalidateCharacterCoordinates];
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, cx);
+}
+
 /// Hides the peek window, keeping it alive for the next summon.
 pub fn hide(window: &mut Window) {
     #[cfg(target_os = "macos")]
