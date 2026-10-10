@@ -57,7 +57,7 @@ use tokio_util::sync::CancellationToken;
 const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum: the zone above it,
 /// the input card, which carries its own controls, and the padding.
-const PANEL_COMPACT_BASE: f32 = 104.;
+const PANEL_COMPACT_BASE: f32 = 106.;
 /// Height of the zone above the input box.
 ///
 /// It is always part of the window - it is the hover target even where there is
@@ -1544,7 +1544,7 @@ impl Peek {
             // the row is painted in it, which is what makes the trigger area
             // larger than the panel appears to be.
             .pt(px(PANEL_CHROME_HEIGHT))
-            .pb(px(4.))
+            .pb(px(6.))
             .gap(px(5.))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
