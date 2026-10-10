@@ -1895,7 +1895,7 @@ impl Peek {
                         })),
                 )
             })
-            .when(self.settings_tab == 1, |this| {
+            .when(self.settings_tab == 2, |this| {
                 this.child(
                     v_flex()
                         .w_full()
@@ -1986,8 +1986,6 @@ impl Peek {
                         ),
                 )
             })
-            // Which channel serves which place, plus the copy behaviour that
-            // belongs to the capture flow.
             // Shortcuts: one editable field per global hotkey.
             .when(self.settings_tab == 1, |this| {
                 this.child(
