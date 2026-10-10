@@ -20,6 +20,7 @@ mod snip;
 
 use std::time::Duration;
 
+// Needed for `on_hover` on an element that carries an id.
 use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _};
@@ -1534,39 +1535,43 @@ impl Peek {
                     // An overlay, so the hidden panel can hug the input box
                     // while still offering something to hover.
                     div()
+                        .id("chrome-strip")
                         .absolute()
                         .top(px(0.))
                         .left(px(0.))
                         .right(px(0.))
                         .h(px(PANEL_CHROME_STRIP))
-                        .child(
-                            // A button, because that is where a hover event can
-                            // be observed; it is a bare strip with no label.
-                            Button::new("chrome-strip")
-                                .ghost()
-                                .w_full()
-                                .h_full()
-                                .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
-                                    // An offscreen render parks the pointer at the origin, which
-                                    // is over this strip, so previews ignore it.
-                                    let preview = std::env::var("PEEK_RENDER").is_ok();
-                                    if *hovered && !preview && !chrome_visible() {
-                                        set_chrome_visible(true);
-                                        cx.notify();
-                                    }
-                                })),
-                        ),
+                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
+                            // An offscreen render parks the pointer at the
+                            // origin, which is over this strip, so previews
+                            // ignore it.
+                            let preview = std::env::var("PEEK_RENDER").is_ok();
+                            if *hovered && !preview && !chrome_visible() {
+                                set_chrome_visible(true);
+                                cx.notify();
+                            }
+                        })),
                 )
             })
             .when(chrome_visible(), |this| {
                 this.child(
                     h_flex()
+                        .id("chrome-row")
                         .w_full()
                         .items_center()
                         .gap(px(10.))
                         // Inset so the title lines up with the text inside the
                         // input box, whose own padding starts at the same place.
                         .px(px(14.))
+                        // The row is only there while the pointer is on it.
+                        // Leaving downwards lands past the strip, so the two do
+                        // not take turns reappearing.
+                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
+                            if !*hovered && chrome_visible() {
+                                set_chrome_visible(false);
+                                cx.notify();
+                            }
+                        }))
                         .child(
                             // A tag rather than plain text, so the title and
                             // the buttons look like one row of controls.
