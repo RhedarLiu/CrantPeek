@@ -223,6 +223,12 @@ struct Peek {
     /// turn's outcome arrives through the poll loop, where no notification can
     /// be raised.
     pending_toast: Option<(bool, String)>,
+    /// The conversation as bubbles: `true` for the user's own turn.
+    ///
+    /// Kept apart from `messages`, which is what the API is sent: that history
+    /// carries the system instruction and wraps the first user turn as
+    /// untrusted content, neither of which belongs on screen.
+    bubbles: Vec<(bool, String)>,
     /// Channel a connection test is running for, so its row can show progress
     /// on the button rather than an extra line of text.
     testing_channel: Option<String>,
@@ -396,6 +402,7 @@ impl Peek {
             follow_up,
             settings_tab: 0,
             pending_toast: None,
+            bubbles: Vec::new(),
             testing_channel: None,
             test_tx,
             decision_endpoint,
@@ -644,7 +651,7 @@ impl Peek {
     fn has_result(&self) -> bool {
         // Deliberately not `busy`: a running turn shows its progress on the
         // button, so an empty result card would be a large blank area.
-        !self.answer.is_empty() || !self.dictionary_note.is_empty()
+        !self.bubbles.is_empty() || !self.answer.is_empty() || !self.dictionary_note.is_empty()
     }
 
     /// Panel height while there is a result, following how much has streamed in.
@@ -652,12 +659,18 @@ impl Peek {
     /// Wrapping is estimated from the character count, so the panel grows with
     /// the answer instead of opening at a fixed size and leaving it empty.
     fn result_height(&self) -> f32 {
-        let columns = 42.0;
+        // Bubbles are narrower than the panel, so fewer characters fit a line.
+        let columns = 34.0;
         let rows: f32 = self
-            .answer
-            .lines()
+            .bubbles
+            .iter()
+            .map(|(_, text)| text)
+            .chain(std::iter::once(&self.answer))
+            .flat_map(|text| text.lines())
             .map(|line| (line.chars().count() as f32 / columns).ceil().max(1.0))
-            .sum();
+            .sum::<f32>()
+            // One line per bubble is taken by its padding.
+            + self.bubbles.len() as f32 * 0.6;
         let dictionary = if self.dictionary_note.is_empty() {
             0.0
         } else {
@@ -1319,6 +1332,7 @@ impl Peek {
             return false;
         }
         if !followup {
+            self.bubbles.clear();
             self.original_query = text.clone();
             self.messages = vec![Message {
                 role: "system".into(),
@@ -1328,12 +1342,19 @@ impl Peek {
             // Re-issue the instruction: the follow-up may be another language.
             system.content = task.styled_instruction(&target, &self.config.translation_style);
         }
+        // The first turn is content to work on, so it is delimited as
+        // untrusted. A follow-up is the user talking to the assistant, and
+        // wrapping it as data told the model to ignore it.
+        let content = if followup {
+            text.clone()
+        } else {
+            peek_core::wrap_content(&text)
+        };
         self.messages.push(Message {
             role: "user".into(),
-            // Delimited, so the model can tell the text it works on from the
-            // instructions it was given.
-            content: peek_core::wrap_content(&text),
+            content,
         });
+        self.bubbles.push((true, text));
         peek_core::bound_history(&mut self.messages);
 
         self.busy = true;
@@ -1483,6 +1504,18 @@ impl Peek {
                     self.forward_overlay(OverlayEvent::Chunk(delta));
                 }
                 Event::Done => {
+                    // The answer joins the conversation. Without this the next
+                    // question saw the system prompt and the user's own words
+                    // and nothing else, so a follow-up had nothing to follow:
+                    // the assistant's replies were never sent back.
+                    if !self.answer.is_empty() {
+                        self.messages.push(Message {
+                            role: "assistant".into(),
+                            content: self.answer.clone(),
+                        });
+                        self.bubbles.push((false, std::mem::take(&mut self.answer)));
+                        peek_core::bound_history(&mut self.messages);
+                    }
                     // A finished turn says so by having an answer; a "done"
                     // line only takes space.
                     self.status.clear();
@@ -1672,6 +1705,43 @@ impl Peek {
         let bg = theme.background;
         let border = theme.border;
         let muted = theme.muted_foreground;
+
+        // One turn of the conversation. The user's own words sit on the right
+        // and the assistant's on the left, which is what makes the two readable
+        // apart in a panel this narrow.
+        let primary = theme.primary;
+        let primary_foreground = theme.primary_foreground;
+        let secondary = theme.secondary;
+        let secondary_foreground = theme.secondary_foreground;
+        let bubble = move |index: usize, from_user: bool, text: String| -> AnyElement {
+            let (bubble_bg, bubble_fg) = if from_user {
+                (primary, primary_foreground)
+            } else {
+                (secondary, secondary_foreground)
+            };
+            let body: AnyElement = if from_user {
+                div().text_size(px(13.)).child(text).into_any_element()
+            } else {
+                TextView::markdown(SharedString::from(format!("bubble-{index}")), text)
+                    .text_size(px(13.))
+                    .into_any_element()
+            };
+            h_flex()
+                .w_full()
+                .when(from_user, |this| this.justify_end())
+                .when(!from_user, |this| this.justify_start())
+                .child(
+                    div()
+                        .max_w(px(340.))
+                        .bg(bubble_bg)
+                        .text_color(bubble_fg)
+                        .rounded(px(14.))
+                        .px(px(12.))
+                        .py(px(9.))
+                        .child(body),
+                )
+                .into_any_element()
+        };
 
         v_flex()
             .id("panel")
@@ -1927,26 +1997,23 @@ impl Peek {
                                 .child(self.dictionary_note.clone()),
                         )
                     })
-                    // Markdown answer.
+                    // The conversation. Each turn is a bubble, and the answer
+                    // still arriving is the last of them.
                     .child(
-                        div()
+                        v_flex()
                             .id("answer")
                             .w_full()
                             .flex_1()
-                            .border_1()
-                            .border_color(border)
-                            .rounded(px(16.))
-                            .p(px(16.))
+                            .gap(px(8.))
                             .overflow_y_scroll()
-                            // Fades in as it arrives, so the card does not
-                            // appear as a hard edge mid-stream.
-                            .child(
-                                TextView::markdown("answer", self.answer.clone()).with_animation(
-                                    "answer-in",
-                                    Animation::new(std::time::Duration::from_millis(200)),
-                                    |view, delta| view.opacity(delta),
-                                ),
-                            ),
+                            .children(self.bubbles.iter().enumerate().map(
+                                |(index, (from_user, text))| {
+                                    bubble(index, *from_user, text.clone())
+                                },
+                            ))
+                            .when(!self.answer.is_empty(), |this| {
+                                this.child(bubble(self.bubbles.len(), false, self.answer.clone()))
+                            }),
                     )
                     .when(
                         self.permissions.iter().any(|(_, granted)| !granted),
@@ -2531,7 +2598,19 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                     }
                 }
                 _ => {
-                    peek.answer = SAMPLE_ANSWER.into();
+                    // A real conversation, so both sides of the layout show.
+                    peek.bubbles = vec![
+                        (true, "这段话帮我翻译一下".to_string()),
+                        (false, SAMPLE_ANSWER.to_string()),
+                        (true, "第二点再展开说说".to_string()),
+                        (
+                            false,
+                            "第二点是 **Markdown 渲染**：标题、列表、代码块和引用都按各自的\
+                             样式排布，长文在卡片内滚动。"
+                                .to_string(),
+                        ),
+                    ];
+                    peek.answer = String::new();
                     // No status: a finished turn shows its answer and nothing
                     // else, which is what the preview should mirror.
                     peek.status.clear();
