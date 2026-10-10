@@ -54,7 +54,7 @@ use tokio_util::sync::CancellationToken;
 const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum: header, input card,
 /// action row, padding and gaps.
-const PANEL_COMPACT_BASE: f32 = 166.;
+const PANEL_COMPACT_BASE: f32 = 138.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
@@ -1471,7 +1471,11 @@ impl Peek {
             .size_full()
             .bg(bg)
             .text_color(fg)
-            .p(px(20.))
+            // Top padding is the strip the hidden title row overlays, so the
+            // window has no blank band above the input.
+            .px(px(20.))
+            .pt(px(34.))
+            .pb(px(20.))
             .gap(px(10.))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
@@ -1480,14 +1484,16 @@ impl Peek {
                     native_window::hide(window);
                 }
             }))
+            // Absolute, so the row costs no space: the pointer can still reach
+            // it, and it paints only while the pointer is over it.
             .child(
                 h_flex()
-                    .w_full()
+                    .absolute()
+                    .top(px(4.))
+                    .left(px(20.))
+                    .right(px(20.))
                     .items_center()
                     .gap(px(10.))
-                    // "Appear when needed, gone when done" applies to this row
-                    // too: the window keeps its space so the pointer can reach
-                    // it, but it only paints while the pointer is over it.
                     .opacity(0.)
                     .hover(|style| style.opacity(1.))
                     .child(
