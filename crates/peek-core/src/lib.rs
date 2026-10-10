@@ -319,6 +319,9 @@ impl DeepSeekEffort {
     }
 }
 
+pub const DEFAULT_OUTPUT_TOKENS: u32 = 16_384;
+pub const MAX_OUTPUT_TOKENS: u32 = 131_072;
+
 /// One configured service. Several may exist side by side, and each place in
 /// the app picks the channel it uses by id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,7 +362,7 @@ impl Default for Channel {
             api_key: String::new(),
             credential_id: String::new(),
             vision: false,
-            max_output_tokens: 2048,
+            max_output_tokens: DEFAULT_OUTPUT_TOKENS,
             reasoning_effort: DeepSeekEffort::Off,
         }
     }
@@ -403,7 +406,7 @@ impl Default for Provider {
             model: String::new(),
             credential_id: "answer-default".into(),
             vision: false,
-            max_output_tokens: 2048,
+            max_output_tokens: DEFAULT_OUTPUT_TOKENS,
             reasoning_effort: None,
         }
     }
@@ -443,6 +446,9 @@ pub struct Config {
     pub onboarding_complete: bool,
     pub decision: DecisionConfig,
     pub schema_version: u32,
+    /// One-time upgrade of the old 2048-token default. Missing in old files.
+    #[serde(default)]
+    pub output_limit_upgraded: bool,
     /// Configured services. Each place in the app picks one by id.
     pub channels: Vec<Channel>,
     /// Channel used for plain translation; empty means none chosen.
@@ -483,6 +489,7 @@ impl Default for Config {
             onboarding_complete: false,
             decision: DecisionConfig::default(),
             schema_version: 1,
+            output_limit_upgraded: true,
             channels: Vec::new(),
             basic_channel: String::new(),
             ai_channel: String::new(),
@@ -550,6 +557,15 @@ impl Config {
     /// and give Clef enough time to answer.
     pub fn migrate(&mut self) -> bool {
         let mut changed = false;
+        if !self.output_limit_upgraded {
+            for channel in &mut self.channels {
+                if channel.kind.is_ai() && channel.max_output_tokens == 2048 {
+                    channel.max_output_tokens = DEFAULT_OUTPUT_TOKENS;
+                }
+            }
+            self.output_limit_upgraded = true;
+            changed = true;
+        }
         if self.decision.timeout_ms <= 1500 {
             self.decision.timeout_ms = 4000;
             changed = true;
@@ -580,7 +596,7 @@ impl Config {
                 api_key: key,
                 credential_id: String::new(),
                 vision: false,
-                max_output_tokens: 2048,
+                max_output_tokens: DEFAULT_OUTPUT_TOKENS,
                 reasoning_effort: DeepSeekEffort::Off,
             });
             if self.decision_channel.is_empty() {
@@ -629,7 +645,7 @@ impl Config {
             if channel.kind.needs_model() && channel.model.trim().is_empty() {
                 return Err("error-config-channel-model");
             }
-            if !(128..=16384).contains(&channel.max_output_tokens) {
+            if !(128..=MAX_OUTPUT_TOKENS).contains(&channel.max_output_tokens) {
                 return Err("error-config-tokens");
             }
         }
@@ -994,5 +1010,26 @@ mod tests {
         // Running again does not add a second one.
         assert!(!config.migrate());
         assert_eq!(config.decision_candidates().count(), 1);
+    }
+
+    #[test]
+    fn legacy_output_limit_is_upgraded_once_and_custom_values_are_kept() {
+        let mut config: Config = serde_json::from_str(
+            r#"{"channels":[
+            {"id":"old","kind":"chat_completions","max_output_tokens":2048},
+            {"id":"custom","kind":"deep_seek","max_output_tokens":4096}
+        ]}"#,
+        )
+        .unwrap();
+        assert!(!config.output_limit_upgraded);
+        assert!(config.migrate());
+        assert_eq!(config.channels[0].max_output_tokens, DEFAULT_OUTPUT_TOKENS);
+        assert_eq!(config.channels[1].max_output_tokens, 4096);
+        // The user can still deliberately choose 2048 after the upgrade.
+        config.channels[0].max_output_tokens = 2048;
+        let saved = serde_json::to_string(&config).unwrap();
+        let mut restored: Config = serde_json::from_str(&saved).unwrap();
+        assert!(!restored.migrate());
+        assert_eq!(restored.channels[0].max_output_tokens, 2048);
     }
 }

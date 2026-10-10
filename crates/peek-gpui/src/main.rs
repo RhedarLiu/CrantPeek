@@ -332,6 +332,7 @@ struct Peek {
     channel_name: Entity<InputState>,
     channel_endpoint: Entity<InputState>,
     channel_model: Entity<InputState>,
+    channel_tokens: Entity<InputState>,
     channel_key: Entity<InputState>,
     channel_kind: Entity<SelectState<Vec<SharedString>>>,
     channel_effort: Entity<SelectState<Vec<SharedString>>>,
@@ -419,6 +420,7 @@ impl Peek {
         let channel_name = cx.new(|cx| InputState::new(window, cx));
         let channel_endpoint = cx.new(|cx| InputState::new(window, cx));
         let channel_model = cx.new(|cx| InputState::new(window, cx));
+        let channel_tokens = cx.new(|cx| InputState::new(window, cx));
         let channel_key = cx.new(|cx| InputState::new(window, cx).masked(true));
         let kinds: Vec<SharedString> = ChannelKind::ALL
             .iter()
@@ -550,6 +552,7 @@ impl Peek {
             channel_name,
             channel_endpoint,
             channel_model,
+            channel_tokens,
             channel_key,
             channel_kind,
             channel_effort,
@@ -1248,6 +1251,13 @@ impl Peek {
             state.set_selected_index(Some(IndexPath::new(index)), window, cx);
         });
 
+        let tokens = existing
+            .as_ref()
+            .map(|c| c.max_output_tokens)
+            .unwrap_or(peek_core::DEFAULT_OUTPUT_TOKENS)
+            .to_string();
+        self.channel_tokens
+            .update(cx, |state, cx| state.set_value(tokens, window, cx));
         self.dialog_measured = 0.;
         let effort = existing
             .as_ref()
@@ -1346,6 +1356,12 @@ impl Peek {
                                     Input::new(&peek.channel_model).into_any_element(),
                                 ))
                             })
+                            .when(kind.is_ai(), |this| {
+                                this.child(field(
+                                    i18n::tr("settings-max-tokens"),
+                                    Input::new(&peek.channel_tokens).into_any_element(),
+                                ))
+                            })
                             .when(kind == ChannelKind::DeepSeek, |this| {
                                 this.child(field(
                                     i18n::tr("channels-reasoning-effort"),
@@ -1431,6 +1447,18 @@ impl Peek {
             return false;
         }
 
+        let max_output_tokens = if kind.is_ai() {
+            match self.channel_tokens.read(cx).value().trim().parse::<u32>() {
+                Ok(value) if (128..=peek_core::MAX_OUTPUT_TOKENS).contains(&value) => value,
+                _ => {
+                    self.notify_error(i18n::tr("error-config-tokens"));
+                    cx.notify();
+                    return false;
+                }
+            }
+        } else {
+            peek_core::DEFAULT_OUTPUT_TOKENS
+        };
         let editing = self.editing_channel.clone();
         let id = editing.clone().unwrap_or_else(|| {
             let stamp = std::time::SystemTime::now()
@@ -1460,7 +1488,7 @@ impl Peek {
             api_key,
             credential_id: String::new(),
             vision: false,
-            max_output_tokens: 2048,
+            max_output_tokens,
             reasoning_effort: if kind == ChannelKind::DeepSeek {
                 self.channel_effort
                     .read(cx)
