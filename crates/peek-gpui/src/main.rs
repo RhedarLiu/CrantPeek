@@ -2431,6 +2431,11 @@ impl Render for Peek {
                 fallback
             });
         }
+        // A settings page may be long, especially with increased UI zoom.
+        // Keep the native window on its display; the settings stack scrolls.
+        if let Some(display) = window.display(cx) {
+            height = height.min((display.bounds().size.height.as_f32() - 80.).max(300.));
+        }
         let chrome_offset = if !self.settings && chrome_visible() {
             scaled(PANEL_CHROME_HEIGHT)
         } else {
@@ -3213,16 +3218,19 @@ impl Peek {
     ) -> AnyElement {
         self.picker_row(
             i18n::tr(key),
-            Switch::new(key).checked(checked).on_click(cx.listener(
-                move |this, value: &bool, _, cx| {
-                    let previous = this.config.clone();
-                    assign(&mut this.config, *value);
-                    if !this.persist_config() {
-                        this.config = previous;
-                    }
-                    cx.notify();
-                },
-            )),
+            h_flex()
+                .w_full()
+                .justify_end()
+                .child(Switch::new(key).checked(checked).on_click(cx.listener(
+                    move |this, value: &bool, _, cx| {
+                        let previous = this.config.clone();
+                        assign(&mut this.config, *value);
+                        if !this.persist_config() {
+                            this.config = previous;
+                        }
+                        cx.notify();
+                    },
+                ))),
             self.set,
         )
     }
@@ -3831,6 +3839,20 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         *publish_target.borrow_mut() = Some(view.clone());
         view.update(cx, |peek, cx| {
             // In-memory only: a preview must never overwrite the real choice.
+
+            if let Ok(zoom) = std::env::var("PEEK_ZOOM")
+                .unwrap_or_default()
+                .parse::<f32>()
+                && (0.8..=1.5).contains(&zoom)
+            {
+                peek.config.zoom = zoom;
+            }
+            if let Ok(theme) = std::env::var("PEEK_THEME")
+                && matches!(theme.as_str(), "light" | "dark" | "system")
+            {
+                peek.config.theme = theme;
+            }
+            apply_appearance(&peek.config, Some(window), cx);
 
             if std::env::var("PEEK_OFFLINE_SELFTEST").is_ok() {
                 peek.config = Config::default();

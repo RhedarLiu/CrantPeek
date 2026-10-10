@@ -357,3 +357,5 @@ status-update-available = Version { $version } is available. Install it from the
 status-update-current = No newer public release is available
 status-update-invalid = The update service returned an invalid version
 status-update-open-failed = Unable to open the update downloads page
+
+settings-decision-wait = Decision wait time

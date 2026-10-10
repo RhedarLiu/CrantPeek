@@ -111,6 +111,20 @@ pub fn resize_panel(
                         frame.origin.y +=
                             f64::from(upward) + frame.size.height - new_frame.size.height;
                         frame.size = new_frame.size;
+                        let screen: *mut AnyObject = msg_send![native, screen];
+                        if !screen.is_null() {
+                            let visible: NSRect = msg_send![screen, visibleFrame];
+                            frame.origin.y = frame.origin.y.clamp(
+                                visible.origin.y,
+                                (visible.origin.y + visible.size.height - frame.size.height)
+                                    .max(visible.origin.y),
+                            );
+                            frame.origin.x = frame.origin.x.clamp(
+                                visible.origin.x,
+                                (visible.origin.x + visible.size.width - frame.size.width)
+                                    .max(visible.origin.x),
+                            );
+                        }
                         // One frame change, rather than move now / resize on
                         // the next executor turn. GPUI's view callback updates
                         // the drawable size as part of this operation.

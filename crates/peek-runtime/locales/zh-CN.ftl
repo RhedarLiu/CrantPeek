@@ -382,3 +382,5 @@ status-update-available = 发现新版本 { $version }，可从下载页面安�
 status-update-current = 当前没有可用的新公开版本
 status-update-invalid = 更新服务返回了无法识别的版本信息
 status-update-open-failed = 无法打开更新下载页面
+
+settings-decision-wait = 决策等待时间
