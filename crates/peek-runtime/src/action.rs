@@ -15,6 +15,9 @@ pub enum OverlayEvent {
     Status(String),
     /// A streamed answer chunk.
     Chunk(String),
+    /// The turn failed; the overlay raises this as a notification rather than
+    /// leaving it in the card.
+    Failed(String),
     /// The turn ended, whether it succeeded or not.
     Finished,
 }

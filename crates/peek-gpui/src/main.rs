@@ -146,13 +146,16 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
-    /// Failure text waiting for a `Window`: a turn's errors arrive through the
-    /// poll loop, where no notification can be raised.
-    pending_toast: Option<String>,
-    /// Result of the last connection test: channel id and what happened.
-    channel_test: Option<(String, String)>,
-    /// Sends test results from the network task to the poll loop.
-    test_tx: std::sync::mpsc::Sender<(String, String)>,
+    /// A message waiting for a `Window`, with whether it reports a failure. A
+    /// turn's outcome arrives through the poll loop, where no notification can
+    /// be raised.
+    pending_toast: Option<(bool, String)>,
+    /// Channel a connection test is running for, so its row can show progress
+    /// on the button rather than an extra line of text.
+    testing_channel: Option<String>,
+    /// Sends test results from the network task to the poll loop: the channel
+    /// id, whether it failed, and the message to show.
+    test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
     /// Channel being edited, or `None` when the dialog is adding one.
     editing_channel: Option<String>,
     /// Draft fields for the channel dialog.
@@ -231,7 +234,7 @@ impl Peek {
             follow_up,
             settings_tab: 0,
             pending_toast: None,
-            channel_test: None,
+            testing_channel: None,
             test_tx,
             editing_channel: None,
             channel_name,
@@ -273,9 +276,15 @@ impl Peek {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
-                while let Ok((id, message)) = test_rx.try_recv() {
+                while let Ok((id, failed, message)) = test_rx.try_recv() {
                     this.update(cx, |peek, cx| {
-                        peek.channel_test = Some((id, message));
+                        peek.testing_channel = None;
+                        if failed {
+                            peek.notify_error(message);
+                        } else {
+                            peek.notify_success(message);
+                        }
+                        let _ = id;
                         cx.notify();
                     })
                     .ok();
@@ -951,14 +960,22 @@ impl Peek {
         let Some(channel) = self.config.channel(&id).cloned() else {
             return;
         };
-        self.channel_test = Some((id.clone(), i18n::tr("channels-testing")));
+        self.testing_channel = Some(id.clone());
         cx.notify();
         let client = self.client.clone();
         let tx = self.test_tx.clone();
         let ui_language = self.config.ui_language.clone();
         self.runtime.spawn(async move {
             let locale = i18n::I18n::new(&ui_language);
-            let outcome = if channel.kind == ChannelKind::DeepLx {
+            // A failure names the URL it tried: a base missing its version
+            // segment is the usual cause, and the status alone hides that.
+            let told = |url: &str, err: &peek_network::Error| {
+                locale.format(
+                    "channels-test-failed",
+                    &[("detail", &format!("{} · {url}", locale.network_error(err)))],
+                )
+            };
+            let (ok, message) = if channel.kind == ChannelKind::DeepLx {
                 let url = channel.endpoint.clone();
                 match client
                     .translate_deeplx(
@@ -970,28 +987,22 @@ impl Peek {
                     )
                     .await
                 {
-                    Ok(_) => i18n::tr("channels-test-ok"),
-                    Err(err) => locale.format(
-                        "channels-test-failed",
-                        &[("detail", &format!("{} · {url}", locale.network_error(&err)))],
-                    ),
+                    Ok(_) => (false, i18n::tr("channels-test-ok")),
+                    Err(err) => (true, told(&url, &err)),
                 }
             } else {
                 let Some(provider) = channel.provider() else {
-                    let _ = tx.send((id.clone(), i18n::tr("status-channel-missing")));
+                    let _ = tx.send((id, true, i18n::tr("status-channel-missing")));
                     return;
                 };
                 let url = peek_network::endpoint_url(&provider)
                     .unwrap_or_else(|_| provider.base_url.clone());
                 match client.probe(&provider, &channel.api_key).await {
-                    Ok(()) => i18n::tr("channels-test-ok"),
-                    Err(err) => locale.format(
-                        "channels-test-failed",
-                        &[("detail", &format!("{} · {url}", locale.network_error(&err)))],
-                    ),
+                    Ok(()) => (false, i18n::tr("channels-test-ok")),
+                    Err(err) => (true, told(&url, &err)),
                 }
             };
-            let _ = tx.send((id, outcome));
+            let _ = tx.send((id, ok, message));
         });
     }
 
@@ -1050,7 +1061,12 @@ impl Peek {
     /// notification. Errors are collected here rather than written into the
     /// panel: the panel is for results, not for a log.
     fn notify_error(&mut self, message: String) {
-        self.pending_toast = Some(message);
+        self.pending_toast = Some((true, message));
+    }
+
+    /// A confirmation, for something that succeeded.
+    fn notify_success(&mut self, message: String) {
+        self.pending_toast = Some((false, message));
     }
 
     /// Builds the prompt and starts the network turn. Returns whether a turn
@@ -1296,7 +1312,7 @@ impl Peek {
                     // a notification and the panel keeps only a short state.
                     self.notify_error(message.clone());
                     self.busy = false;
-                    self.forward_overlay(OverlayEvent::Status(message));
+                    self.forward_overlay(OverlayEvent::Failed(message));
                     self.forward_overlay(OverlayEvent::Finished);
                     self.overlay = None;
                 }
@@ -1309,8 +1325,13 @@ impl Render for Peek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A selection arrives off the UI thread, so it is applied here where a
         // `Window` is available.
-        if let Some(message) = self.pending_toast.take() {
-            window.push_notification(Notification::error(message).autohide(true), cx);
+        if let Some((failed, message)) = self.pending_toast.take() {
+            let toast = if failed {
+                Notification::error(message)
+            } else {
+                Notification::success(message)
+            };
+            window.push_notification(toast.autohide(true), cx);
         }
         if let Some(text) = self.pending_input.take() {
             self.input
@@ -1718,13 +1739,12 @@ impl Peek {
                             let remove_id = id.clone();
                             let test_id = id.clone();
                             let label = format!("{name} · {}", i18n::tr(kind_key));
-                            // The last test's result, shown under the row it
-                            // belongs to so a failure names its own channel.
-                            let outcome = self
-                                .channel_test
-                                .as_ref()
-                                .filter(|(tested, _)| tested == id)
-                                .map(|(_, message)| message.clone());
+                            // The test reports through a notification; its
+                            // progress belongs on the button, not in a line.
+                            let testing = self
+                                .testing_channel
+                                .as_deref()
+                                .is_some_and(|tested| tested == id);
                             v_flex()
                                 .w_full()
                                 .gap(px(4.))
@@ -1743,6 +1763,7 @@ impl Peek {
                                         .child(
                                             Button::new(SharedString::from(format!("test-{id}")))
                                                 .icon(IconName::PlugZap)
+                                                .loading(testing)
                                                 .tooltip(i18n::tr("channels-test"))
                                                 .on_click(cx.listener(
                                                     move |this, _event, _window, cx| {
@@ -1775,16 +1796,6 @@ impl Peek {
                                                 )),
                                         ),
                                 )
-                                // The last test's outcome, under its own row.
-                                .when_some(outcome, |this, message| {
-                                    this.child(
-                                        div()
-                                            .font_family(set.latin)
-                                            .text_size(px(11.))
-                                            .text_color(muted)
-                                            .child(message),
-                                    )
-                                })
                                 .into_any_element()
                         }))
                         .child(

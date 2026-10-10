@@ -57,6 +57,8 @@ pub struct Snip {
     events: Option<Receiver<OverlayEvent>>,
     /// Keyboard focus, so Esc reaches the overlay.
     focus: FocusHandle,
+    /// A failure waiting for a frame with a Window.
+    pending_toast: Option<String>,
     /// The selection is committed; only the result card stays interactive.
     captured: bool,
     /// Close as soon as the text is copied, from the user's settings.
@@ -86,6 +88,7 @@ impl Snip {
             ocr_tx,
             events: None,
             focus: cx.focus_handle(),
+            pending_toast: None,
             captured: false,
             close_on_copy,
         };
@@ -159,6 +162,12 @@ impl Snip {
                 match event {
                     OverlayEvent::Status(status) => self.status = status,
                     OverlayEvent::Chunk(chunk) => self.answer.push_str(&chunk),
+                    // A failure is raised on the next frame, where a Window
+                    // exists; the card stays for content, not for errors.
+                    OverlayEvent::Failed(message) => {
+                        self.pending_toast = Some(message.clone());
+                        self.status = i18n::tr("status-failed");
+                    }
                     OverlayEvent::Finished => self.busy = false,
                 }
                 changed = true;
@@ -282,6 +291,9 @@ impl Snip {
 
 impl Render for Snip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(message) = self.pending_toast.take() {
+            window.push_notification(Notification::error(message).autohide(true), cx);
+        }
         let selection = self.selection();
         let accent = hsla(0.58, 0.9, 0.6, 1.0);
         let theme = cx.theme();
