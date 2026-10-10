@@ -52,6 +52,14 @@ use tokio_util::sync::CancellationToken;
 
 /// Poll interval for the tray/hotkey channels. Both crates deliver events on
 /// their own channels rather than through GPUI, so they are drained on a timer.
+/// Which global hotkey an input edits.
+#[derive(Clone, Copy)]
+enum HotkeyField {
+    Blank,
+    Screenshot,
+    Selection,
+}
+
 /// Which part of the decision service an input edits.
 #[derive(Clone, Copy)]
 enum DecisionField {
@@ -228,6 +236,7 @@ struct Peek {
     /// Editable global hotkeys, persisted as they are typed.
     blank_hotkey: Entity<InputState>,
     screenshot_hotkey: Entity<InputState>,
+    selection_hotkey: Entity<InputState>,
     /// Channel being edited, or `None` when the dialog is adding one.
     editing_channel: Option<String>,
     /// Draft fields for the channel dialog.
@@ -279,6 +288,7 @@ impl Peek {
         let decision_key = cx.new(|cx| InputState::new(window, cx).masked(true));
         let blank_hotkey = cx.new(|cx| InputState::new(window, cx));
         let screenshot_hotkey = cx.new(|cx| InputState::new(window, cx));
+        let selection_hotkey = cx.new(|cx| InputState::new(window, cx));
         // Draft fields for adding a channel. One set is enough: the fields a
         // kind needs are shown or hidden as the type changes.
         let channel_name = cx.new(|cx| InputState::new(window, cx));
@@ -313,6 +323,7 @@ impl Peek {
             (&decision_key, &config.decision.credential_id),
             (&blank_hotkey, &config.blank_hotkey),
             (&screenshot_hotkey, &config.screenshot_hotkey),
+            (&selection_hotkey, &config.selection_hotkey),
         ] {
             let value = value.clone();
             input.update(cx, |state, cx| state.set_value(&value, window, cx));
@@ -342,13 +353,17 @@ impl Peek {
             })
             .detach();
         }
-        for (input, screenshot) in [(&blank_hotkey, false), (&screenshot_hotkey, true)] {
+        for (input, which) in [
+            (&blank_hotkey, HotkeyField::Blank),
+            (&screenshot_hotkey, HotkeyField::Screenshot),
+            (&selection_hotkey, HotkeyField::Selection),
+        ] {
             cx.observe(input, move |this, state, cx| {
                 let value = state.read(cx).value().trim().to_owned();
-                let slot = if screenshot {
-                    &mut this.config.screenshot_hotkey
-                } else {
-                    &mut this.config.blank_hotkey
+                let slot = match which {
+                    HotkeyField::Blank => &mut this.config.blank_hotkey,
+                    HotkeyField::Screenshot => &mut this.config.screenshot_hotkey,
+                    HotkeyField::Selection => &mut this.config.selection_hotkey,
                 };
                 if *slot != value {
                     *slot = value;
@@ -388,6 +403,7 @@ impl Peek {
             decision_key,
             blank_hotkey,
             screenshot_hotkey,
+            selection_hotkey,
             editing_channel: None,
             channel_name,
             channel_endpoint,
@@ -2178,6 +2194,11 @@ impl Peek {
                             Input::new(&self.screenshot_hotkey).into_any_element(),
                             set,
                         ))
+                        .child(self.picker_row(
+                            i18n::tr("settings-shortcut-selection"),
+                            Input::new(&self.selection_hotkey).into_any_element(),
+                            set,
+                        ))
                         .child(
                             div()
                                 .font_family(set.latin)
@@ -2694,6 +2715,8 @@ fn main() -> anyhow::Result<()> {
         );
         let tray_tx = action_tx.clone();
         let view_tx = action_tx.clone();
+        // The hotkey loop reads the selection on a thread of its own.
+        let selection_tx = action_tx.clone();
 
         let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
             let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
@@ -2748,6 +2771,7 @@ fn main() -> anyhow::Result<()> {
         let parsed: Vec<(&str, Option<HotKey>)> = [
             ("blank", hotkey_config.blank_hotkey.as_str()),
             ("screenshot", hotkey_config.screenshot_hotkey.as_str()),
+            ("selection", hotkey_config.selection_hotkey.as_str()),
         ]
         .into_iter()
         .map(|(name, text)| {
@@ -2766,6 +2790,11 @@ fn main() -> anyhow::Result<()> {
         let snip_hotkey_id = parsed
             .iter()
             .find(|(name, _)| *name == "screenshot")
+            .and_then(|(_, hotkey)| hotkey.as_ref())
+            .map(HotKey::id);
+        let selection_hotkey_id = parsed
+            .iter()
+            .find(|(name, _)| *name == "selection")
             .and_then(|(_, hotkey)| hotkey.as_ref())
             .map(HotKey::id);
         match GlobalHotKeyManager::new() {
@@ -2832,6 +2861,7 @@ fn main() -> anyhow::Result<()> {
                 let mut toggle = false;
                 let mut quit = false;
                 let mut screenshot = false;
+                let mut ask_selection = false;
 
                 while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
                     if event.state != HotKeyState::Pressed {
@@ -2841,7 +2871,27 @@ fn main() -> anyhow::Result<()> {
                         toggle = true;
                     } else if Some(event.id) == snip_hotkey_id {
                         screenshot = true;
+                    } else if Some(event.id) == selection_hotkey_id {
+                        ask_selection = true;
                     }
+                }
+
+                if ask_selection {
+                    // Reading a selection goes through the accessibility API,
+                    // which can take a moment, so it happens off this thread.
+                    // An empty or unreadable selection opens the panel ready for
+                    // input rather than doing nothing at all.
+                    let tx = selection_tx.clone();
+                    std::thread::spawn(move || {
+                        let text = peek_runtime::selection::read().unwrap_or_default();
+                        let text = text.trim().to_owned();
+                        let action = if text.is_empty() {
+                            Action::Blank
+                        } else {
+                            Action::Selection(text)
+                        };
+                        let _ = tx.send(action);
+                    });
                 }
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
                     if event.id == show_id {

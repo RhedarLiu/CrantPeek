@@ -365,6 +365,12 @@ pub struct Config {
     pub chinese_target: String,
     pub blank_hotkey: String,
     pub screenshot_hotkey: String,
+    /// Reads the current selection and asks about it.
+    ///
+    /// This was a double tap of Ctrl, watched through a system event tap, which
+    /// is a permission of its own and proved unreliable; a hotkey needs only the
+    /// registration that the other two already use.
+    pub selection_hotkey: String,
     pub double_ctrl_ms: u64,
     pub hide_on_blur: bool,
     pub smart_mode: bool,
@@ -393,6 +399,7 @@ impl Default for Config {
             chinese_target: "English".into(),
             blank_hotkey: format!("{modifier}+Shift+A"),
             screenshot_hotkey: format!("{modifier}+Shift+D"),
+            selection_hotkey: format!("{modifier}+E"),
             double_ctrl_ms: 350,
             hide_on_blur: true,
             smart_mode: true,

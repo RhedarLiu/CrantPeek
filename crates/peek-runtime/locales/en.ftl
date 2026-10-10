@@ -165,6 +165,7 @@ error-config-channel-missing = A selected channel is missing or cannot serve tha
 error-translation-size = Translation response is too large
 settings-font-set = Font set
 settings-shortcut-blank = Blank window
+settings-shortcut-selection = Ask about the selection
 settings-shortcut-screenshot = Screenshot
 settings-double-ctrl = Double Ctrl interval (ms)
 settings-shortcut-hint = Example: Super+Shift+A (Command on macOS), Alt+Shift+A (Windows). Restart to apply changes.

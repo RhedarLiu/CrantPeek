@@ -186,6 +186,7 @@ error-config-channel-missing = 选择的渠道不存在或不能用于该位置
 error-translation-size = 翻译响应超过大小限制
 settings-font-set = 字体方案
 settings-shortcut-blank = 空白浮窗
+settings-shortcut-selection = 查询选中文字
 settings-shortcut-screenshot = 截图
 settings-double-ctrl = 双击 Ctrl 间隔（ms）
 settings-shortcut-hint = 示例：Super+Shift+A（macOS 为 Command）、Alt+Shift+A（Windows）。修改后需重启生效。
