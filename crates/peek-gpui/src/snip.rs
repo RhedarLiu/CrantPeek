@@ -328,17 +328,9 @@ impl Render for Snip {
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                // The recognised text, so the card explains what is being
-                // translated and "extract text" has an obvious subject.
-                .when_some(self.text.clone(), |this, text| {
-                    this.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(muted)
-                            .line_clamp(2)
-                            .child(text),
-                    )
-                })
+                // The recognised text is deliberately not shown: the card is
+                // for the translation, and the text is one press away on the
+                // copy button. Printing it made the card a transcript.
                 .child(
                     div()
                         .id("snip_scroll")
