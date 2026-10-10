@@ -1152,7 +1152,9 @@ impl Peek {
         }
         self.messages.push(Message {
             role: "user".into(),
-            content: text.clone(),
+            // Delimited, so the model can tell the text it works on from the
+            // instructions it was given.
+            content: peek_core::wrap_content(&text),
         });
         peek_core::bound_history(&mut self.messages);
 
