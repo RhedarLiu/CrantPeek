@@ -235,6 +235,9 @@ struct Peek {
     /// Sends test results from the network task to the poll loop: the channel
     /// id, whether it failed, and the message to show.
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
+    /// Sends a decided task back from the decision service, with the text it
+    /// was decided for.
+    route_tx: std::sync::mpsc::Sender<(String, Task)>,
     /// Editable decision-service settings, persisted as they are typed.
     decision_endpoint: Entity<InputState>,
     decision_model: Entity<InputState>,
@@ -309,6 +312,7 @@ impl Peek {
             cx.new(|cx| SelectState::new(kinds, Some(IndexPath::new(0)), window, cx));
 
         let (test_tx, test_rx) = std::sync::mpsc::channel();
+        let (route_tx, route_rx) = std::sync::mpsc::channel();
         // Enter is handled inside the input, so it is picked up from its event
         // rather than from a key listener above it, which never sees the key.
         cx.subscribe(&input, |this, _input, event: &InputEvent, cx| {
@@ -405,6 +409,7 @@ impl Peek {
             bubbles: Vec::new(),
             testing_channel: None,
             test_tx,
+            route_tx,
             decision_endpoint,
             decision_model,
             decision_key,
@@ -451,6 +456,12 @@ impl Peek {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
+                while let Ok((text, task)) = route_rx.try_recv() {
+                    this.update(cx, |peek, cx| {
+                        peek.begin_turn_as(text.clone(), false, Some(task), cx);
+                    })
+                    .ok();
+                }
                 while let Ok((id, failed, message)) = test_rx.try_recv() {
                     this.update(cx, |peek, cx| {
                         peek.testing_channel = None;
@@ -743,7 +754,42 @@ impl Peek {
         // The text stays in the box: clearing it before there is a result takes
         // away what the user just wrote, and they may want to edit it.
         let text = self.input.read(cx).value().trim().to_owned();
-        self.begin_turn(text, false, cx);
+        if text.is_empty() {
+            return;
+        }
+        // Automatic, with a decision service configured, asks it what this is;
+        // a failed call, a low confidence or no service falls back to the local
+        // rules, which need no network at all.
+        let automatic = self.selected_task(cx).is_none();
+        if !automatic || !self.config.decision.enabled {
+            self.begin_turn(text, false, cx);
+            return;
+        }
+        let decision = self.config.decision.clone();
+        let client = self.client.clone();
+        let tx = self.route_tx.clone();
+        let fallback = local_route(
+            &text,
+            &self.config.target_language,
+            &self.config.chinese_target,
+        )
+        .task;
+        self.runtime.spawn(async move {
+            let chosen = match client
+                .decide(
+                    &decision.endpoint,
+                    &decision.credential_id,
+                    &decision.model,
+                    &text,
+                    CancellationToken::new(),
+                )
+                .await
+            {
+                Ok(answer) if answer.confidence >= decision.min_confidence => answer.task,
+                _ => fallback,
+            };
+            let _ = tx.send((text, chosen));
+        });
     }
 
     /// Translates through the configured DeepLX endpoint.
@@ -1266,6 +1312,17 @@ impl Peek {
     /// actually started. Split out of `start_query` so `PEEK_SELFTEST` can
     /// drive the whole pipeline without a window or a click.
     fn begin_turn(&mut self, text: String, followup: bool, cx: &mut Context<Self>) -> bool {
+        self.begin_turn_as(text, followup, None, cx)
+    }
+
+    /// Starts a turn, optionally with the task already decided.
+    fn begin_turn_as(
+        &mut self,
+        text: String,
+        followup: bool,
+        decided: Option<Task>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if text.is_empty() {
             return false;
         }
@@ -1302,7 +1359,9 @@ impl Peek {
         );
         // The picker is authoritative. Automatic is now one of its entries
         // rather than a hidden setting that overrode the choice.
-        let task = self.selected_task(cx).unwrap_or(route.task);
+        let task = decided
+            .or_else(|| self.selected_task(cx))
+            .unwrap_or(route.task);
         let target = effective_target(&route.target, "").to_owned();
 
         // Plain translation may go through a basic channel such as DeepLX;
