@@ -1562,6 +1562,9 @@ impl Peek {
                         .w_full()
                         .items_center()
                         .gap(px(10.))
+                        // Inset so the title lines up with the text inside the
+                        // input box, whose own padding starts at the same place.
+                        .px(px(14.))
                         .child(
                             div()
                                 .flex_1()
