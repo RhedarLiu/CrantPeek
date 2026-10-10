@@ -58,7 +58,9 @@ const PANEL_COMPACT_BASE: f32 = 166.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
-const PANEL_EXPANDED_HEIGHT: f32 = 560.;
+/// A result card taller than this would push the panel past a comfortable
+/// reading window; the card scrolls beyond it.
+const PANEL_RESULT_MAX_HEIGHT: f32 = 620.;
 /// Chrome the settings page always shows: header, tab row, padding and gaps.
 const SETTINGS_CHROME: f32 = 168.;
 /// One row of the channel list, or a channel button in the used-for pickers.
@@ -463,7 +465,29 @@ impl Peek {
     /// The task chosen in the dropdown.
     /// Whether there is more to show than the input box.
     fn has_result(&self) -> bool {
-        self.busy || !self.answer.is_empty() || !self.dictionary_note.is_empty()
+        // Deliberately not `busy`: a running turn shows its progress on the
+        // button, so an empty result card would be a large blank area.
+        !self.answer.is_empty() || !self.dictionary_note.is_empty()
+    }
+
+    /// Panel height while there is a result, following how much has streamed in.
+    ///
+    /// Wrapping is estimated from the character count, so the panel grows with
+    /// the answer instead of opening at a fixed size and leaving it empty.
+    fn result_height(&self) -> f32 {
+        let columns = 42.0;
+        let rows: f32 = self
+            .answer
+            .lines()
+            .map(|line| (line.chars().count() as f32 / columns).ceil().max(1.0))
+            .sum();
+        let dictionary = if self.dictionary_note.is_empty() {
+            0.0
+        } else {
+            96.0
+        };
+        let chrome = PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.0 + 96.0;
+        (chrome + dictionary + rows * 26.0).clamp(chrome, PANEL_RESULT_MAX_HEIGHT)
     }
 
     fn selected_task(&self, cx: &App) -> Task {
@@ -517,12 +541,11 @@ impl Peek {
     }
 
     /// Reads the input box and starts a turn, clearing it only if one began.
-    fn start_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // The text stays in the box: clearing it before there is a result takes
+        // away what the user just wrote, and they may want to edit it.
         let text = self.input.read(cx).value().trim().to_owned();
-        if self.begin_turn(text, false, cx) {
-            self.input
-                .update(cx, |state, cx| state.set_value("", window, cx));
-        }
+        self.begin_turn(text, false, cx);
     }
 
     /// Translates through the configured DeepLX endpoint.
@@ -1299,7 +1322,7 @@ impl Render for Peek {
         let height = if self.settings {
             self.settings_height()
         } else if self.has_result() {
-            PANEL_EXPANDED_HEIGHT
+            self.result_height()
         } else {
             // The textarea auto-grows between two and five rows, so the compact
             // panel follows it rather than guessing a single height.
@@ -1504,18 +1527,15 @@ impl Peek {
                             .rounded(px(16.))
                             .p(px(16.))
                             .overflow_y_scroll()
-                            .when(self.answer.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .font_family(set.latin)
-                                        .text_size(px(13.))
-                                        .text_color(muted)
-                                        .child(i18n::tr("query-empty-title")),
-                                )
-                            })
-                            .when(!self.answer.is_empty(), |this| {
-                                this.child(TextView::markdown("answer", self.answer.clone()))
-                            }),
+                            // Fades in as it arrives, so the card does not
+                            // appear as a hard edge mid-stream.
+                            .child(
+                                TextView::markdown("answer", self.answer.clone()).with_animation(
+                                    "answer-in",
+                                    Animation::new(std::time::Duration::from_millis(200)),
+                                    |view, delta| view.opacity(delta),
+                                ),
+                            ),
                     )
                     .when(
                         self.permissions.iter().any(|(_, granted)| !granted),
