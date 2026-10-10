@@ -128,30 +128,42 @@ fn looks_like_error(text: &str) -> bool {
 
 /// A line of source, not prose that happens to contain "let me" or "const".
 fn looks_like_code(text: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim();
-        if line.starts_with("fn ")
-            || line.starts_with("pub fn ")
-            || line.starts_with("async fn ")
-            || line.starts_with("def ")
-            || line.starts_with("function ")
-            || line.starts_with("impl ")
-            || line.starts_with("#include")
-        {
-            return true;
-        }
-        let Some(rest) = line
-            .strip_prefix("let ")
-            .or_else(|| line.strip_prefix("const "))
-        else {
-            return false;
-        };
-        let head = rest.split_whitespace().next().unwrap_or("");
-        if matches!(head, "me" | "us" | "him" | "her" | "them" | "the") {
-            return false;
-        }
-        rest.contains('=') || rest.contains(';') || head == "mut"
-    })
+    // Some selection providers collapse newlines. Attributes and statement
+    // boundaries still expose declarations after leading comments/docstrings.
+    text.lines()
+        .chain(text.split(['\n', ';', '{', '}', '[', ']']))
+        .any(|line| {
+            let line = line.trim();
+            let line = if let Some(comment) = line.strip_prefix("/*") {
+                comment
+                    .split_once("*/")
+                    .map(|(_, code)| code.trim())
+                    .unwrap_or(line)
+            } else {
+                line
+            };
+            if line.starts_with("fn ")
+                || line.starts_with("pub fn ")
+                || line.starts_with("async fn ")
+                || line.starts_with("def ")
+                || line.starts_with("function ")
+                || line.starts_with("impl ")
+                || line.starts_with("#include")
+            {
+                return true;
+            }
+            let Some(rest) = line
+                .strip_prefix("let ")
+                .or_else(|| line.strip_prefix("const "))
+            else {
+                return false;
+            };
+            let head = rest.split_whitespace().next().unwrap_or("");
+            if matches!(head, "me" | "us" | "him" | "her" | "them" | "the") {
+                return false;
+            }
+            rest.contains('=') || rest.contains(';') || head == "mut"
+        })
 }
 
 pub fn local_route(text: &str, default_target: &str, chinese_target: &str) -> Route {
@@ -986,6 +998,46 @@ mod tests {
             Task::ExplainCode
         );
     }
+    #[test]
+    fn source_with_comments_and_collapsed_newlines_is_code() {
+        let rust = r#"//! Local OS OCR, no image upload.
+#[cfg(target_os = "macos")]
+pub fn recognize(image: &image::RgbaImage) -> Result<String, String> {
+    use objc2::AnyThread;
+    use objc2_foundation::{NSArray, NSData, NSDictionary};
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    recognize_text(image, &mut bytes)
+}"#;
+        for source in [
+            rust.to_owned(),
+            rust.lines().map(str::trim).collect::<String>(),
+        ] {
+            assert_eq!(
+                local_route(&source, "Chinese", "English").task,
+                Task::ExplainCode
+            );
+        }
+        for source in [
+            "//! Local OS OCR, no image upload.#[cfg(target_os = \"macos\")]pub fn recognize(image: &Image) -> Result<String, String> { recognize_text(image) }",
+            "/* English documentation */ const result = read();console.log(result);",
+        ] {
+            assert_eq!(
+                local_route(source, "Chinese", "English").task,
+                Task::ExplainCode
+            );
+        }
+        for prose in [
+            "Let me explain this function later.",
+            "The const keyword declares constants.",
+            "The error message says try again.",
+        ] {
+            assert_eq!(
+                local_route(prose, "Chinese", "English").task,
+                Task::Translate
+            );
+        }
+    }
+
     #[test]
     fn config_contains_no_api_key() {
         let c = Config::default();

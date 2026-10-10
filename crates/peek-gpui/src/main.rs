@@ -292,6 +292,11 @@ impl AutoDecision {
         channel: &Channel,
     ) -> Self {
         let (task, confidence, fallback) = match result {
+            Ok(answer) if answer.task == Task::Translate && local_task == Task::ExplainCode => (
+                Task::ExplainCode,
+                Some(answer.confidence),
+                Some("decision-detail-code-guard"),
+            ),
             Ok(answer) if answer.confidence >= threshold => {
                 (answer.task, Some(answer.confidence), None)
             }
@@ -4171,6 +4176,16 @@ mod automatic_decision_tests {
         assert_eq!(failed.task, Task::Define);
         assert!(failed.confidence.is_none());
         assert_eq!(failed.fallback, Some("decision-detail-unavailable"));
+    }
+
+    #[test]
+    fn automatic_source_code_is_not_translated_even_if_the_model_is_confident() {
+        let channel = Channel::default();
+        let mut response = decision(0.99).unwrap();
+        response.task = Task::Translate;
+        let details = AutoDecision::resolved(Ok(response), 0.6, Task::ExplainCode, &channel);
+        assert_eq!(details.task, Task::ExplainCode);
+        assert_eq!(details.fallback, Some("decision-detail-code-guard"));
     }
 
     #[test]

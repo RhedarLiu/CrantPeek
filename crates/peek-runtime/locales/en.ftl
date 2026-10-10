@@ -330,3 +330,5 @@ decision-detail-model = Decision model: { $channel } ({ $model })
 decision-detail-confidence = Model confidence: { $confidence }
 decision-detail-low-confidence = Low model confidence; using local rules
 decision-detail-unavailable = Decision service unavailable; using local rules
+
+decision-detail-code-guard = Source code detected; using code explanation (model chose translation)

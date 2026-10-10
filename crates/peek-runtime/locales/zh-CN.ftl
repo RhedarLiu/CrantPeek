@@ -355,3 +355,5 @@ decision-detail-model = 决策模型：{ $channel }（{ $model }）
 decision-detail-confidence = 模型置信度：{ $confidence }
 decision-detail-low-confidence = 模型置信度不足，已采用本地规则判断
 decision-detail-unavailable = 决策服务不可用，已采用本地规则判断
+
+decision-detail-code-guard = 检测到源码结构，已改用代码解释（模型判断为翻译）
