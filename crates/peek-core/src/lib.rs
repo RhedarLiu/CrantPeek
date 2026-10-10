@@ -101,8 +101,60 @@ pub fn wrap_content(text: &str) -> String {
     format!("<content>\n{safe}\n</content>")
 }
 
-pub fn local_route(text: &str, default_target: &str, chinese_target: &str) -> Route {
+/// A diagnostic, not the words "panic" or "error" inside an ordinary sentence.
+fn looks_like_error(text: &str) -> bool {
     let lower = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "traceback (most recent call last)",
+        "stack trace",
+        "fatal error",
+        "panicked at",
+        "thread panicked",
+        "exception in thread",
+        "unhandled exception",
+    ];
+    if MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+    text.lines().any(|line| {
+        let line = line.trim().to_lowercase();
+        line.starts_with("error:")
+            || line.starts_with("error[")
+            || line.starts_with("fatal:")
+            || line.starts_with("panic:")
+            || line.starts_with("exception:")
+    })
+}
+
+/// A line of source, not prose that happens to contain "let me" or "const".
+fn looks_like_code(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        if line.starts_with("fn ")
+            || line.starts_with("pub fn ")
+            || line.starts_with("async fn ")
+            || line.starts_with("def ")
+            || line.starts_with("function ")
+            || line.starts_with("impl ")
+            || line.starts_with("#include")
+        {
+            return true;
+        }
+        let Some(rest) = line
+            .strip_prefix("let ")
+            .or_else(|| line.strip_prefix("const "))
+        else {
+            return false;
+        };
+        let head = rest.split_whitespace().next().unwrap_or("");
+        if matches!(head, "me" | "us" | "him" | "her" | "them" | "the") {
+            return false;
+        }
+        rest.contains('=') || rest.contains(';') || head == "mut"
+    })
+}
+
+pub fn local_route(text: &str, default_target: &str, chinese_target: &str) -> Route {
     let kana = text.chars().any(|c| ('\u{3040}'..='\u{30ff}').contains(&c));
     let han = text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
     let source = if kana {
@@ -112,32 +164,9 @@ pub fn local_route(text: &str, default_target: &str, chinese_target: &str) -> Ro
     } else {
         "auto"
     };
-    let task = if [
-        "traceback (most recent call last)",
-        "panic",
-        "exception",
-        "error:",
-        "error[",
-        "fatal error",
-        "stack trace",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-    {
+    let task = if looks_like_error(text) {
         Task::ExplainError
-    } else if [
-        "fn ",
-        "def ",
-        "function ",
-        "=>",
-        "#include",
-        "impl ",
-        "let ",
-        "const ",
-    ]
-    .iter()
-    .any(|s| text.contains(s))
-    {
+    } else if looks_like_code(text) {
         Task::ExplainCode
     } else if !text.is_empty()
         && text.len() <= 64
@@ -187,14 +216,21 @@ pub enum ChannelKind {
     /// A DeepLX-compatible endpoint: a self-hosted proxy in front of DeepL's
     /// free web API, so it needs no credential, only a reachable URL.
     DeepLx,
+    /// A System One decision model: TypeSafe Jev or Cloudflare Clef.
+    /// It classifies text. It does not translate or chat.
+    Decision,
+    /// Google Translate's public web endpoint. Needs no key, only the endpoint.
+    GoogleFree,
 }
 
 impl ChannelKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::ChatCompletions,
         Self::Responses,
         Self::Anthropic,
         Self::DeepLx,
+        Self::GoogleFree,
+        Self::Decision,
     ];
 
     pub fn label_key(self) -> &'static str {
@@ -203,24 +239,44 @@ impl ChannelKind {
             Self::Responses => "channel-kind-responses",
             Self::Anthropic => "channel-kind-anthropic",
             Self::DeepLx => "channel-kind-deeplx",
+            Self::Decision => "channel-kind-decision",
+            Self::GoogleFree => "channel-kind-google",
         }
     }
 
-    /// AI kinds answer any task, including follow-ups and code explanations.
+    /// Free translation endpoints that answer plain translation only.
+    pub fn is_translation_only(self) -> bool {
+        matches!(self, Self::DeepLx | Self::GoogleFree)
+    }
+
+    /// Chat-style models. Follow-ups and code explanations need one of these.
     pub fn is_ai(self) -> bool {
-        !matches!(self, Self::DeepLx)
+        matches!(
+            self,
+            Self::ChatCompletions | Self::Responses | Self::Anthropic
+        )
     }
 
-    /// Every kind may carry a credential. AI kinds require one; a translation
-    /// endpoint often sits behind a proxy that wants a token, so DeepLX accepts
-    /// an optional one.
+    /// Plain translation. Only the translation endpoints do it. An AI kind can
+    /// translate too, but it is offered under LLM, not here.
+    pub fn supports_basic(self) -> bool {
+        self.is_translation_only()
+    }
+
+    /// Classifying a query into a task. Only a decision model does this.
+    pub fn supports_decision(self) -> bool {
+        matches!(self, Self::Decision)
+    }
+
+    /// AI and decision kinds require a key. DeepLX accepts an optional one, since
+    /// a proxy may want a token. The public Google and Bing endpoints need none.
     pub fn needs_credential(self) -> bool {
-        true
+        self.is_ai() || self.supports_decision() || self == Self::DeepLx
     }
 
-    /// Only AI kinds need a model id.
+    /// AI kinds and decision models need a model id. Translation endpoints do not.
     pub fn needs_model(self) -> bool {
-        self.is_ai()
+        self.is_ai() || self.supports_decision()
     }
 
     /// The wire protocol, for AI kinds.
@@ -229,7 +285,7 @@ impl ChannelKind {
             Self::ChatCompletions => Some(Protocol::ChatCompletions),
             Self::Responses => Some(Protocol::Responses),
             Self::Anthropic => Some(Protocol::Anthropic),
-            Self::DeepLx => None,
+            Self::DeepLx | Self::Decision | Self::GoogleFree => None,
         }
     }
 }
@@ -337,7 +393,7 @@ impl Default for DecisionConfig {
             endpoint: "https://api.typesafe.ai/v1/systemone".into(),
             model: "jev-latest".into(),
             credential_id: "decision-default".into(),
-            timeout_ms: 1500,
+            timeout_ms: 4000,
             min_confidence: 0.65,
         }
     }
@@ -357,8 +413,10 @@ pub struct Config {
     pub channels: Vec<Channel>,
     /// Channel used for plain translation; empty means none chosen.
     pub basic_channel: String,
-    /// Channel used for AI tasks, follow-ups and routing decisions.
+    /// Channel used for LLM tasks and follow-ups.
     pub ai_channel: String,
+    /// Decision-model channel. Empty means automatic mode uses local rules.
+    pub decision_channel: String,
     /// Close the screenshot overlay as soon as its text is copied.
     pub snip_close_on_copy: bool,
     pub target_language: String,
@@ -394,6 +452,7 @@ impl Default for Config {
             channels: Vec::new(),
             basic_channel: String::new(),
             ai_channel: String::new(),
+            decision_channel: String::new(),
             snip_close_on_copy: true,
             target_language: "Chinese".into(),
             chinese_target: "English".into(),
@@ -416,27 +475,89 @@ impl Config {
         self.channels.iter().find(|channel| channel.id == id)
     }
 
-    /// The channel chosen for plain translation, when it is usable.
+    /// The channel chosen for plain translation, when it can actually translate.
     pub fn basic(&self) -> Option<&Channel> {
         self.channel(&self.basic_channel)
+            .filter(|channel| channel.kind.supports_basic())
     }
 
-    /// The channel chosen for AI work, when it is usable. A translation-only
-    /// channel is rejected here even if it was somehow selected, because the AI
-    /// path needs a chat protocol.
+    /// The channel chosen for LLM work. DeepLX and decision models are rejected.
     pub fn ai(&self) -> Option<&Channel> {
         self.channel(&self.ai_channel)
             .filter(|channel| channel.kind.is_ai())
     }
 
-    /// Channels that may be offered for plain translation.
-    pub fn basic_candidates(&self) -> impl Iterator<Item = &Channel> {
-        self.channels.iter()
+    /// The channel chosen to classify a query, when it is a decision model.
+    pub fn decision_service(&self) -> Option<&Channel> {
+        self.channel(&self.decision_channel)
+            .filter(|channel| channel.kind.supports_decision())
     }
 
-    /// Channels that may be offered for AI tasks.
+    /// Channels that may be offered for plain translation.
+    pub fn basic_candidates(&self) -> impl Iterator<Item = &Channel> {
+        self.channels
+            .iter()
+            .filter(|channel| channel.kind.supports_basic())
+    }
+
+    /// Channels that may be offered for LLM tasks.
     pub fn ai_candidates(&self) -> impl Iterator<Item = &Channel> {
         self.channels.iter().filter(|channel| channel.kind.is_ai())
+    }
+
+    /// Channels that may be offered as the decision model.
+    pub fn decision_candidates(&self) -> impl Iterator<Item = &Channel> {
+        self.channels
+            .iter()
+            .filter(|channel| channel.kind.supports_decision())
+    }
+
+    /// Pull an older standalone decision endpoint into a decision channel,
+    /// and give Clef enough time to answer.
+    pub fn migrate(&mut self) -> bool {
+        let mut changed = false;
+        if self.decision.timeout_ms <= 1500 {
+            self.decision.timeout_ms = 4000;
+            changed = true;
+        }
+        let endpoint = self.decision.endpoint.trim().to_owned();
+        let key = self.decision.credential_id.trim().to_owned();
+        let placeholder = key.is_empty() || key == "decision-default";
+        let exists = self
+            .channels
+            .iter()
+            .any(|channel| channel.kind == ChannelKind::Decision);
+        if !exists && !endpoint.is_empty() && !placeholder {
+            let mut id = "ch-decision".to_string();
+            if self.channel(&id).is_some() {
+                id = format!("{id}-2");
+            }
+            let model = self.decision.model.trim();
+            self.channels.push(Channel {
+                id: id.clone(),
+                name: "Clef".into(),
+                kind: ChannelKind::Decision,
+                endpoint,
+                model: if model.is_empty() {
+                    "clef-flash".into()
+                } else {
+                    model.to_string()
+                },
+                api_key: key,
+                credential_id: String::new(),
+                vision: false,
+                max_output_tokens: 2048,
+            });
+            if self.decision_channel.is_empty() {
+                self.decision_channel = id;
+            }
+            self.decision.endpoint.clear();
+            self.decision.model.clear();
+            self.decision.credential_id.clear();
+            self.decision.enabled = false;
+            changed = true;
+        }
+        changed
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -458,7 +579,11 @@ impl Config {
         if !(150..=800).contains(&self.double_ctrl_ms) {
             return Err("error-config-double-ctrl");
         }
-        if self.blank_hotkey == self.screenshot_hotkey {
+        if self.blank_hotkey == self.screenshot_hotkey
+            || (!self.selection_hotkey.is_empty()
+                && (self.selection_hotkey == self.blank_hotkey
+                    || self.selection_hotkey == self.screenshot_hotkey))
+        {
             return Err("error-config-shortcut-same");
         }
         if self.target_language.trim().is_empty() || self.chinese_target.trim().is_empty() {
@@ -479,6 +604,9 @@ impl Config {
             return Err("error-config-channel-missing");
         }
         if !self.ai_channel.is_empty() && self.ai().is_none() {
+            return Err("error-config-channel-missing");
+        }
+        if !self.decision_channel.is_empty() && self.decision_service().is_none() {
             return Err("error-config-channel-missing");
         }
         if self.decision.enabled {
@@ -675,6 +803,19 @@ mod tests {
             local_route("你好世界", "Chinese", "English").target,
             "English"
         );
+        // Ordinary sentences must not trip the code or diagnostic rules.
+        assert_eq!(
+            local_route("let me check this later", "Chinese", "English").task,
+            Task::Translate
+        );
+        assert_eq!(
+            local_route("don't panic, it is fine", "Chinese", "English").task,
+            Task::Translate
+        );
+        assert_eq!(
+            local_route("let value = 1;", "Chinese", "English").task,
+            Task::ExplainCode
+        );
     }
     #[test]
     fn config_contains_no_api_key() {
@@ -709,5 +850,94 @@ mod tests {
             ..Channel::default()
         });
         assert!(c.validate().is_err());
+    }
+
+    fn channel(id: &str, kind: ChannelKind) -> Channel {
+        Channel {
+            id: id.into(),
+            name: id.into(),
+            kind,
+            endpoint: "https://example.com/v1".into(),
+            model: "m".into(),
+            ..Channel::default()
+        }
+    }
+
+    #[test]
+    fn each_place_only_offers_kinds_that_can_serve_it() {
+        let config = Config {
+            channels: vec![
+                channel("chat", ChannelKind::ChatCompletions),
+                channel("responses", ChannelKind::Responses),
+                channel("deeplx", ChannelKind::DeepLx),
+                channel("clef", ChannelKind::Decision),
+            ],
+            ..Config::default()
+        };
+        let ids = |iter: Vec<&Channel>| iter.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(config.basic_candidates().collect()), ["deeplx"]);
+        assert_eq!(ids(config.ai_candidates().collect()), ["chat", "responses"]);
+        assert_eq!(ids(config.decision_candidates().collect()), ["clef"]);
+
+        // A wrong kind saved in a slot is rejected rather than used.
+        let wrong = Config {
+            decision_channel: "responses".into(),
+            ..config.clone()
+        };
+        assert!(wrong.decision_service().is_none());
+        assert!(wrong.validate().is_err());
+        let wrong = Config {
+            ai_channel: "clef".into(),
+            ..config
+        };
+        assert!(wrong.ai().is_none());
+    }
+
+    #[test]
+    fn free_translation_kinds_need_no_key_or_model() {
+        assert!(!ChannelKind::GoogleFree.needs_credential());
+        assert!(!ChannelKind::GoogleFree.needs_model());
+        assert!(ChannelKind::GoogleFree.supports_basic());
+        assert!(!ChannelKind::GoogleFree.is_ai());
+        assert!(!ChannelKind::GoogleFree.supports_decision());
+        // DeepLX keeps its optional key, and an AI kind still needs its key.
+        assert!(ChannelKind::DeepLx.needs_credential());
+        assert!(ChannelKind::ChatCompletions.needs_credential());
+    }
+
+    #[test]
+    fn basic_slot_offers_only_translation_endpoints() {
+        let config = Config {
+            channels: vec![
+                channel("chat", ChannelKind::ChatCompletions),
+                channel("deeplx", ChannelKind::DeepLx),
+                channel("google", ChannelKind::GoogleFree),
+                channel("clef", ChannelKind::Decision),
+            ],
+            ..Config::default()
+        };
+        let ids: Vec<_> = config.basic_candidates().map(|c| c.id.clone()).collect();
+        assert_eq!(ids, ["deeplx", "google"]);
+    }
+
+    #[test]
+    fn old_decision_settings_become_a_decision_channel() {
+        let mut config = Config::default();
+        config.decision.endpoint =
+            "https://api.cloudflare.com/client/v4/accounts/x/ai/run/@cf/cloudflare/clef-flash"
+                .into();
+        config.decision.model = "clef-flash".into();
+        config.decision.credential_id = "secret".into();
+        config.decision.timeout_ms = 1500;
+        assert!(config.migrate());
+        let decision = config.decision_service().expect("migrated channel");
+        assert_eq!(decision.kind, ChannelKind::Decision);
+        assert_eq!(decision.api_key, "secret");
+        assert_eq!(config.decision.timeout_ms, 4000);
+        assert!(config.decision.credential_id.is_empty());
+        assert!(config.validate().is_ok());
+        // Running again does not add a second one.
+        assert!(!config.migrate());
+        assert_eq!(config.decision_candidates().count(), 1);
     }
 }

@@ -200,6 +200,7 @@ async fn decision_accepts_direct_and_cloudflare_envelopes() {
                 "test",
                 "test",
                 "error: failure",
+                std::time::Duration::from_secs(5),
                 CancellationToken::new(),
             )
             .await

@@ -135,6 +135,7 @@ settings-tab-shortcuts = 快捷键
 settings-shortcuts-hint = 格式如 Super+Shift+A（Mac 上 Super 即 Command）。修改后需重启生效。
 settings-tab-appearance = 外观
 settings-tab-translation = 翻译
+settings-tab-channels = 渠道
 settings-tab-permissions = 权限
 settings-title = 设置
 settings-save = 保存
@@ -157,6 +158,7 @@ channel-kind-chat = OpenAI Chat Completions
 channel-kind-responses = OpenAI Responses
 channel-kind-anthropic = Anthropic Messages
 channel-kind-deeplx = DeepLX
+channel-kind-decision = 决策模型
 channels-add-title = 添加渠道
 channels-edit-title = 编辑渠道
 channels-edit = 编辑
@@ -178,7 +180,10 @@ channels-key = API key
 channels-model = 模型 ID
 channels-usage = 使用位置
 channels-basic = 基础翻译
-channels-ai = AI 任务
+channels-ai = LLM
+channels-decision = 决策模型
+channels-decision-result = 决策结果：{ $task }
+channels-decision-hint = 填完整地址，例如 Cloudflare 的 …/ai/run/@cf/cloudflare/clef-flash，或 TypeSafe 的 /v1/systemone。模型填 clef、clef-flash 或 jev-latest。
 channels-none = 未选择
 channels-basic-pick = 基础翻译渠道
 error-config-channel-model = 渠道缺少模型 ID
@@ -239,6 +244,7 @@ settings-permission-hint = 双击 Ctrl 只读取选区，无选区不弹窗。�
 settings-permission-windows = 无法读取高权限应用或安全输入；系统 OCR 需已安装语言包。
 settings-permission-restart = macOS 修改权限后可能需要重启 Peek。
 settings-open-privacy = 打开系统隐私设置
+settings-permission-refresh = 重新检查
 settings-open-privacy-failed = 无法打开系统设置
 
 ## 欢迎
@@ -306,6 +312,7 @@ error-decision-missing-task = 决策概率中缺少选中任务
 error-decision-unknown-task = 决策包含未知任务
 
 error-decision-inconsistent = 决策选项与概率不一致
+error-decision-timeout = 决策超时，已改用本地判断。
 
 error-config-directory = 无法定位有效的配置目录。
 error-ocr-language-pack = 请在 Windows 设置中安装 OCR 语言包。

@@ -26,14 +26,14 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -60,12 +60,12 @@ enum HotkeyField {
     Selection,
 }
 
-/// Which part of the decision service an input edits.
+/// Which assignment a channel dropdown writes.
 #[derive(Clone, Copy)]
-enum DecisionField {
-    Endpoint,
-    Model,
-    Key,
+enum ChannelSlot {
+    Basic,
+    Llm,
+    Decision,
 }
 
 /// Panel geometry: compact until there is something to show, which keeps the
@@ -74,27 +74,21 @@ const PANEL_WIDTH: f32 = 480.;
 /// Panel height with the input box at its two-row minimum and the title row
 /// hidden: the padding and the input card, which carries its own controls.
 const PANEL_COMPACT_BASE: f32 = 70.;
-/// The revealed row's own height, which reaches past its visible content into
-/// the top of the input box.
-///
-/// That overlap is the point: revealing the row moves the window up, so the
-/// pointer that revealed it would otherwise end up just below the row, un-hover
-/// it, and start the two flashing at each other.
-const PANEL_CHROME_STRIP: f32 = 26.;
 /// What the revealed title row adds: the extra top padding, the row and the gap
 /// that follows it, less the padding the collapsed state already has.
 const PANEL_CHROME_HEIGHT: f32 = 40.;
+/// Top of the input box that opens the title row. A fixed band, so a taller
+/// result does not make the trigger taller.
+const INPUT_CORNER_HEIGHT: f32 = 46.;
+/// How far past that corner the pointer must travel before the row hides.
+/// Wider than the jitter at the boundary, so the edge does not flap.
+const INPUT_CORNER_SLOP: f32 = 24.;
 /// Added per input row, so a longer draft grows the panel instead of spilling
 /// outside the input card.
 const PANEL_INPUT_ROW: f32 = 22.;
 /// A result card taller than this would push the panel past a comfortable
 /// reading window; the card scrolls beyond it.
 const PANEL_RESULT_MAX_HEIGHT: f32 = 620.;
-/// Chrome the settings page always shows: header, tab row, padding and gaps.
-const SETTINGS_CHROME: f32 = 130.;
-/// One row of the channel list, the add button, or a picker row.
-const SETTINGS_ROW: f32 = 46.;
-
 const POLL: Duration = Duration::from_millis(60);
 /// How often streamed answer text is moved from the network channel into the view.
 const DRAIN: Duration = Duration::from_millis(30);
@@ -125,29 +119,52 @@ thread_local! {
 }
 
 thread_local! {
-    /// Screen y of the panel's top edge while the title row is hidden.
+    /// Whether the frame currently on screen already includes the title row.
     ///
-    /// Revealing the row grows the window, and which way a platform grows one is
-    /// its own choice, so the position is measured and corrected rather than
-    /// assumed. Cleared on every show, since the panel is placed again then.
-    static ANCHOR_TOP: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
-    /// Whether the strip may reveal the title row again.
-    ///
-    /// At the boundary between the input box and the row, hiding puts the
-    /// pointer straight onto the strip, which would reveal the row again the
-    /// same instant: the two would flash at each other. The strip only counts
-    /// once the pointer has left it since the last hide.
-    static STRIP_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// The pointer's window coordinates only shift once that frame is up, so the
+    /// trigger is measured against this rather than against the row we want.
+    static CHROME_IN_FRAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// When the row last opened or closed. The frame change reports a pointer
+    /// leave; samples in this window must not flip the row back.
+    static CHROME_CHANGED_AT: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+    /// Pinned windows keep the title row up. A hide request is ignored.
+    static CHROME_LOCKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+/// How long a show or hide is allowed to settle before the pointer may flip it.
+const CHROME_SETTLE: Duration = Duration::from_millis(180);
 
 /// Whether the title row is showing.
 fn chrome_visible() -> bool {
     CHROME_VISIBLE.with(std::cell::Cell::get)
 }
 
-/// Shows or hides the title row.
+/// Shows or hides the title row. A pinned window refuses to hide it.
 fn set_chrome_visible(visible: bool) {
-    CHROME_VISIBLE.with(|cell| cell.set(visible));
+    if !visible && CHROME_LOCKED.with(std::cell::Cell::get) {
+        return;
+    }
+    let changed = CHROME_VISIBLE.with(|cell| {
+        if cell.get() == visible {
+            return false;
+        }
+        cell.set(visible);
+        true
+    });
+    if changed {
+        CHROME_CHANGED_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
+    }
+}
+
+fn set_chrome_locked(locked: bool) {
+    CHROME_LOCKED.with(|cell| cell.set(locked));
+}
+
+/// The frame is still moving after a show or hide. Pointer samples in this
+/// span are the move itself, not the user crossing the corner.
+fn chrome_settling() -> bool {
+    CHROME_CHANGED_AT.with(|cell| cell.get().is_some_and(|at| at.elapsed() < CHROME_SETTLE))
 }
 
 /// Shows the panel and records when, so focus loss is ignored briefly.
@@ -155,10 +172,17 @@ fn set_chrome_visible(visible: bool) {
 /// The title row is hidden on the way in: a panel reopened after the pointer
 /// found it once must look the same as one opened for the first time.
 fn show_panel(window: &mut Window) {
-    set_chrome_visible(false);
-    ANCHOR_TOP.with(|cell| cell.set(None));
+    // A pinned window keeps its title row. An unpinned one opens bare.
+    if !CHROME_LOCKED.with(std::cell::Cell::get) {
+        set_chrome_visible(false);
+        CHROME_IN_FRAME.with(|cell| cell.set(false));
+    }
     native_window::show(window);
     SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
+}
+
+fn set_chrome_in_frame(included: bool) {
+    CHROME_IN_FRAME.with(|cell| cell.set(included));
 }
 
 /// Whether the panel was shown recently enough to ignore a focus loss.
@@ -167,6 +191,49 @@ fn shown_recently() -> bool {
         cell.get()
             .is_some_and(|shown| shown.elapsed() < FOCUS_GRACE)
     })
+}
+
+/// Right half of the top of the input box, in window coordinates.
+///
+/// `input_top` is where that box starts in the frame that is actually on
+/// screen. `open` widens the box so a pointer sitting on the boundary does not
+/// hide the row and immediately show it again. The panel's height is not an
+/// input: a long result must not grow the corner.
+fn chrome_zone_contains(x: f32, y: f32, width: f32, input_top: f32, open: bool) -> bool {
+    if width <= 1. {
+        return false;
+    }
+    // The title row sits above the input once the frame includes it. The whole
+    // row stays live, including the buttons on the left of the corner.
+    if open && input_top > 0. && y <= input_top {
+        return true;
+    }
+    let mut left = width * 0.5;
+    let mut top = input_top;
+    let mut bottom = input_top + INPUT_CORNER_HEIGHT;
+    if open {
+        left -= INPUT_CORNER_SLOP;
+        bottom += INPUT_CORNER_SLOP;
+        top = (input_top - 6.).max(0.);
+    }
+    x >= left && y >= top && y < bottom
+}
+
+/// Whether the pointer is in the corner that keeps the title row open.
+fn pointer_in_chrome_zone(position: Point<Pixels>, window: &Window) -> bool {
+    let width = window.bounds().size.width.as_f32();
+    let input_top = if CHROME_IN_FRAME.with(std::cell::Cell::get) {
+        PANEL_CHROME_HEIGHT
+    } else {
+        0.
+    };
+    chrome_zone_contains(
+        position.x.as_f32(),
+        position.y.as_f32(),
+        width,
+        input_top,
+        chrome_visible(),
+    )
 }
 
 /// Task order in the dropdown, paired with their localisation keys.
@@ -195,7 +262,7 @@ struct Peek {
     _activation: Subscription,
 
     input: Entity<TextareaState>,
-    follow_up: Entity<InputState>,
+    follow_up: Entity<TextareaState>,
     tasks: Entity<SelectState<Vec<SharedString>>>,
 
     answer: String,
@@ -207,6 +274,12 @@ struct Peek {
     original_query: String,
     status: String,
     busy: bool,
+    /// The in-flight turn is a follow-up, so its spinner belongs on that button.
+    follow_up_turn: bool,
+    /// The task list is open. The compact panel grows so the list is not cut off.
+    task_menu_open: bool,
+    /// Cleared on the next frame. See `send_follow_up`.
+    clear_follow_up: bool,
     dictionary_note: String,
 
     /// Set while a turn belongs to the screenshot overlay: its progress is
@@ -232,16 +305,19 @@ struct Peek {
     /// Channel a connection test is running for, so its row can show progress
     /// on the button rather than an extra line of text.
     testing_channel: Option<String>,
+
     /// Sends test results from the network task to the poll loop: the channel
     /// id, whether it failed, and the message to show.
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
-    /// Sends a decided task back from the decision service, with the text it
-    /// was decided for.
-    route_tx: std::sync::mpsc::Sender<(String, Task)>,
-    /// Editable decision-service settings, persisted as they are typed.
-    decision_endpoint: Entity<InputState>,
-    decision_model: Entity<InputState>,
-    decision_key: Entity<InputState>,
+    /// Sends a decided task back from the decision service: the epoch it belongs
+    /// to, the text it was decided for, and the task.
+    route_tx: std::sync::mpsc::Sender<(u64, String, Task)>,
+    /// Bumped whenever a newer query or a stop should discard an in-flight decision.
+    decision_epoch: u64,
+    decision_cancel: Option<CancellationToken>,
+    /// Identifies the drain loop that owns `receiver`. Older loops exit.
+    turn_id: u64,
+
     /// Editable global hotkeys, persisted as they are typed.
     blank_hotkey: Entity<InputState>,
     screenshot_hotkey: Entity<InputState>,
@@ -256,6 +332,8 @@ struct Peek {
     channel_kind: Entity<SelectState<Vec<SharedString>>>,
     /// Which settings tab is showing.
     settings_tab: usize,
+    /// Laid-out height of the settings page, measured from its children.
+    settings_measured: f32,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
@@ -289,12 +367,14 @@ impl Peek {
         });
 
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 5));
+        // Same editor as the query box. A single-line `Input` never took the
+        // IME session, so Chinese could not be selected, and Enter was not wired.
         let follow_up = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(i18n::tr("query-followup-placeholder"))
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .submit_on_enter(true)
+                .placeholder(i18n::tr("query-followup-placeholder"))
         });
-        let decision_endpoint = cx.new(|cx| InputState::new(window, cx));
-        let decision_model = cx.new(|cx| InputState::new(window, cx));
-        let decision_key = cx.new(|cx| InputState::new(window, cx).masked(true));
         let blank_hotkey = cx.new(|cx| InputState::new(window, cx));
         let screenshot_hotkey = cx.new(|cx| InputState::new(window, cx));
         let selection_hotkey = cx.new(|cx| InputState::new(window, cx));
@@ -325,12 +405,21 @@ impl Peek {
             }
         })
         .detach();
+        // Plain Enter sends. Shift+Enter is a newline, and a composing IME
+        // consumes Enter before this event exists.
+        cx.subscribe(&follow_up, |this, _input, event: &InputEvent, cx| {
+            if let InputEvent::PressEnter { secondary, shift } = event
+                && !*secondary
+                && !*shift
+            {
+                this.send_follow_up(cx);
+                cx.notify();
+            }
+        })
+        .detach();
         let config = store::load().unwrap_or_default();
         i18n::set_language(&config.ui_language);
         for (input, value) in [
-            (&decision_endpoint, &config.decision.endpoint),
-            (&decision_model, &config.decision.model),
-            (&decision_key, &config.decision.credential_id),
             (&blank_hotkey, &config.blank_hotkey),
             (&screenshot_hotkey, &config.screenshot_hotkey),
             (&selection_hotkey, &config.selection_hotkey),
@@ -341,28 +430,6 @@ impl Peek {
         // Persisted as they are typed. The running app keeps the hotkeys it
         // registered at startup, which is why the page says a restart applies
         // a change.
-        // The decision service is reached with its own endpoint, model and
-        // credential, separate from any channel.
-        for (input, field) in [
-            (&decision_endpoint, DecisionField::Endpoint),
-            (&decision_model, DecisionField::Model),
-            (&decision_key, DecisionField::Key),
-        ] {
-            cx.observe(input, move |this, state, cx| {
-                let value = state.read(cx).value().trim().to_owned();
-                let slot = match field {
-                    DecisionField::Endpoint => &mut this.config.decision.endpoint,
-                    DecisionField::Model => &mut this.config.decision.model,
-                    DecisionField::Key => &mut this.config.decision.credential_id,
-                };
-                if *slot != value {
-                    *slot = value;
-                    this.persist_config();
-                    cx.notify();
-                }
-            })
-            .detach();
-        }
         for (input, which) in [
             (&blank_hotkey, HotkeyField::Blank),
             (&screenshot_hotkey, HotkeyField::Screenshot),
@@ -405,14 +472,15 @@ impl Peek {
             input,
             follow_up,
             settings_tab: 0,
+            settings_measured: 0.,
             pending_toast: None,
             bubbles: Vec::new(),
             testing_channel: None,
             test_tx,
             route_tx,
-            decision_endpoint,
-            decision_model,
-            decision_key,
+            decision_epoch: 0,
+            decision_cancel: None,
+            turn_id: 0,
             blank_hotkey,
             screenshot_hotkey,
             selection_hotkey,
@@ -431,6 +499,9 @@ impl Peek {
             original_query: String::new(),
             status: String::new(),
             busy: false,
+            follow_up_turn: false,
+            task_menu_open: false,
+            clear_follow_up: false,
             dictionary_note: String::new(),
             permissions: peek_runtime::permissions::status(),
             // The peek always opens on the query page: settings is a view the
@@ -456,13 +527,18 @@ impl Peek {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
-                while let Ok((text, task)) = route_rx.try_recv() {
+                while let Ok((epoch, text, task)) = route_rx.try_recv() {
                     this.update(cx, |peek, cx| {
-                        peek.begin_turn_as(text.clone(), false, Some(task), cx);
+                        // A newer query, a stop, or a timeout already moved on.
+                        if epoch != peek.decision_epoch {
+                            return;
+                        }
+                        peek.decision_cancel = None;
+                        peek.begin_turn_as(text, false, Some(task), cx);
                     })
                     .ok();
                 }
-                while let Ok((id, failed, message)) = test_rx.try_recv() {
+                while let Ok((_id, failed, message)) = test_rx.try_recv() {
                     this.update(cx, |peek, cx| {
                         peek.testing_channel = None;
                         if failed {
@@ -470,7 +546,6 @@ impl Peek {
                         } else {
                             peek.notify_success(message);
                         }
-                        let _ = id;
                         cx.notify();
                     })
                     .ok();
@@ -544,15 +619,15 @@ impl Peek {
                             }
                         }
                         Action::Translate { text, replies } => {
-                            // The overlay owns this turn: progress goes back to
-                            // it and the panel stays hidden.
+                            // The overlay owns this turn. Finish the panel turn
+                            // first, then run the overlay without touching the
+                            // panel transcript.
                             let started = this
                                 .update(cx, |peek, cx| {
+                                    peek.stop();
                                     peek.overlay = Some(replies);
-                                    let started = peek.begin_turn(text, false, cx);
+                                    let started = peek.begin_isolated(text, cx);
                                     if !started {
-                                        // `begin_turn` left a status explaining
-                                        // why it could not run.
                                         let status = peek.status.clone();
                                         peek.forward_overlay(OverlayEvent::Status(status));
                                         peek.forward_overlay(OverlayEvent::Finished);
@@ -657,12 +732,32 @@ impl Peek {
         this
     }
 
-    /// The task chosen in the dropdown.
+    /// A follow-up has been sent, so the result is a conversation rather than one answer.
+    fn conversation(&self) -> bool {
+        self.bubbles.iter().filter(|(user, _)| *user).count() > 1
+    }
+
+    /// The single answer to show before any follow-up. Streaming text wins over
+    /// the finished bubble.
+    fn plain_answer(&self) -> Option<String> {
+        if self.conversation() {
+            return None;
+        }
+        if !self.answer.is_empty() {
+            return Some(self.answer.clone());
+        }
+        self.bubbles
+            .iter()
+            .rev()
+            .find(|(user, _)| !*user)
+            .map(|(_, text)| text.clone())
+    }
+
     /// Whether there is more to show than the input box.
     fn has_result(&self) -> bool {
         // Deliberately not `busy`: a running turn shows its progress on the
         // button, so an empty result card would be a large blank area.
-        !self.bubbles.is_empty() || !self.answer.is_empty() || !self.dictionary_note.is_empty()
+        self.plain_answer().is_some() || self.conversation() || !self.dictionary_note.is_empty()
     }
 
     /// Panel height while there is a result, following how much has streamed in.
@@ -672,16 +767,20 @@ impl Peek {
     fn result_height(&self) -> f32 {
         // Bubbles are narrower than the panel, so fewer characters fit a line.
         let columns = 34.0;
-        let rows: f32 = self
-            .bubbles
-            .iter()
-            .map(|(_, text)| text)
-            .chain(std::iter::once(&self.answer))
-            .flat_map(|text| text.lines())
-            .map(|line| (line.chars().count() as f32 / columns).ceil().max(1.0))
-            .sum::<f32>()
-            // One line per bubble is taken by its padding.
-            + self.bubbles.len() as f32 * 0.6;
+        let rows: f32 = if let Some(text) = self.plain_answer() {
+            text.lines()
+                .map(|line| (line.chars().count() as f32 / columns).ceil().max(1.0))
+                .sum()
+        } else {
+            self.bubbles
+                .iter()
+                .map(|(_, text)| text)
+                .chain(std::iter::once(&self.answer))
+                .flat_map(|text| text.lines())
+                .map(|line| (line.chars().count() as f32 / columns).ceil().max(1.0))
+                .sum::<f32>()
+                + self.bubbles.len() as f32 * 0.6
+        };
         let dictionary = if self.dictionary_note.is_empty() {
             0.0
         } else {
@@ -701,24 +800,67 @@ impl Peek {
     }
 
     /// Offline dictionary first: instant, and independent of any API key.
+    ///
+    /// The file is mapped once. Opening it on every lookup reread the index
+    /// on the UI thread.
     fn lookup_word(&mut self, text: &str) -> Option<peek_dict::Entry> {
         if text.chars().count() > 40 || text.split_whitespace().count() != 1 {
             return None;
         }
-        store::dictionary_candidates()
-            .into_iter()
-            .find_map(|path| peek_dict::Dict::open(&path).ok())
-            .and_then(|dict| dict.lookup(text))
+        fn shared_dict() -> Option<&'static peek_dict::Dict> {
+            static DICT: std::sync::OnceLock<Option<peek_dict::Dict>> = std::sync::OnceLock::new();
+            DICT.get_or_init(|| {
+                store::dictionary_candidates()
+                    .into_iter()
+                    .find_map(|path| peek_dict::Dict::open(&path).ok())
+            })
+            .as_ref()
+        }
+        shared_dict().and_then(|dict| dict.lookup(text))
     }
 
-    /// Cancels any in-flight turn and drops the unanswered tail.
-    fn stop(&mut self) {
+    /// Drops the network task and any decision that has not come back yet.
+    fn stop_transport(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }
         self.receiver = None;
         self.busy = false;
+        self.follow_up_turn = false;
+        self.decision_epoch = self.decision_epoch.wrapping_add(1);
+        if let Some(cancel) = self.decision_cancel.take() {
+            cancel.cancel();
+        }
+    }
+
+    /// A stopped or failed turn keeps a partial answer and drops an empty one,
+    /// so the next request does not inherit an unanswered user message.
+    fn settle_stopped_turn(&mut self) {
+        if !self.answer.is_empty() {
+            self.messages.push(Message {
+                role: "assistant".into(),
+                content: self.answer.clone(),
+            });
+            self.bubbles
+                .push((false, std::mem::take(&mut self.answer)));
+            peek_core::bound_history(&mut self.messages);
+            return;
+        }
         peek_core::discard_pending_turn(&mut self.messages);
+        if self.bubbles.last().is_some_and(|(user, _)| *user) {
+            self.bubbles.pop();
+        }
+    }
+
+    /// Cancels the in-flight turn. An overlay turn does not rewrite the panel.
+    fn stop(&mut self) {
+        let overlay = self.overlay.take();
+        self.stop_transport();
+        if let Some(tx) = overlay {
+            let _ = tx.send(OverlayEvent::Finished);
+            return;
+        }
+        self.settle_stopped_turn();
     }
 
     /// Switches the bundled font set, applies it to the theme and persists it.
@@ -757,15 +899,24 @@ impl Peek {
         if text.is_empty() {
             return;
         }
+        if text.len() > peek_core::MAX_INPUT_BYTES {
+            self.notify_error(i18n::tr("status-input-too-long"));
+            cx.notify();
+            return;
+        }
         // Automatic, with a decision service configured, asks it what this is;
         // a failed call, a low confidence or no service falls back to the local
         // rules, which need no network at all.
         let automatic = self.selected_task(cx).is_none();
-        if !automatic || !self.config.decision.enabled {
+        let Some(channel) = self.config.decision_service().cloned() else {
+            self.begin_turn(text, false, cx);
+            return;
+        };
+        if !automatic {
             self.begin_turn(text, false, cx);
             return;
         }
-        let decision = self.config.decision.clone();
+        let min_confidence = self.config.decision.min_confidence;
         let client = self.client.clone();
         let tx = self.route_tx.clone();
         let fallback = local_route(
@@ -774,21 +925,27 @@ impl Peek {
             &self.config.chinese_target,
         )
         .task;
+        // The previous turn is finished first, and this decision gets the epoch
+        // that `stop_transport` just published. A later query bumps it again.
+        self.stop();
+        let epoch = self.decision_epoch;
+        let cancel = CancellationToken::new();
+        self.decision_cancel = Some(cancel.clone());
+        self.busy = true;
+        let timeout = std::time::Duration::from_millis(self.config.decision.timeout_ms.max(4000));
+        let endpoint = channel.endpoint.clone();
+        let key = channel.api_key.clone();
+        let model = channel.model.clone();
+        cx.notify();
         self.runtime.spawn(async move {
             let chosen = match client
-                .decide(
-                    &decision.endpoint,
-                    &decision.credential_id,
-                    &decision.model,
-                    &text,
-                    CancellationToken::new(),
-                )
+                .decide(&endpoint, &key, &model, &text, timeout, cancel)
                 .await
             {
-                Ok(answer) if answer.confidence >= decision.min_confidence => answer.task,
+                Ok(answer) if answer.confidence >= min_confidence => answer.task,
                 _ => fallback,
             };
-            let _ = tx.send((text, chosen));
+            let _ = tx.send((epoch, text, chosen));
         });
     }
 
@@ -797,21 +954,17 @@ impl Peek {
     /// It reuses the same event channel as an AI turn, so the panel and the
     /// screenshot overlay need no separate path; the endpoint answers in one
     /// piece rather than as a stream.
-    fn begin_deeplx(
+    fn begin_translation(
         &mut self,
-        endpoint: String,
-        key: String,
+        (kind, endpoint, key): (ChannelKind, String, String),
         text: String,
+        target: String,
+        panel: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let route = local_route(
-            &text,
-            &self.config.target_language,
-            &self.config.chinese_target,
-        );
-        let target = effective_target(&route.target, "").to_owned();
-        self.original_query = text.clone();
-        self.busy = true;
+        if panel {
+            self.busy = true;
+        }
         let (tx, rx) = mpsc::channel(8);
         self.receiver = Some(rx);
         let cancel = CancellationToken::new();
@@ -820,10 +973,15 @@ impl Peek {
         let ui_language = self.config.ui_language.clone();
         self.runtime.spawn(async move {
             let locale = i18n::I18n::new(&ui_language);
-            match client
-                .translate_deeplx(&endpoint, &key, &text, &target, cancel)
-                .await
-            {
+            let result = match kind {
+                ChannelKind::GoogleFree => client.translate_google(&text, &target, cancel).await,
+                _ => {
+                    client
+                        .translate_deeplx(&endpoint, &key, &text, &target, cancel)
+                        .await
+                }
+            };
+            match result {
                 Ok(translated) => {
                     let _ = tx.send(Event::Text(translated)).await;
                     let _ = tx.send(Event::Done).await;
@@ -833,32 +991,23 @@ impl Peek {
                 }
             }
         });
+        self.spawn_drain(cx);
         cx.notify();
         true
     }
 
     /// Height for the settings page's current tab.
     ///
-    /// The page is a stack of sections of very different lengths, so a single
-    /// fixed height either clipped the long tab or left the short one with a
-    /// large empty area. This estimates from what the tab actually renders and
-    /// stays within a usable range.
+    /// The number comes from the laid-out children, so a short tab does not
+    /// keep a tall empty area and a longer one is not clipped. The first frame
+    /// uses a stand-in until that measurement arrives.
     fn settings_height(&self) -> f32 {
-        let channels = self.config.channels.len() as f32;
-        let height = match self.settings_tab {
-            // Font set: a label and two buttons.
-            0 => SETTINGS_CHROME + 92.,
-            // Shortcuts: two fields and a hint.
-            1 => SETTINGS_CHROME + 130.,
-            // Channels: the list, the add button, the copy switch, the
-            // used-for pickers and the decision service.
-            2 => SETTINGS_CHROME + 320. + SETTINGS_ROW * (channels + 4.),
-            // Permissions: one row per permission.
-            _ => SETTINGS_CHROME + 24. + SETTINGS_ROW * self.permissions.len() as f32,
+        let height = if self.settings_measured > 1. {
+            self.settings_measured
+        } else {
+            420.
         };
-        // The translation tab carries the channel list, the pickers and the
-        // decision service, so its ceiling is higher than the others'.
-        height.clamp(240., 900.)
+        height.clamp(220., 900.)
     }
 
     /// A label and the dropdown that chooses for it.
@@ -870,11 +1019,12 @@ impl Peek {
     ) -> AnyElement {
         h_flex()
             .w_full()
+            .min_h(px(36.))
             .items_center()
             .gap(px(10.))
             .child(
                 div()
-                    .w(px(72.))
+                    .flex_none()
                     .font_family(set.latin)
                     .text_size(px(12.))
                     .child(label),
@@ -890,7 +1040,7 @@ impl Peek {
         id: &'static str,
         choices: Vec<(String, String)>,
         active: String,
-        ai: bool,
+        slot: ChannelSlot,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity();
@@ -908,6 +1058,17 @@ impl Peek {
                     .flex_1(),
             )
             .dropdown_menu(move |mut menu, _window, _cx| {
+                let target = entity.clone();
+                let none = active.is_empty();
+                menu = menu.item(
+                    PopupMenuItem::new(i18n::tr("channels-none"))
+                        .checked(none)
+                        .on_click(move |_event, _window, cx| {
+                            target.update(cx, |peek, cx| {
+                                peek.assign_channel(slot, String::new(), cx);
+                            });
+                        }),
+                );
                 for (channel, name) in &choices {
                     let target = entity.clone();
                     let chosen = channel.clone();
@@ -915,7 +1076,7 @@ impl Peek {
                     menu = menu.item(PopupMenuItem::new(name.clone()).checked(selected).on_click(
                         move |_event, _window, cx| {
                             target.update(cx, |peek, cx| {
-                                peek.assign_channel(ai, chosen.clone(), cx);
+                                peek.assign_channel(slot, chosen.clone(), cx);
                             });
                         },
                     ));
@@ -1059,6 +1220,14 @@ impl Peek {
                                     i18n::tr("channels-model"),
                                     Input::new(&peek.channel_model).into_any_element(),
                                 ))
+                            })
+                            .when(kind.supports_decision(), |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(muted)
+                                        .child(i18n::tr("channels-decision-hint")),
+                                )
                             }),
                     )
                 })
@@ -1081,8 +1250,11 @@ impl Peek {
                                 .primary()
                                 .label(i18n::tr("channels-save"))
                                 .on_click(move |_event, window, cx| {
-                                    ok_entity.update(cx, |peek, cx| peek.save_channel(window, cx));
-                                    window.close_dialog(cx);
+                                    let saved = ok_entity
+                                        .update(cx, |peek, cx| peek.save_channel(window, cx));
+                                    if saved {
+                                        window.close_dialog(cx);
+                                    }
                                 }),
                         ),
                 )
@@ -1092,9 +1264,9 @@ impl Peek {
     /// Saves the dialog's channel, adding it or updating the one being edited.
     ///
     /// A kind declares what it needs: an AI kind takes an endpoint, a model and
-    /// a credential, while DeepLX takes an endpoint only. The secret goes to the
-    /// keychain and config keeps a reference.
-    fn save_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// a credential, while DeepLX takes an endpoint only. Returns whether the
+    /// dialog can close. A rejected draft stays open.
+    fn save_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let kind = self.draft_kind(cx);
         let name = self.channel_name.read(cx).value().trim().to_owned();
         let endpoint = self.channel_endpoint.read(cx).value().trim().to_owned();
@@ -1103,12 +1275,17 @@ impl Peek {
         if name.is_empty() || endpoint.is_empty() {
             self.notify_error(i18n::tr("status-channel-incomplete"));
             cx.notify();
-            return;
+            return false;
         }
         if kind.needs_model() && model.is_empty() {
             self.notify_error(i18n::tr("error-config-channel-model"));
             cx.notify();
-            return;
+            return false;
+        }
+        if peek_core::validate_endpoint(&endpoint, true).is_err() {
+            self.notify_error(i18n::tr("error-config-endpoint"));
+            cx.notify();
+            return false;
         }
 
         let editing = self.editing_channel.clone();
@@ -1155,13 +1332,17 @@ impl Peek {
             }
             None => {
                 self.config.channels.push(saved);
-                // The first channel becomes the default for a place that has
-                // nothing chosen yet.
-                if self.config.basic_channel.is_empty() {
+                // The first usable channel becomes the default for a place
+                // that has nothing chosen yet. A decision model is not a
+                // translator and not an LLM.
+                if self.config.basic_channel.is_empty() && kind.supports_basic() {
                     self.config.basic_channel = id.clone();
                 }
                 if self.config.ai_channel.is_empty() && kind.is_ai() {
-                    self.config.ai_channel = id;
+                    self.config.ai_channel = id.clone();
+                }
+                if self.config.decision_channel.is_empty() && kind.supports_decision() {
+                    self.config.decision_channel = id;
                 }
             }
         }
@@ -1187,6 +1368,7 @@ impl Peek {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
         cx.notify();
+        true
     }
 
     /// Checks that a channel actually answers.
@@ -1214,7 +1396,30 @@ impl Peek {
                     &[("detail", &format!("{} · {url}", locale.network_error(err)))],
                 )
             };
-            let (ok, message) = if channel.kind == ChannelKind::DeepLx {
+            let (ok, message) = if channel.kind == ChannelKind::Decision {
+                let url = channel.endpoint.clone();
+                match client
+                    .decide(
+                        &url,
+                        &channel.api_key,
+                        &channel.model,
+                        "Hello",
+                        std::time::Duration::from_millis(4_000),
+                        CancellationToken::new(),
+                    )
+                    .await
+                {
+                    Ok(decision) => (
+                        false,
+                        format!(
+                            "{} · {}",
+                            locale.text("channels-test-ok"),
+                            locale.task(decision.task)
+                        ),
+                    ),
+                    Err(err) => (true, told(&url, &err)),
+                }
+            } else if channel.kind == ChannelKind::DeepLx {
                 let url = channel.endpoint.clone();
                 match client
                     .translate_deeplx(
@@ -1226,18 +1431,18 @@ impl Peek {
                     )
                     .await
                 {
-                    Ok(_) => (false, i18n::tr("channels-test-ok")),
+                    Ok(_) => (false, locale.text("channels-test-ok")),
                     Err(err) => (true, told(&url, &err)),
                 }
             } else {
                 let Some(provider) = channel.provider() else {
-                    let _ = tx.send((id, true, i18n::tr("status-channel-missing")));
+                    let _ = tx.send((id, true, locale.text("status-channel-missing")));
                     return;
                 };
                 let url = peek_network::endpoint_url(&provider)
                     .unwrap_or_else(|_| provider.base_url.clone());
                 match client.probe(&provider, &channel.api_key).await {
-                    Ok(()) => (false, i18n::tr("channels-test-ok")),
+                    Ok(()) => (false, locale.text("channels-test-ok")),
                     Err(err) => (true, told(&url, &err)),
                 }
             };
@@ -1249,12 +1454,14 @@ impl Peek {
     fn remove_channel(&mut self, id: &str, cx: &mut Context<Self>) {
         self.config.channels.retain(|channel| channel.id != id);
         if self.config.basic_channel == id {
-            self.config.basic_channel = self
+            // Resolved before the assignment: the iterator borrows the config.
+            let fallback = self
                 .config
-                .channels
-                .first()
+                .basic_candidates()
+                .next()
                 .map(|channel| channel.id.clone())
                 .unwrap_or_default();
+            self.config.basic_channel = fallback;
         }
         if self.config.ai_channel == id {
             // Resolved before the assignment: the iterator borrows the config.
@@ -1266,16 +1473,25 @@ impl Peek {
                 .unwrap_or_default();
             self.config.ai_channel = fallback;
         }
+        if self.config.decision_channel == id {
+            let fallback = self
+                .config
+                .decision_candidates()
+                .next()
+                .map(|channel| channel.id.clone())
+                .unwrap_or_default();
+            self.config.decision_channel = fallback;
+        }
         self.persist_config();
         cx.notify();
     }
 
     /// Points a place in the app at a channel.
-    fn assign_channel(&mut self, ai: bool, id: String, cx: &mut Context<Self>) {
-        if ai {
-            self.config.ai_channel = id;
-        } else {
-            self.config.basic_channel = id;
+    fn assign_channel(&mut self, slot: ChannelSlot, id: String, cx: &mut Context<Self>) {
+        match slot {
+            ChannelSlot::Basic => self.config.basic_channel = id,
+            ChannelSlot::Llm => self.config.ai_channel = id,
+            ChannelSlot::Decision => self.config.decision_channel = id,
         }
         self.persist_config();
         cx.notify();
@@ -1288,11 +1504,16 @@ impl Peek {
     }
 
     /// Sends the follow-up box, continuing the current conversation.
-    fn send_follow_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// The box is cleared on the next frame, where a `Window` exists. Enter
+    /// arrives from the editor's event, which does not carry one.
+    fn send_follow_up(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         let text = self.follow_up.read(cx).value().trim().to_owned();
         if self.begin_turn(text, true, cx) {
-            self.follow_up
-                .update(cx, |state, cx| state.set_value("", window, cx));
+            self.clear_follow_up = true;
         }
     }
 
@@ -1323,30 +1544,42 @@ impl Peek {
         decided: Option<Task>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.start_turn(text, followup, decided, false, cx)
+    }
+
+    /// A screenshot turn. The caller has already settled the panel and stored
+    /// the overlay channel. This turn must not rewrite that transcript.
+    fn begin_isolated(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+        self.start_turn(text, false, None, true, cx)
+    }
+
+    fn start_turn(
+        &mut self,
+        text: String,
+        followup: bool,
+        decided: Option<Task>,
+        isolated: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if text.is_empty() {
             return false;
         }
         if text.len() > peek_core::MAX_INPUT_BYTES {
-            self.notify_error(i18n::tr("status-input-too-long"));
-            cx.notify();
+            self.fail_turn(isolated, i18n::tr("status-input-too-long"), cx);
             return false;
         }
-        // A follow-up needs an existing conversation to continue.
-        if followup && self.messages.is_empty() {
+        if followup && !isolated && self.messages.is_empty() {
             return false;
         }
 
-        self.stop();
+        if isolated {
+            // The panel turn was settled before the overlay channel was stored.
+            self.stop_transport();
+        } else {
+            self.stop();
+        }
         self.answer.clear();
-        if !followup {
-            self.dictionary_note.clear();
-            if let Some(entry) = self.lookup_word(&text) {
-                self.dictionary_note = dictionary_text(&entry);
-            }
-        }
 
-        // A follow-up is routed from the original query, not from its own
-        // sentence, so the target language does not drift mid-conversation.
         let routed_text = if followup {
             self.original_query.as_str()
         } else {
@@ -1357,72 +1590,135 @@ impl Peek {
             &self.config.target_language,
             &self.config.chinese_target,
         );
-        // The picker is authoritative. Automatic is now one of its entries
-        // rather than a hidden setting that overrode the choice.
         let task = decided
             .or_else(|| self.selected_task(cx))
             .unwrap_or(route.task);
         let target = effective_target(&route.target, "").to_owned();
-
-        // Plain translation may go through a basic channel such as DeepLX;
-        // everything else needs an AI channel. A channel's kind decides where
-        // it can be offered, so this never picks DeepLX for code explanation.
-        let chosen = match task {
-            Task::Translate => self.config.basic().or_else(|| self.config.ai()).cloned(),
-            _ => self.config.ai().cloned(),
+        // A follow-up continues the conversation, which a translation-only
+        // endpoint cannot do. The first translation may still use DeepLX.
+        let chosen = if followup || task != Task::Translate {
+            self.config.ai().cloned()
+        } else {
+            self.config.basic().or_else(|| self.config.ai()).cloned()
         };
         let Some(channel) = chosen else {
-            self.notify_error(i18n::tr("status-channel-missing"));
-            cx.notify();
+            self.fail_turn(isolated, i18n::tr("status-channel-missing"), cx);
             return false;
         };
-        if channel.kind == ChannelKind::DeepLx {
-            return self.begin_deeplx(channel.endpoint.clone(), channel.api_key.clone(), text, cx);
+
+        if !isolated && !followup {
+            self.dictionary_note.clear();
+            if let Some(entry) = self.lookup_word(&text) {
+                self.dictionary_note = dictionary_text(&entry);
+            }
+        }
+
+        let instruction = task.styled_instruction(&target, &self.config.translation_style);
+        if !isolated {
+            if !followup {
+                self.bubbles.clear();
+                self.original_query = text.clone();
+                self.messages = vec![Message {
+                    role: "system".into(),
+                    content: instruction.clone(),
+                }];
+            } else if let Some(system) = self.messages.first_mut() {
+                system.content = instruction.clone();
+            }
+            let content = if followup {
+                text.clone()
+            } else {
+                peek_core::wrap_content(&text)
+            };
+            self.messages.push(Message {
+                role: "user".into(),
+                content,
+            });
+            self.bubbles.push((true, text.clone()));
+            peek_core::bound_history(&mut self.messages);
+        }
+
+        self.follow_up_turn = followup && !isolated;
+        if channel.kind.is_translation_only() {
+            return self.begin_translation(
+                (
+                    channel.kind,
+                    channel.endpoint.clone(),
+                    channel.api_key.clone(),
+                ),
+                text,
+                target,
+                !isolated,
+                cx,
+            );
         }
         let Some(provider) = channel.provider() else {
-            self.notify_error(i18n::tr("status-channel-missing"));
-            cx.notify();
+            self.follow_up_turn = false;
+            self.rollback_unsent(isolated);
+            self.fail_turn(isolated, i18n::tr("status-channel-missing"), cx);
             return false;
         };
         let key = channel.api_key.clone();
         if channel.kind.needs_credential() && key.trim().is_empty() {
-            self.notify_error(i18n::tr("status-key-missing"));
-            cx.notify();
+            self.follow_up_turn = false;
+            self.rollback_unsent(isolated);
+            self.fail_turn(isolated, i18n::tr("status-key-missing"), cx);
             return false;
         }
-        if !followup {
-            self.bubbles.clear();
-            self.original_query = text.clone();
-            self.messages = vec![Message {
-                role: "system".into(),
-                content: task.styled_instruction(&target, &self.config.translation_style),
-            }];
-        } else if let Some(system) = self.messages.first_mut() {
-            // Re-issue the instruction: the follow-up may be another language.
-            system.content = task.styled_instruction(&target, &self.config.translation_style);
-        }
-        // The first turn is content to work on, so it is delimited as
-        // untrusted. A follow-up is the user talking to the assistant, and
-        // wrapping it as data told the model to ignore it.
-        let content = if followup {
-            text.clone()
+        let messages = if isolated {
+            vec![
+                Message {
+                    role: "system".into(),
+                    content: instruction,
+                },
+                Message {
+                    role: "user".into(),
+                    content: peek_core::wrap_content(&text),
+                },
+            ]
         } else {
-            peek_core::wrap_content(&text)
+            self.messages.clone()
         };
-        self.messages.push(Message {
-            role: "user".into(),
-            content,
-        });
-        self.bubbles.push((true, text));
-        peek_core::bound_history(&mut self.messages);
+        self.launch_stream(provider, key, messages, !isolated, cx);
+        true
+    }
 
-        self.busy = true;
+    /// Drops the user turn just recorded when the request never left.
+    fn rollback_unsent(&mut self, isolated: bool) {
+        if isolated {
+            return;
+        }
+        self.answer.clear();
+        self.settle_stopped_turn();
+    }
+
+    fn fail_turn(&mut self, isolated: bool, message: String, cx: &mut Context<Self>) {
+        if isolated {
+            self.status = message.clone();
+            self.forward_overlay(OverlayEvent::Status(message));
+            self.forward_overlay(OverlayEvent::Finished);
+            self.overlay = None;
+        } else {
+            self.notify_error(message);
+        }
+        cx.notify();
+    }
+
+    fn launch_stream(
+        &mut self,
+        provider: peek_core::Provider,
+        key: String,
+        messages: Vec<Message>,
+        panel: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if panel {
+            self.busy = true;
+        }
         let (tx, rx) = mpsc::channel(128);
         self.receiver = Some(rx);
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
-
-        let messages = self.messages.clone();
         let client = self.client.clone();
         let ui_language = self.config.ui_language.clone();
         self.runtime.spawn(async move {
@@ -1434,8 +1730,6 @@ impl Peek {
                     .await
             });
             while let Some(event) = net_rx.recv().await {
-                // Error payloads travel as stable codes; localise them here,
-                // off the UI thread.
                 let event = match event {
                     Event::Failed(code) => Event::Failed(locale.text(&code)),
                     other => other,
@@ -1453,14 +1747,23 @@ impl Peek {
                 let _ = tx.send(Event::Failed(failure)).await;
             }
         });
+        self.spawn_drain(cx);
+        cx.notify();
+    }
 
-        // Move streamed events into the view on the GPUI side: tokio owns the
-        // network task, and an `Entity` cannot cross into it.
+    /// Moves streamed events into the view. A newer turn makes this loop exit
+    /// without reading that turn's receiver.
+    fn spawn_drain(&mut self, cx: &mut Context<Self>) {
+        self.turn_id = self.turn_id.wrapping_add(1);
+        let turn = self.turn_id;
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(DRAIN).await;
                 let finished = this
                     .update(cx, |peek, cx| {
+                        if peek.turn_id != turn {
+                            return true;
+                        }
                         let mut events = Vec::new();
                         let mut finished = false;
                         match peek.receiver.as_mut() {
@@ -1493,7 +1796,6 @@ impl Peek {
             }
         })
         .detach();
-        true
     }
 
     /// An icon button in the component's own style: the default variant's
@@ -1525,9 +1827,14 @@ impl Peek {
             ActivationPolicy::Accessory
         });
         if self.pinned {
+            // A regular window keeps the title row. Hover is only for a peek.
+            set_chrome_locked(true);
+            set_chrome_visible(true);
             // A regular app's menu bar only appears once it is activated.
             cx.activate(true);
         } else {
+            set_chrome_locked(false);
+            set_chrome_visible(false);
             // Dropping the Dock icon must not take the window with it.
             native_window::show(window);
         }
@@ -1547,49 +1854,59 @@ impl Peek {
 
     fn apply_events(&mut self, events: Vec<Event>) {
         for event in events {
+            let overlay = self.overlay.is_some();
             match event {
                 Event::Route { note, .. } => {
-                    // Routing is internal detail; only the overlay, which has
-                    // no other surface while it works, hears about it.
-                    self.forward_overlay(OverlayEvent::Status(note));
+                    if overlay {
+                        self.forward_overlay(OverlayEvent::Status(note));
+                    }
                 }
                 Event::Text(delta) => {
+                    if overlay {
+                        self.forward_overlay(OverlayEvent::Chunk(delta));
+                        continue;
+                    }
                     if self.answer.len() + delta.len() > peek_core::MAX_OUTPUT_BYTES {
                         self.notify_error(i18n::tr("status-output-too-long"));
                         self.stop();
                         break;
                     }
                     self.answer.push_str(&delta);
-                    self.forward_overlay(OverlayEvent::Chunk(delta));
                 }
                 Event::Done => {
+                    if overlay {
+                        self.forward_overlay(OverlayEvent::Finished);
+                        self.overlay = None;
+                        self.busy = false;
+                        self.status.clear();
+                        continue;
+                    }
                     // The answer joins the conversation. Without this the next
                     // question saw the system prompt and the user's own words
-                    // and nothing else, so a follow-up had nothing to follow:
-                    // the assistant's replies were never sent back.
+                    // and nothing else, so a follow-up had nothing to follow.
                     if !self.answer.is_empty() {
                         self.messages.push(Message {
                             role: "assistant".into(),
                             content: self.answer.clone(),
                         });
-                        self.bubbles.push((false, std::mem::take(&mut self.answer)));
+                        self.bubbles
+                            .push((false, std::mem::take(&mut self.answer)));
                         peek_core::bound_history(&mut self.messages);
                     }
-                    // A finished turn says so by having an answer; a "done"
-                    // line only takes space.
                     self.status.clear();
                     self.busy = false;
-                    self.forward_overlay(OverlayEvent::Finished);
-                    self.overlay = None;
                 }
                 Event::Failed(message) => {
-                    // The detail is long and often carries a URL, so it goes to
-                    // a notification and the panel keeps only a short state.
-                    self.notify_error(message.clone());
+                    if overlay {
+                        self.forward_overlay(OverlayEvent::Failed(message));
+                        self.forward_overlay(OverlayEvent::Finished);
+                        self.overlay = None;
+                        self.busy = false;
+                        continue;
+                    }
+                    self.notify_error(message);
+                    self.settle_stopped_turn();
                     self.busy = false;
-                    self.forward_overlay(OverlayEvent::Failed(message));
-                    self.forward_overlay(OverlayEvent::Finished);
-                    self.overlay = None;
                 }
             }
         }
@@ -1612,13 +1929,25 @@ impl Render for Peek {
             self.input
                 .update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        if self.clear_follow_up {
+            self.clear_follow_up = false;
+            self.follow_up
+                .update(cx, |state, cx| state.set_value("", window, cx));
+        }
         // Resize before drawing. The query page stays compact until it has
         // something to show, while the settings page is always tall; sizing it
         // only from the query page left settings clipped to a compact window.
-        let height = if self.settings {
+        let mut height = if self.settings {
             self.settings_height()
         } else if self.has_result() {
+            // Same as the compact panel: the row grows the window upward
+            // instead of covering the result.
             self.result_height()
+                + if chrome_visible() {
+                    PANEL_CHROME_HEIGHT
+                } else {
+                    0.
+                }
         } else {
             // The textarea auto-grows between two and five rows, so the compact
             // panel follows it rather than guessing a single height.
@@ -1630,35 +1959,28 @@ impl Render for Peek {
             };
             PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows + chrome
         };
-        // Where the panel's top edge sits while collapsed, so revealing the
-        // title row grows the window upwards and leaves the input box on the
-        // same line of the screen.
-        let top = window.bounds().origin.y.as_f32();
-        let anchor = ANCHOR_TOP.with(|cell| match cell.get() {
-            Some(anchor) => anchor,
-            None => {
-                let anchor = top
-                    + if chrome_visible() {
-                        PANEL_CHROME_HEIGHT
-                    } else {
-                        0.
-                    };
-                cell.set(Some(anchor));
-                anchor
-            }
-        });
-        let desired_top = anchor
-            - if chrome_visible() {
+        // The task list hangs down from the button. A compact panel ends at
+        // that button, so the window has to grow while the list is open.
+        if self.task_menu_open && !self.settings {
+            let chrome = if chrome_visible() {
                 PANEL_CHROME_HEIGHT
             } else {
                 0.
             };
-        let drift = top - desired_top;
-        if self.applied_height != Some(height) || drift.abs() > 0.5 {
+            let needed = PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2. + chrome + 240.;
+            if height < needed {
+                height = needed;
+            }
+        }
+        // GPUI owns the window size. A second native frame change leaves a
+        // strip the renderer never paints, which shows up black under the panel.
+        if self.applied_height != Some(height) {
             self.applied_height = Some(height);
             window.resize(size(px(PANEL_WIDTH), px(height)));
-            native_window::move_up(window, drift);
         }
+        // Record the frame that is about to be shown, so the next pointer
+        // sample uses the same origin as that frame.
+        set_chrome_in_frame(!self.settings && chrome_visible());
         if self.settings {
             return self.settings_page(cx).into_any_element();
         }
@@ -1690,12 +2012,11 @@ impl Peek {
                 i18n::tr("task-auto-tooltip"),
             ),
         };
-        DropdownButton::new("task-picker")
-            .button(
-                Button::new("task-picker-button")
-                    .icon(icon)
-                    .tooltip(tooltip),
-            )
+        // Opens down and to the right. The split control's default anchor
+        // hangs the list off the left edge of this narrow panel.
+        Button::new("task-picker")
+            .icon(icon)
+            .tooltip(tooltip)
             .dropdown_menu(move |mut menu, _window, _cx| {
                 for (index, task) in TASK_ORDER.iter().enumerate() {
                     let target = entity.clone();
@@ -1736,6 +2057,18 @@ impl Peek {
                 );
                 menu
             })
+            .on_open_change({
+                let entity = cx.entity();
+                move |open, _window, cx| {
+                    let open = *open;
+                    entity.update(cx, |this, cx| {
+                        if this.task_menu_open != open {
+                            this.task_menu_open = open;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
     }
 
     /// The icon that stands for a task, so the picker can collapse to it.
@@ -1763,7 +2096,6 @@ impl Peek {
         let fg = theme.foreground;
         let bg = theme.background;
         let border = theme.border;
-        let muted = theme.muted_foreground;
 
         // One turn of the conversation. The user's own words sit on the right
         // and the assistant's on the left, which is what makes the two readable
@@ -1807,20 +2139,26 @@ impl Peek {
             .size_full()
             .bg(bg)
             .text_color(fg)
-            // The whole panel is the hover area, not the row: revealing the row
-            // moves the window, and a transition caused by that layout change
-            // reads as the pointer leaving the row, which made the two flash.
-            // The whole panel is both the target and the boundary: hovering
-            // anywhere reveals the row, and only leaving the panel hides it. A
-            // narrow strip at the top was hard to hit, and deciding from inside
-            // the panel meant the window's own move could cross the boundary.
-            .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
-                let preview = std::env::var("PEEK_RENDER").is_ok();
-                if preview {
+            // The corner is the right half of the top of the input box, not of
+            // the whole panel. Mouse moves carry a position, so nothing is
+            // laid over the text. Leaving the window closes the row; a layout
+            // change under a still pointer does not.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if this.pinned || std::env::var("PEEK_RENDER").is_ok() || chrome_settling() {
                     return;
                 }
-                if *hovered != chrome_visible() {
-                    set_chrome_visible(*hovered);
+                let want = pointer_in_chrome_zone(event.position, window);
+                if want != chrome_visible() {
+                    set_chrome_visible(want);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
+                if this.pinned || std::env::var("PEEK_RENDER").is_ok() || chrome_settling() {
+                    return;
+                }
+                if chrome_visible() {
+                    set_chrome_visible(false);
                     cx.notify();
                 }
             }))
@@ -1838,57 +2176,25 @@ impl Peek {
                     native_window::hide(window);
                     return;
                 }
-                // A keystroke means the user is working in the box, so the
-                // title row goes away again.
-                if chrome_visible() {
+                // A keystroke in the query box dismisses the title row. Doing
+                // that while the follow-up is focused resizes the window under
+                // the caret and macOS drops the Chinese input session.
+                let follow_up_focused = this
+                    .follow_up
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window);
+                if !this.pinned && chrome_visible() && !follow_up_focused {
                     set_chrome_visible(false);
                     cx.notify();
                 }
             }))
-            // Hidden, the row is replaced by a thin strip that catches the
-            // pointer; the window is sized for whichever of the two is showing.
-            // A deliberate target above the input box, rather than the whole
-            // panel: revealing the row moves the window, and a target the
-            // pointer does not leave by accident cannot be crossed by that move.
-            .when(!chrome_visible(), |this| {
-                this.child(
-                    div()
-                        .id("chrome-strip")
-                        .absolute()
-                        .top(px(0.))
-                        .left(px(0.))
-                        .right(px(0.))
-                        .h(px(PANEL_CHROME_STRIP))
-                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
-                            // An offscreen render parks the pointer at the
-                            // origin, which is over this strip.
-                            let preview = std::env::var("PEEK_RENDER").is_ok();
-                            if !*hovered {
-                                // Left the strip: it may reveal again.
-                                STRIP_ARMED.with(|cell| cell.set(true));
-                            } else if !preview
-                                && !chrome_visible()
-                                && STRIP_ARMED.with(std::cell::Cell::get)
-                            {
-                                set_chrome_visible(true);
-                                cx.notify();
-                            }
-                        })),
-                )
-            })
             .when(chrome_visible(), |this| {
                 this.child(
                     h_flex()
                         .id("chrome-row")
                         .w_full()
                         .items_center()
-                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
-                            if !*hovered && chrome_visible() {
-                                set_chrome_visible(false);
-                                STRIP_ARMED.with(|cell| cell.set(false));
-                                cx.notify();
-                            }
-                        }))
                         .gap(px(10.))
                         // Inset so the title lines up with the text inside the
                         // input box, whose own padding starts at the same place.
@@ -1939,7 +2245,7 @@ impl Peek {
                                                 .on_click(move |_event, _window, cx| {
                                                     target.update(cx, |peek, cx| {
                                                         peek.assign_channel(
-                                                            false,
+                                                            ChannelSlot::Basic,
                                                             chosen.clone(),
                                                             cx,
                                                         );
@@ -1991,21 +2297,21 @@ impl Peek {
                 div()
                     .relative()
                     .w_full()
-                    // The textarea grows with its content up to five rows; a
-                    // fixed height here let it paint over the row below, and
-                    // clipping keeps that from ever happening again.
-                    .overflow_hidden()
                     .border_1()
                     .border_color(border)
                     .rounded(px(16.))
                     .p(px(14.))
                     .child(
-                        Textarea::new(&self.input)
-                            .w_full()
-                            .appearance(false)
-                            .bordered(false)
-                            // Room for the controls drawn over the corner.
-                            .pb(px(34.)),
+                        // Clip the text, not the task list. The list is a
+                        // sibling of this box and has to paint past it.
+                        div().w_full().overflow_hidden().child(
+                            Textarea::new(&self.input)
+                                .w_full()
+                                .appearance(false)
+                                .bordered(false)
+                                // Room for the controls drawn over the corner.
+                                .pb(px(34.)),
+                        ),
                     )
                     .child(
                         div()
@@ -2018,7 +2324,7 @@ impl Peek {
                             .gap(px(6.))
                             .child(self.task_picker(cx))
                             .child(div().flex_1())
-                            .when(self.busy, |this| {
+                            .when(self.busy && !self.follow_up_turn, |this| {
                                 this.child(
                                     Button::new("stop")
                                         .icon(gpui_kit::assets::IconName::Square)
@@ -2033,7 +2339,7 @@ impl Peek {
                                 Button::new("look-up")
                                     .icon(gpui_kit::assets::IconName::Send)
                                     .tooltip(i18n::tr("query-run"))
-                                    .loading(self.busy)
+                                    .loading(self.busy && !self.follow_up_turn)
                                     .on_click(cx.listener(|this, _event, window, cx| {
                                         this.start_query(window, cx);
                                     })),
@@ -2041,6 +2347,8 @@ impl Peek {
                     ),
             )
             .when(self.has_result(), |this| {
+                let conversation = self.conversation();
+                let plain = self.plain_answer();
                 this
                     // Offline dictionary result, when the input was a single word.
                     .when(!self.dictionary_note.is_empty(), |this| {
@@ -2056,65 +2364,76 @@ impl Peek {
                                 .child(self.dictionary_note.clone()),
                         )
                     })
-                    // The conversation. Each turn is a bubble, and the answer
-                    // still arriving is the last of them.
-                    .child(
-                        v_flex()
-                            .id("answer")
-                            .w_full()
-                            .flex_1()
-                            .gap(px(8.))
-                            .overflow_y_scroll()
-                            .children(self.bubbles.iter().enumerate().map(
-                                |(index, (from_user, text))| {
-                                    bubble(index, *from_user, text.clone())
-                                },
-                            ))
-                            .when(!self.answer.is_empty(), |this| {
-                                this.child(bubble(self.bubbles.len(), false, self.answer.clone()))
-                            }),
-                    )
-                    .when(
-                        self.permissions.iter().any(|(_, granted)| !granted),
-                        |this| {
-                            this.child(
-                                div()
-                                    .w_full()
-                                    .font_family(set.latin)
-                                    .text_size(px(11.))
-                                    .text_color(muted)
-                                    .child(format!(
-                                        "{}: {}",
-                                        i18n::tr("settings-permission-denied"),
-                                        // `permissions::status()` already yields localisation keys.
-                                        self.permissions
-                                            .iter()
-                                            .filter(|(_, granted)| !granted)
-                                            .map(|(key, _)| i18n::tr(key))
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    )),
-                            )
-                        },
-                    )
+                    // One answer is a markdown card. A follow-up turns that
+                    // same history into a conversation.
+                    .when(conversation, |this| {
+                        this.child(
+                            v_flex()
+                                .id("answer")
+                                .w_full()
+                                .flex_1()
+                                .gap(px(8.))
+                                .overflow_y_scroll()
+                                .children(self.bubbles.iter().enumerate().map(
+                                    |(index, (from_user, text))| {
+                                        bubble(index, *from_user, text.clone())
+                                    },
+                                ))
+                                .when(!self.answer.is_empty(), |this| {
+                                    this.child(bubble(
+                                        self.bubbles.len(),
+                                        false,
+                                        self.answer.clone(),
+                                    ))
+                                }),
+                        )
+                    })
+                    .when(!conversation && plain.is_some(), |this| {
+                        let text = plain.clone().unwrap_or_default();
+                        this.child(
+                            div()
+                                .id("answer")
+                                .w_full()
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .border_1()
+                                .border_color(border)
+                                .rounded(px(14.))
+                                .p(px(14.))
+                                .child(
+                                    TextView::markdown("plain-answer", text).text_size(px(13.)),
+                                ),
+                        )
+                    })
                     // Follow-up turn, continuing the same conversation.
                     .child(
                         h_flex()
                             .w_full()
-                            .items_center()
-                            .gap(px(10.))
+                            .items_end()
+                            .gap(px(8.))
                             .child(
-                                Input::new(&self.follow_up)
-                                    .id("follow-up")
+                                Textarea::new(&self.follow_up)
                                     .flex_1()
                                     .rounded(px(10.)),
                             )
+                            .when(self.busy && self.follow_up_turn, |this| {
+                                this.child(
+                                    Button::new("follow-stop")
+                                        .icon(gpui_kit::assets::IconName::Square)
+                                        .tooltip(i18n::tr("query-stop"))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.stop();
+                                            cx.notify();
+                                        })),
+                                )
+                            })
                             .child(
-                                Button::new("send")
-                                    .label(i18n::tr("query-send"))
-                                    .disabled(self.busy)
-                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                        this.send_follow_up(window, cx);
+                                Button::new("follow-send")
+                                    .icon(gpui_kit::assets::IconName::Send)
+                                    .tooltip(i18n::tr("query-send"))
+                                    .loading(self.busy && self.follow_up_turn)
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.send_follow_up(cx);
                                     })),
                             ),
                     )
@@ -2141,13 +2460,24 @@ impl Peek {
                 )
             })
             .collect();
-        let ai_channels: Vec<(String, String)> = channels
-            .iter()
-            .filter(|(_, _, _, is_ai)| *is_ai)
-            .map(|(id, name, _, _)| (id.clone(), name.clone()))
+        let basic_channels: Vec<(String, String)> = self
+            .config
+            .basic_candidates()
+            .map(|channel| (channel.id.clone(), channel.name.clone()))
+            .collect();
+        let ai_channels: Vec<(String, String)> = self
+            .config
+            .ai_candidates()
+            .map(|channel| (channel.id.clone(), channel.name.clone()))
+            .collect();
+        let decision_channels: Vec<(String, String)> = self
+            .config
+            .decision_candidates()
+            .map(|channel| (channel.id.clone(), channel.name.clone()))
             .collect();
         let basic_active = self.config.basic_channel.clone();
         let ai_active = self.config.ai_channel.clone();
+        let decision_active = self.config.decision_channel.clone();
         let theme = cx.theme();
         let set = self.set;
         let fg = theme.foreground;
@@ -2155,14 +2485,43 @@ impl Peek {
         let muted = theme.muted_foreground;
 
         v_flex()
+            // Children keep their own height. The window then adopts the sum,
+            // so the page is exactly as tall as what this tab shows. This has
+            // to be set before `id`, which wraps the div.
+            .on_children_prepainted({
+                let measure = cx.entity();
+                move |bounds, _window, cx| {
+                    if bounds.is_empty() {
+                        return;
+                    }
+                    let stacked = bounds
+                        .iter()
+                        .map(|bound| bound.size.height.as_f32())
+                        .sum::<f32>();
+                    let gaps = 14. * (bounds.len() - 1) as f32;
+                    // Vertical padding on this page, top and bottom.
+                    // The page padding is 20 on each edge. Inputs paint a little
+                    // past the layout box, so the last field needs a few more
+                    // points or the window clips it.
+                    let needed = (stacked + gaps + 56.).clamp(220., 900.);
+                    let measure = measure.clone();
+                    cx.defer(move |cx| {
+                        measure.update(cx, |this, cx| {
+                            if (this.settings_measured - needed).abs() > 1.5 {
+                                this.settings_measured = needed;
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            })
             .id("settings_scroll")
             .size_full()
+            .items_start()
             .bg(bg)
             .text_color(fg)
             .p(px(20.))
             .gap(px(14.))
-            // The page is taller than the window: channels, their fields, the
-            // used-for list and the permission report all live here.
             .overflow_y_scroll()
             .on_key_down(|event, window, _cx| {
                 if event.keystroke.key == "escape" {
@@ -2172,6 +2531,7 @@ impl Peek {
             .child(
                 h_flex()
                     .w_full()
+                    .flex_none()
                     .items_center()
                     .gap(px(10.))
                     .child(
@@ -2194,6 +2554,7 @@ impl Peek {
                     ),
             )
             .child(
+                div().w_full().flex_none().child(
                 TabBar::new("settings_tabs")
                     // The default filled-tab strip reads as a different design
                     // language; an underline row matches a flat settings page.
@@ -2201,19 +2562,25 @@ impl Peek {
                     .children([
                         Tab::new().label(i18n::tr("settings-tab-appearance")),
                         Tab::new().label(i18n::tr("settings-tab-shortcuts")),
+                        Tab::new().label(i18n::tr("settings-tab-channels")),
                         Tab::new().label(i18n::tr("settings-tab-translation")),
                         Tab::new().label(i18n::tr("settings-tab-permissions")),
                     ])
                     .selected_index(self.settings_tab)
                     .on_click(cx.listener(|this, index: &usize, _window, cx| {
                         this.settings_tab = *index;
+                        if *index == 4 {
+                            this.permissions = peek_runtime::permissions::status();
+                        }
                         cx.notify();
                     })),
+                ),
             )
             .when(self.settings_tab == 0, |this| {
                 this.child(
                     v_flex()
                         .w_full()
+                        .flex_none()
                         .gap(px(6.))
                         .child(
                             div()
@@ -2238,6 +2605,7 @@ impl Peek {
                 this.child(
                     v_flex()
                         .w_full()
+                        .flex_none()
                         .gap(px(6.))
                         .child(self.section_label(i18n::tr("channels-title"), set, muted))
                         .when(self.config.channels.is_empty(), |this| {
@@ -2330,6 +2698,7 @@ impl Peek {
                 this.child(
                     v_flex()
                         .w_full()
+                        .flex_none()
                         .gap(px(10.))
                         .child(
                             div()
@@ -2363,10 +2732,11 @@ impl Peek {
                 )
             })
             // Which channel serves which place, plus the copy behaviour.
-            .when(self.settings_tab == 2, |this| {
+            .when(self.settings_tab == 3, |this| {
                 this.child(
                     v_flex()
                         .w_full()
+                        .flex_none()
                         .gap(px(10.))
                         .child(
                             h_flex()
@@ -2398,12 +2768,9 @@ impl Peek {
                                 i18n::tr("channels-basic"),
                                 self.channel_picker(
                                     "basic_picker",
-                                    channels
-                                        .iter()
-                                        .map(|(id, name, _, _)| (id.clone(), name.clone()))
-                                        .collect(),
+                                    basic_channels.clone(),
                                     basic_active.clone(),
-                                    false,
+                                    ChannelSlot::Basic,
                                     cx,
                                 ),
                                 set,
@@ -2415,68 +2782,29 @@ impl Peek {
                                 "ai_picker",
                                 ai_channels,
                                 ai_active.clone(),
-                                true,
+                                ChannelSlot::Llm,
                                 cx,
                             ),
                             set,
                         ))
-                        .when(channels.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .font_family(set.latin)
-                                    .text_size(px(11.))
-                                    .text_color(muted)
-                                    .child(i18n::tr("channels-none")),
-                            )
-                        })
-                        // The routing decision service: which model decides
-                        // what a piece of content is asking for.
-                        .child(self.section_label(i18n::tr("settings-decision"), set, muted))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .gap(px(10.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .font_family(set.latin)
-                                        .text_size(px(12.))
-                                        .child(i18n::tr("settings-decision-enabled")),
-                                )
-                                .child(
-                                    Switch::new("decision_enabled")
-                                        .checked(self.config.decision.enabled)
-                                        .on_click(cx.listener(
-                                            |this, checked: &bool, _window, cx| {
-                                                this.config.decision.enabled = *checked;
-                                                this.persist_config();
-                                                cx.notify();
-                                            },
-                                        )),
-                                ),
-                        )
                         .child(self.picker_row(
-                            i18n::tr("channels-endpoint"),
-                            Input::new(&self.decision_endpoint).into_any_element(),
-                            set,
-                        ))
-                        .child(self.picker_row(
-                            i18n::tr("channels-model"),
-                            Input::new(&self.decision_model).into_any_element(),
-                            set,
-                        ))
-                        .child(self.picker_row(
-                            i18n::tr("channels-key"),
-                            Input::new(&self.decision_key).into_any_element(),
+                            i18n::tr("channels-decision"),
+                            self.channel_picker(
+                                "decision_picker",
+                                decision_channels,
+                                decision_active.clone(),
+                                ChannelSlot::Decision,
+                                cx,
+                            ),
                             set,
                         )),
                 )
             })
-            .when(self.settings_tab == 3, |this| {
+            .when(self.settings_tab == 4, |this| {
                 this.child(
                     v_flex()
                         .w_full()
+                        .flex_none()
                         .gap(px(4.))
                         .child(
                             div()
@@ -2533,7 +2861,33 @@ impl Peek {
                                         })),
                                 )
                                 .into_any_element()
-                        })),
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap(px(8.))
+                                .pt(px(8.))
+                                .child(
+                                    Button::new("open-privacy")
+                                        .label(i18n::tr("settings-open-privacy"))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            if let Err(err) =
+                                                peek_runtime::permissions::open_settings()
+                                            {
+                                                this.notify_error(err);
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("refresh-permissions")
+                                        .label(i18n::tr("settings-permission-refresh"))
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.permissions = peek_runtime::permissions::status();
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
                 )
             })
             .into_any_element()
@@ -2656,7 +3010,22 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                         set_chrome_visible(true);
                     }
                 }
+                // A single answer, rendered as markdown rather than bubbles.
+                "plain" => {
+                    peek.pending_input = Some("这段话帮我翻译一下".to_string());
+                    peek.bubbles = vec![
+                        (true, "这段话帮我翻译一下".to_string()),
+                        (false, SAMPLE_ANSWER.to_string()),
+                    ];
+                    peek.dictionary_note = "stream   /striːm/\n流；溪流".to_string();
+                    if std::env::var("PEEK_CHROME").is_ok() {
+                        set_chrome_visible(true);
+                    }
+                }
                 _ => {
+                    if std::env::var("PEEK_CHROME").is_ok() {
+                        set_chrome_visible(true);
+                    }
                     // A real conversation, so both sides of the layout show.
                     peek.bubbles = vec![
                         (true, "这段话帮我翻译一下".to_string()),
@@ -2680,7 +3049,11 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         cx.new(|cx| Root::new(view, window, cx))
     })?;
 
-    cx.run_until_parked();
+    // A few turns: settings measures its children after the first paint and
+    // resizes, and the next paint has to fill that new window.
+    for _ in 0..4 {
+        cx.run_until_parked();
+    }
     // The channel dialog is opened by a click, so a preview opens it directly.
     // It has to wait for the first frame: the component layer registers the
     // per-window state dialogs look up while painting.
@@ -2782,6 +3155,27 @@ fn quit_now(cx: &mut App) {
     std::process::exit(0);
 }
 
+/// Keeps the single-instance lock for the process lifetime.
+///
+/// A second launch exits. If the lock cannot be created, the app still starts.
+fn keep_single_instance() -> Option<std::fs::File> {
+    let Ok(config) = peek_runtime::store::config_path() else {
+        return None;
+    };
+    let directory = config.parent()?;
+    match peek_runtime::instance::acquire(&directory.join("instance.lock")) {
+        Ok(Some(file)) => Some(file),
+        Ok(None) => {
+            eprintln!("Crant Peek is already running");
+            std::process::exit(0);
+        }
+        Err(err) => {
+            eprintln!("instance lock failed: {err}");
+            None
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let selftest = std::env::var("PEEK_SELFTEST").is_ok();
 
@@ -2833,6 +3227,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Held until the process exits. A second launch finds the lock and leaves.
+    let _instance = keep_single_instance();
+
     // An asset source must be attached explicitly: `application()` only builds
     // the platform, so without this the icon font never loads and every `Icon`
     // renders as nothing. The offscreen preview passes the same assets, which is
@@ -2870,15 +3267,11 @@ fn main() -> anyhow::Result<()> {
         }
         fonts::apply(cx, fonts::initial());
 
-        // One action channel, owned here: the selection hook, the tray menu and
-        // the global hotkeys all feed it, and the panel view drains it.
+        // One action channel, owned here: the tray menu and the global hotkeys
+        // feed it, and the panel view drains it. Selection uses the same hotkey
+        // path. The old double-tap Ctrl hook stayed installed beside it and
+        // treated an empty selection differently, so it is not started.
         let (action_tx, action_rx) = std::sync::mpsc::channel::<Action>();
-        peek_runtime::selection::listen(
-            store::load().unwrap_or_default().double_ctrl_ms,
-            action_tx.clone(),
-            // The view polls the channel, so the wake callback is a no-op.
-            std::sync::Arc::new(|| {}),
-        );
         let tray_tx = action_tx.clone();
         let view_tx = action_tx.clone();
         // The hotkey loop reads the selection on a thread of its own.
@@ -3097,4 +3490,50 @@ fn main() -> anyhow::Result<()> {
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod chrome_zone_tests {
+    use super::{INPUT_CORNER_HEIGHT, INPUT_CORNER_SLOP, PANEL_CHROME_HEIGHT, chrome_zone_contains};
+
+    #[test]
+    fn the_corner_does_not_grow_when_the_panel_does() {
+        let width = 480.;
+        assert!(chrome_zone_contains(400., 10., width, 0., false));
+        assert!(!chrome_zone_contains(100., 10., width, 0., false));
+        // Lower half of a tall panel, still on the right. Not the input corner.
+        assert!(!chrome_zone_contains(400., 400., width, 0., false));
+        assert!(!chrome_zone_contains(
+            400.,
+            INPUT_CORNER_HEIGHT + 1.,
+            width,
+            0.,
+            false
+        ));
+    }
+
+    #[test]
+    fn an_open_corner_keeps_slack_and_the_title_row() {
+        let width = 480.;
+        let top = PANEL_CHROME_HEIGHT;
+        assert!(chrome_zone_contains(20., 10., width, top, true));
+        let inside_slack = top + INPUT_CORNER_HEIGHT + INPUT_CORNER_SLOP - 1.;
+        assert!(chrome_zone_contains(400., inside_slack, width, top, true));
+        assert!(!chrome_zone_contains(
+            400.,
+            inside_slack + 2.,
+            width,
+            top,
+            true
+        ));
+        // Hiding moves the window back down by the row. That same pointer must
+        // land outside the strict corner, or the edge opens and closes itself.
+        assert!(!chrome_zone_contains(
+            400.,
+            inside_slack - PANEL_CHROME_HEIGHT,
+            width,
+            0.,
+            false
+        ));
+    }
 }

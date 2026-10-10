@@ -29,6 +29,14 @@ use peek_runtime::action::{Action, OverlayEvent};
 use peek_runtime::capture::{self, Rect, Screen};
 use peek_runtime::i18n;
 
+/// What the OCR worker reports. Empty and failure stay distinct so a language
+/// pack or permission error is not shown as "no text".
+enum OcrResult {
+    Text(String),
+    Empty,
+    Failed(String),
+}
+
 /// Card geometry, also used to keep it on screen.
 const CARD_WIDTH: f32 = 380.;
 const CARD_MAX_HEIGHT: f32 = 260.;
@@ -51,8 +59,8 @@ pub struct Snip {
     status: String,
     busy: bool,
     /// OCR results, delivered by the worker thread.
-    ocr_rx: Receiver<Option<String>>,
-    ocr_tx: Sender<Option<String>>,
+    ocr_rx: Receiver<OcrResult>,
+    ocr_tx: Sender<OcrResult>,
     /// Progress from the panel while it runs our turn.
     events: Option<Receiver<OverlayEvent>>,
     /// Keyboard focus, so Esc reaches the overlay.
@@ -156,9 +164,16 @@ impl Snip {
         let mut recognized = None;
         while let Ok(result) = self.ocr_rx.try_recv() {
             match result {
-                Some(text) => recognized = Some(text),
-                None => {
+                OcrResult::Text(text) => recognized = Some(text),
+                OcrResult::Empty => {
                     self.status = i18n::tr("status-ocr-empty");
+                    self.busy = false;
+                    changed = true;
+                }
+                OcrResult::Failed(err) => {
+                    let message = i18n::format("status-ocr-failed", &[("error", &err)]);
+                    self.pending_toast = Some(message.clone());
+                    self.status = message;
                     self.busy = false;
                     changed = true;
                 }
@@ -209,22 +224,22 @@ impl Snip {
         std::thread::spawn(move || {
             let Some(image) = capture::crop(&screen, rect) else {
                 eprintln!("[snip] selection too small: {rect:?}");
-                let _ = tx.send(None);
+                let _ = tx.send(OcrResult::Empty);
                 return;
             };
             let image = capture::prepare_region(image);
             match peek_runtime::ocr::recognize(&image) {
                 Ok(text) if !text.trim().is_empty() => {
                     eprintln!("[snip] ocr ok: {} chars", text.trim().chars().count());
-                    let _ = tx.send(Some(text));
+                    let _ = tx.send(OcrResult::Text(text));
                 }
                 Ok(_) => {
                     eprintln!("[snip] ocr found no text");
-                    let _ = tx.send(None);
+                    let _ = tx.send(OcrResult::Empty);
                 }
                 Err(err) => {
                     eprintln!("[snip] ocr failed: {err}");
-                    let _ = tx.send(None);
+                    let _ = tx.send(OcrResult::Failed(err));
                 }
             }
         });

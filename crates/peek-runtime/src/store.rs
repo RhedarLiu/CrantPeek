@@ -28,9 +28,13 @@ pub fn load() -> Result<Config, String> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let config: Config = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let mut config: Config = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let changed = config.migrate();
     config.validate().map_err(crate::i18n::tr)?;
+    if changed {
+        save_to(&config, &path)?;
+    }
     Ok(config)
 }
 pub fn save(config: &Config) -> Result<(), String> {
