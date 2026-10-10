@@ -264,6 +264,87 @@ const TASK_KEYS: &[&str] = &[
     "task-auto",
 ];
 
+/// The decision used for the current result, never inferred from the answer.
+#[derive(Clone, Debug)]
+struct AutoDecision {
+    task: Task,
+    service: Option<String>,
+    model: String,
+    confidence: Option<f64>,
+    fallback: Option<&'static str>,
+}
+
+impl AutoDecision {
+    fn local(task: Task) -> Self {
+        Self {
+            task,
+            service: None,
+            model: String::new(),
+            confidence: None,
+            fallback: None,
+        }
+    }
+
+    fn resolved(
+        result: Result<peek_network::Decision, peek_network::Error>,
+        threshold: f64,
+        local_task: Task,
+        channel: &Channel,
+    ) -> Self {
+        let (task, confidence, fallback) = match result {
+            Ok(answer) if answer.confidence >= threshold => {
+                (answer.task, Some(answer.confidence), None)
+            }
+            Ok(answer) => (
+                local_task,
+                Some(answer.confidence),
+                Some("decision-detail-low-confidence"),
+            ),
+            Err(_) => (local_task, None, Some("decision-detail-unavailable")),
+        };
+        Self {
+            task,
+            service: Some(channel.name.clone()),
+            model: channel.model.clone(),
+            confidence,
+            fallback,
+        }
+    }
+
+    fn tooltip(&self) -> String {
+        let task = i18n::tr(match self.task {
+            Task::Translate => "task-translate",
+            Task::Define => "task-define",
+            Task::ExplainCode => "task-explain-code",
+            Task::ExplainError => "task-explain-error",
+            Task::Explain => "task-explain",
+        });
+        let mut detail = i18n::format("decision-detail-task", &[("task", &task)]);
+        if let Some(service) = &self.service {
+            detail.push('\n');
+            detail.push_str(&i18n::format(
+                "decision-detail-model",
+                &[("channel", service), ("model", &self.model)],
+            ));
+            if let Some(value) = self.confidence {
+                detail.push('\n');
+                detail.push_str(&i18n::format(
+                    "decision-detail-confidence",
+                    &[("confidence", &format!("{:.0}%", value * 100.))],
+                ));
+            }
+            if let Some(reason) = self.fallback {
+                detail.push('\n');
+                detail.push_str(&i18n::tr(reason));
+            }
+        } else {
+            detail.push('\n');
+            detail.push_str(&i18n::tr("decision-detail-local"));
+        }
+        detail
+    }
+}
+
 struct Peek {
     set: &'static fonts::FontSet,
     /// Kept alive so the activation observer stays subscribed.
@@ -319,9 +400,10 @@ struct Peek {
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
     /// Sends a decided task back from the decision service: the epoch it belongs
     /// to, the text it was decided for, and the task.
-    route_tx: std::sync::mpsc::Sender<(u64, String, Task)>,
+    route_tx: std::sync::mpsc::Sender<(u64, String, AutoDecision)>,
     /// Bumped whenever a newer query or a stop should discard an in-flight decision.
     decision_epoch: u64,
+    auto_decision: Option<AutoDecision>,
     decision_cancel: Option<CancellationToken>,
     /// Identifies the drain loop that owns `receiver`. Older loops exit.
     turn_id: u64,
@@ -547,6 +629,7 @@ impl Peek {
             test_tx,
             route_tx,
             decision_epoch: 0,
+            auto_decision: None,
             decision_cancel: None,
             turn_id: 0,
             blank_hotkey,
@@ -604,14 +687,19 @@ impl Peek {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
-                while let Ok((epoch, text, task)) = route_rx.try_recv() {
+                while let Ok((epoch, text, decision)) = route_rx.try_recv() {
                     this.update(cx, |peek, cx| {
                         // A newer query, a stop, or a timeout already moved on.
                         if epoch != peek.decision_epoch {
                             return;
                         }
                         peek.decision_cancel = None;
-                        peek.begin_turn_as(text, false, Some(task), cx);
+                        let automatic = peek.selected_task(cx).is_none();
+                        let started = peek.begin_turn_as(text, false, Some(decision.task), cx);
+                        if automatic && started {
+                            peek.auto_decision = Some(decision);
+                            cx.notify();
+                        }
                     })
                     .ok();
                 }
@@ -1035,14 +1123,11 @@ impl Peek {
         let model = channel.model.clone();
         cx.notify();
         self.runtime.spawn(async move {
-            let chosen = match client
+            let result = client
                 .decide(&endpoint, &key, &model, &text, timeout, cancel)
-                .await
-            {
-                Ok(answer) if answer.confidence >= min_confidence => answer.task,
-                _ => fallback,
-            };
-            let _ = tx.send((epoch, text, chosen));
+                .await;
+            let decision = AutoDecision::resolved(result, min_confidence, fallback, &channel);
+            let _ = tx.send((epoch, text, decision));
         });
     }
 
@@ -1845,8 +1930,14 @@ impl Peek {
             &self.config.target_language,
             &self.config.chinese_target,
         );
-        let task = decided
-            .or_else(|| self.selected_task(cx))
+        let manual = self.selected_task(cx);
+        let task = manual
+            .or(decided)
+            .or_else(|| {
+                followup
+                    .then(|| self.auto_decision.as_ref().map(|d| d.task))
+                    .flatten()
+            })
             .unwrap_or(route.task);
         let target = effective_target(&route.target, "").to_owned();
         // A follow-up continues the conversation, which a translation-only
@@ -1865,12 +1956,17 @@ impl Peek {
                 self.bubbles.clear();
                 self.messages.clear();
                 self.original_query = text;
+                self.auto_decision = manual.is_none().then(|| AutoDecision::local(task));
                 self.status.clear();
                 cx.notify();
                 return true;
             }
             self.fail_turn(isolated, i18n::tr("status-channel-missing"), cx);
             return false;
+        }
+
+        if !isolated && !followup {
+            self.auto_decision = manual.is_none().then(|| AutoDecision::local(task));
         }
 
         let instruction = task.styled_instruction(&target, &self.config.translation_style);
@@ -2346,6 +2442,30 @@ impl Peek {
         }
     }
 
+    fn decision_badge(&self, id: &'static str, cx: &Context<Self>) -> AnyElement {
+        let Some(decision) = self
+            .auto_decision
+            .as_ref()
+            .filter(|_| self.selected_task(cx).is_none())
+        else {
+            return div().into_any_element();
+        };
+        div()
+            .absolute()
+            .top(px(5.))
+            .right(px(5.))
+            .child(
+                Button::new(id)
+                    .ghost()
+                    .w(px(24.))
+                    .h(px(24.))
+                    .icon(Self::task_icon(decision.task))
+                    .tooltip(decision.tooltip())
+                    .accessibility_label(decision.tooltip()),
+            )
+            .into_any_element()
+    }
+
     fn result_body(&self, children: Vec<AnyElement>, cx: &Context<Self>) -> AnyElement {
         v_flex()
             .on_children_prepainted({
@@ -2365,6 +2485,10 @@ impl Peek {
                 }
             })
             .w_full()
+            .when(
+                self.auto_decision.is_some() && self.selected_task(cx).is_none(),
+                |this| this.pr(px(22.)),
+            )
             .flex_none()
             .gap(px(8.))
             .children(children)
@@ -2707,6 +2831,7 @@ impl Peek {
                     .when(!self.dictionary_note.is_empty(), |this| {
                         this.child(
                             div()
+                                .relative()
                                 .w_full()
                                 .border_1()
                                 .border_color(border)
@@ -2715,7 +2840,17 @@ impl Peek {
                                 .flex_none()
                                 .font_family(set.sc)
                                 .text_size(px(13.))
-                                .child(self.dictionary_note.clone()),
+                                .when(
+                                    !conversation
+                                        && plain.is_none()
+                                        && self.auto_decision.is_some()
+                                        && self.selected_task(cx).is_none(),
+                                    |this| this.pr(px(36.)),
+                                )
+                                .child(self.dictionary_note.clone())
+                                .when(!conversation && plain.is_none(), |this| {
+                                    this.child(self.decision_badge("dictionary-decision", cx))
+                                }),
                         )
                     })
                     // One answer is a markdown card. A follow-up turns that
@@ -2724,6 +2859,7 @@ impl Peek {
                         this.child(
                             v_flex()
                                 .id("answer")
+                                .relative()
                                 .w_full()
                                 .flex_1()
                                 .border_1()
@@ -2751,7 +2887,8 @@ impl Peek {
                                         children
                                     },
                                     cx,
-                                )),
+                                ))
+                                .child(self.decision_badge("answer-decision", cx)),
                         )
                     })
                     .when(!conversation && plain.is_some(), |this| {
@@ -2759,6 +2896,7 @@ impl Peek {
                         this.child(
                             div()
                                 .id("answer")
+                                .relative()
                                 .w_full()
                                 .flex_1()
                                 .overflow_y_scroll()
@@ -2773,7 +2911,8 @@ impl Peek {
                                                 .into_any_element(),
                                         ],
                                     cx,
-                                )),
+                                ))
+                                .child(self.decision_badge("answer-decision", cx)),
                         )
                     })
                     // Follow-up turn, continuing the same conversation.
@@ -3445,6 +3584,15 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                     peek.status.clear();
                 }
             }
+            if std::env::var("PEEK_DECISION_PREVIEW").is_ok() {
+                peek.auto_decision = Some(AutoDecision {
+                    task: Task::Translate,
+                    service: Some("Clef".into()),
+                    model: "clef-flash".into(),
+                    confidence: Some(0.92),
+                    fallback: None,
+                });
+            }
             cx.notify();
         });
         cx.new(|cx| Root::new(view, window, cx))
@@ -3983,5 +4131,70 @@ mod chrome_zone_tests {
             0.,
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod automatic_decision_tests {
+    use super::{AutoDecision, Channel, Task};
+    use peek_runtime::i18n;
+
+    fn decision(confidence: f64) -> Result<peek_network::Decision, peek_network::Error> {
+        Ok(peek_network::Decision {
+            task: Task::ExplainCode,
+            confidence,
+            probabilities: Default::default(),
+        })
+    }
+
+    #[test]
+    fn result_details_record_the_actual_task_and_fallback_source() {
+        let channel = Channel {
+            name: "Judge".into(),
+            model: "judge-model".into(),
+            ..Channel::default()
+        };
+        let accepted = AutoDecision::resolved(decision(0.92), 0.6, Task::Translate, &channel);
+        assert_eq!(accepted.task, Task::ExplainCode);
+        assert_eq!(accepted.confidence, Some(0.92));
+        assert_eq!(accepted.service.as_deref(), Some("Judge"));
+        assert!(accepted.fallback.is_none());
+        let uncertain = AutoDecision::resolved(decision(0.4), 0.6, Task::Translate, &channel);
+        assert_eq!(uncertain.task, Task::Translate);
+        assert_eq!(uncertain.fallback, Some("decision-detail-low-confidence"));
+        let failed = AutoDecision::resolved(
+            Err(peek_network::Error::Cancelled),
+            0.6,
+            Task::Define,
+            &channel,
+        );
+        assert_eq!(failed.task, Task::Define);
+        assert!(failed.confidence.is_none());
+        assert_eq!(failed.fallback, Some("decision-detail-unavailable"));
+    }
+
+    #[test]
+    fn tooltips_explain_local_and_model_decisions_in_both_languages() {
+        let channel = Channel {
+            name: "Judge".into(),
+            model: "judge-model".into(),
+            ..Channel::default()
+        };
+        for language in ["zh-CN", "en"] {
+            i18n::set_language(language);
+            for task in Task::ALL {
+                let detail = AutoDecision::local(task).tooltip();
+                assert!(!detail.contains("[task-"));
+                assert!(
+                    !detail.contains('%'),
+                    "local rules have no model confidence"
+                );
+            }
+            let detail =
+                AutoDecision::resolved(decision(0.92), 0.6, Task::Translate, &channel).tooltip();
+            assert!(detail.contains("Judge"));
+            assert!(detail.contains("judge-model"));
+            assert!(detail.contains("92%"));
+        }
     }
 }

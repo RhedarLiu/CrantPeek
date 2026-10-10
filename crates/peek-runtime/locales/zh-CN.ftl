@@ -348,3 +348,10 @@ channels-down = 下移
 channels-remove-quick = 从快速翻译移除
 
 status-config-save-error = 配置保存失败：{ $error }
+
+decision-detail-task = 自动决策：{ $task }
+decision-detail-local = 来源：本地规则判断
+decision-detail-model = 决策模型：{ $channel }（{ $model }）
+decision-detail-confidence = 模型置信度：{ $confidence }
+decision-detail-low-confidence = 模型置信度不足，已采用本地规则判断
+decision-detail-unavailable = 决策服务不可用，已采用本地规则判断

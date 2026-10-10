@@ -103,3 +103,10 @@ Windows 需要安装支持英语的 OCR 语言包；尚未在 Windows 执行上�
 - release 通过稳定开发证书打包及签名验证，并按固定的打包、关闭旧实例、open 启动、进程确认流程重启。
 
 Windows 窗口/选区的系统边界可参考 [SetWindowPos 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos) 和 [高权限应用的 UI Automation 限制](https://learn.microsoft.com/en-us/power-automate/desktop-flows/how-to/enable-ui-access)。本项目未开启 UIAccess 或自动提高权限。
+
+## 自动决策结果图标
+
+- 自动模式在回答框右上角显示实际采用任务的图标；只有词典结果时显示在词典框右上角。手动模式不显示。
+- 悬停显示任务、本地规则或决策渠道/模型、模型返回的置信度；低置信度/服务不可用时明确说明本地回退。本地规则不伪造置信度。
+- 追问保留原查询的自动决策任务和信息；新的查询更新，过期决策由入口代次丢弃。决策请求期间切换手动任务时，手动选择优先。
+- 回归测试覆盖模型成功、低置信度、失败回退及中英文详情；隔离预览可设置 `PEEK_DECISION_PREVIEW=1` 检查回答/对话卡片的图标位置，不调用真实服务。

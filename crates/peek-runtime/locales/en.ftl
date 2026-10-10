@@ -323,3 +323,10 @@ channels-down = Move down
 channels-remove-quick = Remove from quick translation
 
 status-config-save-error = Could not save settings: { $error }
+
+decision-detail-task = Automatic decision: { $task }
+decision-detail-local = Source: local rules
+decision-detail-model = Decision model: { $channel } ({ $model })
+decision-detail-confidence = Model confidence: { $confidence }
+decision-detail-low-confidence = Low model confidence; using local rules
+decision-detail-unavailable = Decision service unavailable; using local rules
