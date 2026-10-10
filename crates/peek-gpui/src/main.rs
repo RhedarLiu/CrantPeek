@@ -103,6 +103,16 @@ thread_local! {
     static CHROME_VISIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+thread_local! {
+    /// Screen y of the panel's top edge while the title row is hidden.
+    ///
+    /// Revealing the row grows the window, and whether that growth goes up or
+    /// down is the platform's choice, so the position is measured and corrected
+    /// rather than assumed. Cleared on every show, since the panel is placed
+    /// again then.
+    static ANCHOR_TOP: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
 /// Whether the title row is showing.
 fn chrome_visible() -> bool {
     CHROME_VISIBLE.with(std::cell::Cell::get)
@@ -119,6 +129,7 @@ fn set_chrome_visible(visible: bool) {
 /// found it once must look the same as one opened for the first time.
 fn show_panel(window: &mut Window) {
     set_chrome_visible(false);
+    ANCHOR_TOP.with(|cell| cell.set(None));
     native_window::show(window);
     SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
 }
@@ -1423,9 +1434,35 @@ impl Render for Peek {
             };
             PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows + chrome
         };
-        if self.applied_height != Some(height) {
+        // Where the panel's top edge sits while collapsed, so revealing the
+        // title row can grow the window upwards and leave the input box on the
+        // same line of the screen.
+        let top = window.bounds().origin.y.as_f32();
+        let anchor = ANCHOR_TOP.with(|cell| match cell.get() {
+            Some(anchor) => anchor,
+            None => {
+                let anchor = top
+                    + if chrome_visible() {
+                        PANEL_CHROME_HEIGHT
+                    } else {
+                        0.
+                    };
+                cell.set(Some(anchor));
+                anchor
+            }
+        });
+        let desired_top = anchor
+            - if chrome_visible() {
+                PANEL_CHROME_HEIGHT
+            } else {
+                0.
+            };
+        let drift = top - desired_top;
+        if self.applied_height != Some(height) || drift.abs() > 0.5 {
             self.applied_height = Some(height);
             window.resize(size(px(PANEL_WIDTH), px(height)));
+            // A positive drift means the top edge fell below where it belongs.
+            native_window::move_up(window, drift);
         }
         if self.settings {
             return self.settings_page(cx).into_any_element();
@@ -2336,6 +2373,21 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             cx.advance_clock(std::time::Duration::from_millis(80));
             cx.run_until_parked();
         }
+    }
+    // With PEEK_FRAME set, the window frame is printed so a layout change can be
+    // checked against where the input box actually sits on screen: a capture
+    // shows the contents, not their place on the display.
+    if std::env::var("PEEK_FRAME").is_ok() {
+        cx.update_window(window.into(), |_, window, _| {
+            let bounds = window.bounds();
+            println!(
+                "[frame] origin=({:.0},{:.0}) size=({:.0}x{:.0})",
+                bounds.origin.x.as_f32(),
+                bounds.origin.y.as_f32(),
+                bounds.size.width.as_f32(),
+                bounds.size.height.as_f32()
+            );
+        })?;
     }
     let image = cx.capture_screenshot(window.into())?;
     let out = std::path::PathBuf::from(path);
