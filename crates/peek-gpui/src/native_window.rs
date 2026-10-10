@@ -99,40 +99,6 @@ pub fn make_capture_overlay(window: &mut Window) {
     let _ = window;
 }
 
-/// Moves the window up the screen by `delta` points, leaving its size alone.
-///
-/// The title row appears above the input box rather than pushing it down, so
-/// revealing it grows the window at its top edge: the frame gains that much
-/// height and its origin moves up with it.
-#[cfg(target_os = "macos")]
-pub fn move_up(window: &mut Window, delta: f32) {
-    if delta.abs() < 0.5 {
-        return;
-    }
-    let Some(ns_view) = macos_view(window) else {
-        return;
-    };
-    unsafe {
-        use objc2::msg_send;
-        use objc2::runtime::AnyObject;
-        use objc2_foundation::NSRect;
-        let view = ns_view as *mut AnyObject;
-        let ns_window: *mut AnyObject = msg_send![view, window];
-        if ns_window.is_null() {
-            return;
-        }
-        let mut frame: NSRect = msg_send![ns_window, frame];
-        // AppKit measures y upwards from the bottom of the screen, so moving the
-        // window up means a larger origin.
-        frame.origin.y += delta as f64;
-        let _: () = msg_send![ns_window, setFrameOrigin: frame.origin];
-    }
-}
-
-/// Moves the window up, or does nothing where the platform cannot.
-#[cfg(not(target_os = "macos"))]
-pub fn move_up(_window: &mut Window, _delta: f32) {}
-
 /// Hides the close/minimise/zoom buttons.
 ///
 /// The panel is a titled window, so macOS draws traffic lights in its corner.
