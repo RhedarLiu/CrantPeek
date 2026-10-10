@@ -18,3 +18,5 @@ pub mod permissions;
 pub mod prefs;
 pub mod selection;
 pub mod store;
+
+pub mod updates;

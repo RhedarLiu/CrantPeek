@@ -71,6 +71,8 @@ pub struct Snip {
     captured: bool,
     /// Close as soon as the text is copied, from the user's settings.
     close_on_copy: bool,
+    auto_query: bool,
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl Snip {
@@ -79,6 +81,7 @@ impl Snip {
         backdrop: Arc<RenderImage>,
         link: Sender<Action>,
         close_on_copy: bool,
+        auto_query: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
@@ -99,6 +102,8 @@ impl Snip {
             pending_toast: None,
             captured: false,
             close_on_copy,
+            auto_query,
+            cancel: tokio_util::sync::CancellationToken::new(),
         };
         // The worker thread and the panel's progress channel cannot touch GPUI
         // state, so both are drained here.
@@ -126,7 +131,7 @@ impl Snip {
         });
         let image = backdrop(&screen);
         let (tx, _rx) = std::sync::mpsc::channel();
-        let mut snip = Self::new(screen, image, tx, true, cx);
+        let mut snip = Self::new(screen, image, tx, true, true, cx);
         snip.captured = true;
         snip.anchor = Some(point(px(180.), px(240.)));
         snip.cursor = Some(point(px(820.), px(380.)));
@@ -181,6 +186,10 @@ impl Snip {
         }
         if let Some(text) = recognized {
             self.text = Some(text);
+            if !self.auto_query {
+                self.busy = false;
+                self.status.clear();
+            }
             changed = true;
         }
         if let Some(events) = &self.events {
@@ -203,7 +212,7 @@ impl Snip {
             cx.notify();
         }
         // Started after the drain loops, which borrow other fields.
-        if self.text.is_some() && self.events.is_none() {
+        if self.auto_query && self.text.is_some() && self.events.is_none() {
             self.translate(cx);
         }
     }
@@ -258,7 +267,11 @@ impl Snip {
         self.status = i18n::tr("status-generating");
         if self
             .link
-            .send(Action::Translate { text, replies: tx })
+            .send(Action::Translate {
+                text,
+                replies: tx,
+                cancel: self.cancel.clone(),
+            })
             .is_err()
         {
             self.status = i18n::tr("status-worker-crashed");
@@ -296,6 +309,7 @@ impl Snip {
     }
 
     fn close(&mut self, window: &mut Window) {
+        self.cancel.cancel();
         window.remove_window();
     }
 
@@ -527,6 +541,7 @@ pub fn open(
     cx: &mut App,
     link: Sender<Action>,
     close_on_copy: bool,
+    auto_query: bool,
 ) -> Result<(AnyWindowHandle, Rect), String> {
     let bounds = capture::monitor_bounds().ok_or("no monitor bounds")?;
     let screen = Arc::new(capture::capture().map_err(|err| format!("capture failed: {err}"))?);
@@ -548,7 +563,7 @@ pub fn open(
         ..Default::default()
     };
     let opened = gpui_kit::open_window(options, cx, move |window, cx| {
-        let view = cx.new(|cx| Snip::new(screen, backdrop, link, close_on_copy, cx));
+        let view = cx.new(|cx| Snip::new(screen, backdrop, link, close_on_copy, auto_query, cx));
         let focus = view.read(cx).focus.clone();
         window.focus(&focus, cx);
         crate::native_window::make_capture_overlay(window);
@@ -557,5 +572,11 @@ pub fn open(
     match opened {
         Ok((handle, _)) => Ok((handle, bounds)),
         Err(err) => Err(format!("overlay window failed: {err}")),
+    }
+}
+
+impl Drop for Snip {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }

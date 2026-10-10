@@ -132,7 +132,7 @@ error-config-decision-threshold = 决策阈值无效
 settings-decision = 决策模型
 settings-decision-enabled = 启用（自动判断类型，判断不了就用本地规则）
 settings-tab-shortcuts = 快捷键
-settings-shortcuts-hint = 格式如 Super+Shift+A（Mac 上 Super 即 Command）。修改后需重启生效。
+settings-shortcuts-hint = 格式如 Super+Shift+A（Mac 上 Super 即 Command）；点击应用后立即生效，冲突时保留原快捷键。
 settings-tab-appearance = 外观
 settings-tab-translation = 翻译
 settings-tab-channels = 渠道
@@ -251,12 +251,8 @@ settings-permission-refresh = 重新检查
 settings-open-privacy-failed = 无法打开系统设置
 
 ## 欢迎
-welcome-title = 欢迎使用 Crant Peek
 welcome-selection = 双击 Ctrl：只查询选区；没有选区不弹窗。
-welcome-shortcuts = { $blank }：空白输入 · { $screenshot }：截图
 welcome-dismiss = Esc 或失焦收起；固定后可对照阅读；托盘菜单可重新打开或退出。
-welcome-privacy = 词典与 OCR 在本地运行。AI 查询文本会发往你配置的服务；不会自动上传剪贴板或整屏。
-welcome-start = 开始使用
 
 ## 托盘
 tray-tooltip = Crant Peek
@@ -357,3 +353,32 @@ decision-detail-low-confidence = 模型置信度不足，已采用本地规则�
 decision-detail-unavailable = 决策服务不可用，已采用本地规则判断
 
 decision-detail-code-guard = 检测到源码结构，已改用代码解释（模型判断为翻译）
+
+settings-shortcuts-apply = 应用快捷键
+status-hotkey-invalid = 快捷键格式无效：{ $key }
+status-hotkey-manager = 无法更新全局快捷键，请检查系统权限后重试
+status-hotkey-conflict = 快捷键被其他应用占用，已保留原来的快捷键
+status-hotkey-applied = 快捷键已生效
+status-config-recovered = 配置文件损坏，已保留原文件并尝试从备份恢复；请检查设置
+status-key-migration-failed = API key 迁移到系统安全存储失败；原配置已保留，请解锁系统凭据存储后重试
+status-key-read-failed = 无法读取部分渠道的安全凭据，请解锁系统凭据存储或重新填写 API key
+language-ko = 韩文
+language-fr = 法文
+language-de = 德文
+language-es = 西班牙文
+welcome-title = 欢迎使用 Crant Peek
+welcome-intro = 选中文字，用快捷键查词、翻译、解释代码；读完离开，需要时继续追问。
+welcome-channels = 先在设置中添加渠道，再排列快速翻译顺序，并选择追问用的 LLM。自动模式可以另选决策模型。
+welcome-shortcuts = 快捷键在设置中可查看和修改。Enter 提交，Shift + Enter 换行；托盘菜单可打开设置、截图或暂停快捷入口。
+welcome-macos = macOS：在权限页逐项授予辅助功能、输入监控和屏幕录制权限。
+welcome-windows = Windows：截图 OCR 需要对应语言包，读取管理员应用可能需要相同权限。
+welcome-privacy = OCR 在本机运行；在线查询发送文字到所选渠道。API key 使用系统安全凭据存储。
+welcome-configure = 配置渠道
+welcome-start = 开始使用
+
+settings-check-updates = 检查更新
+settings-download-updates = 打开下载页面
+status-update-available = 发现新版本 { $version }，可从下载页面安装更新
+status-update-current = 当前没有可用的新公开版本
+status-update-invalid = 更新服务返回了无法识别的版本信息
+status-update-open-failed = 无法打开更新下载页面

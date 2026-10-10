@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+semver = "1"
 peek-core = { path = "../peek-core" }
 serde.workspace = true
 serde_json.workspace = true

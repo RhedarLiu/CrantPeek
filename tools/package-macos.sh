@@ -54,7 +54,11 @@ if [[ -f "$ROOT/local-assets/ecdict.pkd" ]]; then
   cp "$ROOT/local-assets/ecdict.pkd" "$APP/Contents/Resources/ecdict.pkd"
   cp "$ROOT/assets/ECDICT-LICENSE" "$APP/Contents/Resources/ECDICT-LICENSE"
 fi
-/usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" "$APP"
+SIGN_OPTIONS=()
+if [[ "$SIGN_IDENTITY" == "Developer ID Application:"* ]]; then
+  SIGN_OPTIONS=(--options runtime --timestamp)
+fi
+/usr/bin/codesign --force --deep "${SIGN_OPTIONS[@]}" --sign "$SIGN_IDENTITY" "$APP"
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
   printf '\nBuilt local test app: %s (bundle id %s)\nSigned ad-hoc: macOS will ask for permissions again after every rebuild.\nRun tools/dev-signing-identity.sh once to stop that.\nNot notarized; not ready for public distribution.\n' "$APP" "$BUNDLE_ID"
 else

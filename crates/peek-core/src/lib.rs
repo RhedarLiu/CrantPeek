@@ -347,16 +347,11 @@ pub struct Channel {
     /// Base URL for AI kinds, request URL for a translation-only kind.
     pub endpoint: String,
     pub model: String,
-    /// The credential itself, stored with the channel.
-    ///
-    /// It lives in the config file rather than the system keychain: a keychain
-    /// entry's access control is bound to the application's code requirement,
-    /// so every rebuilt development binary prompted again, and "always allow"
-    /// did not survive the next build. The config file sits in the user's own
-    /// application-support directory under the user's own permissions. A
-    /// shipped, stably signed build could move this back to the keychain.
+    /// The credential hydrated in memory by the runtime store. Never persisted
+    /// in public configuration; retained in the schema for legacy migration.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
-    /// Legacy keychain reference, kept so older configs still deserialize.
+    /// Reference in macOS Keychain / Windows Credential Manager.
     pub credential_id: String,
     pub vision: bool,
     pub max_output_tokens: u32,
@@ -757,7 +752,7 @@ impl Config {
             if self.decision.model.trim().is_empty() {
                 return Err("error-config-decision-model");
             }
-            if !(100..=10000).contains(&self.decision.timeout_ms) {
+            if !(100..=60000).contains(&self.decision.timeout_ms) {
                 return Err("error-config-decision-timeout");
             }
             if !self.decision.min_confidence.is_finite()

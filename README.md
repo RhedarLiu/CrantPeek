@@ -45,7 +45,9 @@ macOS · Windows · 原生浮窗 · MIT 开源
 | 打开空白输入浮窗 | ⌘ ⇧ A | Alt + Shift + A |
 | 截图框选并查询 | ⌘ ⇧ D | Alt + Shift + D |
 
-快捷键可以在设置中修改。输入后按 **Enter** 提交，**Shift + Enter** 换行。
+首次启动会显示使用引导。托盘菜单可以直达设置，或暂停 / 恢复快捷入口。
+
+主题、界面缩放、界面语言、翻译目标语言与风格都可在设置中调整。快捷键修改后点击「应用快捷键」立即生效，遇到冲突会保留原设置。输入后按 **Enter** 提交，**Shift + Enter** 换行。
 
 选区读取会受来源应用影响。Windows 截图识别使用系统 OCR，需要安装对应语言包；读取以管理员身份运行的应用时，也可能受系统权限限制。
 
@@ -63,7 +65,7 @@ macOS · Windows · 原生浮窗 · MIT 开源
 
 离线词典和截图 OCR 在本机运行，截图不会作为图片上传。使用在线服务时，查询文字会发送到你选择的渠道。
 
-渠道设置和 API key 保存在本机配置文件中；目前 API key 以明文保存，请妥善保护自己的系统账户和配置文件。
+渠道设置保存在本机；API key 使用 macOS 钥匙串 / Windows 凭据管理器保存。已有配置会自动迁移，安全存储不可用时会保留原配置并提示。
 
 词典数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)，采用 MIT 许可。Crant Peek 同样以 [MIT 许可](LICENSE)开源。
 
@@ -98,16 +100,16 @@ bash tools/package-macos.sh
 open "dist/Crant Peek.app"
 ```
 
-签名初始化会创建并导入本地开发证书。之后通常只需执行打包和打开应用两步；也可通过 `SIGN_IDENTITY` 指定自己的签名身份。本地开发签名不等同于发行签名，应用尚未公证。
+签名初始化会创建并导入本地开发证书。之后通常只需执行打包和打开应用两步；也可通过 `SIGN_IDENTITY` 指定自己的签名身份。本地开发签名不等同于发行签名。已有 Developer ID 与 notarytool 凭据配置时，可运行 `SIGN_IDENTITY="Developer ID Application: …" NOTARY_PROFILE="…" bash tools/package-release-macos.sh` 生成经过签名、公证的 DMG；没有发行凭据时使用本地测试包。
 
 ### Windows
 
 在 Windows PowerShell 中执行：
 
 ```powershell
-./tools/package-windows.ps1
+./tools/package-windows.ps1 -Installer
 ```
 
-输出 `dist/Crant-Peek-Windows.zip`，解压后运行 `CrantPeek.exe`。如果打包前准备了 `local-assets/ecdict.pkd`，词库会一同打包。
+安装包构建需要 Inno Setup 6。输出 `dist/Crant-Peek-Windows-Setup.exe` 和便携包 `dist/Crant-Peek-Windows.zip`；安装后从开始菜单打开，或解压便携包运行 `CrantPeek.exe`。只需便携包时可省略 `-Installer`。设置中的「检查更新」可查看新公开版本，再从下载页面安装；配置和安全凭据保留。通过 `WINDOWS_SIGN_THUMBPRINT` 可以指定已安装的代码签名证书；未配置时输出未签名测试包。如果打包前准备了 `local-assets/ecdict.pkd`，词库会一同打包。
 
 </details>

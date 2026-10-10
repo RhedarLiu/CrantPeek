@@ -272,6 +272,27 @@ impl Default for Client {
     }
 }
 impl Client {
+    /// Only contacts this project's public releases API; sends no query or credentials.
+    pub async fn latest_version(&self, current: &str) -> Result<Option<String>, Error> {
+        let response = self
+            .http
+            .get("https://api.github.com/repos/RhedarLiu/CrantPeek/releases/latest")
+            .timeout(std::time::Duration::from_secs(15))
+            .header("User-Agent", "CrantPeek")
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = response.error_for_status()?;
+        let body: Value = response.json().await?;
+        let tag = body["tag_name"]
+            .as_str()
+            .ok_or(Error::Invalid("status-update-invalid".into()))?;
+        newer_release(current, tag).map_err(|_| Error::Invalid("status-update-invalid".into()))
+    }
+
     fn transport(&self, endpoint: &str) -> &reqwest::Client {
         if is_loopback_endpoint(endpoint) {
             &self.local_http
@@ -1300,5 +1321,28 @@ mod endpoint_url_tests {
             endpoint_url(&anthropic).unwrap(),
             "https://router.example/v1/messages"
         );
+    }
+}
+
+fn newer_release(current: &str, tag: &str) -> Result<Option<String>, semver::Error> {
+    let latest = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag))?;
+    let current = semver::Version::parse(current)?;
+    Ok((latest > current && latest.pre.is_empty()).then(|| tag.to_owned()))
+}
+#[cfg(test)]
+mod update_tests {
+    #[test]
+    fn releases_compare_numeric_versions_and_exclude_previews() {
+        assert_eq!(
+            super::newer_release("0.1.9", "v0.1.10").unwrap(),
+            Some("v0.1.10".into())
+        );
+        assert!(super::newer_release("0.2.0", "v0.1.10").unwrap().is_none());
+        assert!(
+            super::newer_release("0.2.0", "v0.3.0-beta.1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::newer_release("0.2.0", "not a release").is_err());
     }
 }

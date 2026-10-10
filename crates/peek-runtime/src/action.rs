@@ -37,6 +37,16 @@ pub enum Action {
     Translate {
         text: String,
         replies: Sender<OverlayEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    },
+    Welcome,
+    UpdateChecked(Result<Option<String>, String>),
+    /// A UI-visible startup or registration error.
+    Error(String),
+    /// A selection worker result; older generations are discarded.
+    SelectionRead {
+        generation: u64,
+        text: String,
     },
     Settings,
     TogglePause,

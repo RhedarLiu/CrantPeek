@@ -14,6 +14,7 @@ unic-langid = "0.9"
 sys-locale = "0.3"
 directories = "6"
 tempfile = "3"
+tokio-util = "0.7"
 fs2 = "0.4"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

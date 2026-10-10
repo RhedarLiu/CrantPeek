@@ -1,5 +1,5 @@
 name: Rust
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 jobs:
   test:
     strategy:
@@ -9,6 +9,8 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-C target-feature=+crt-static' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -21,19 +23,36 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Include GUI geometry tests as well as runtime/network tests.
       - run: cargo test --workspace
+      - name: Prepare offline dictionary
+        uses: actions/checkout@v4
+        with:
+          repository: skywind3000/ECDICT
+          ref: bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b
+          path: local-assets/ecdict
+      - run: cargo run --release -p peek-dict --bin build-dict -- local-assets/ecdict/ecdict.csv local-assets/ecdict.pkd
       - run: cargo build --workspace --release
       - name: Package macOS app
         if: runner.os == 'macOS'
         run: bash tools/package-macos.sh
+      - name: Ensure installer compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Installer compiler installation failed' }
+          }
       - name: Package Windows portable app
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./tools/package-windows.ps1 -SkipBuild
+        run: ./tools/package-windows.ps1 -SkipBuild -Installer
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
           name: Crant-Peek-Windows-test
-          path: dist/Crant-Peek-Windows.zip
+          path: |
+            dist/Crant-Peek-Windows.zip
+            dist/Crant-Peek-Windows-Setup.exe
       - name: Archive macOS app
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Crant Peek.app" dist/Crant-Peek-macOS.zip

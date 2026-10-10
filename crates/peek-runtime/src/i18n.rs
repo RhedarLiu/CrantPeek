@@ -174,8 +174,11 @@ mod tests {
             // the shell crate.
             include_str!("../../peek-gpui/src/main.rs"),
             include_str!("../../peek-gpui/src/snip.rs"),
+            include_str!("../../peek-gpui/src/settings.rs"),
+            include_str!("../../peek-gpui/src/shortcuts.rs"),
             include_str!("permissions.rs"),
             include_str!("store.rs"),
+            include_str!("updates.rs"),
             include_str!("../../peek-core/src/lib.rs"),
             include_str!("../../peek-network/src/lib.rs"),
             include_str!("../../peek-dict/src/lib.rs"),

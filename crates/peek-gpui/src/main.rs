@@ -18,7 +18,10 @@
 
 mod fonts;
 mod native_window;
+mod settings;
+mod shortcuts;
 mod snip;
+use settings::Setting;
 
 use std::time::Duration;
 
@@ -41,7 +44,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use global_hotkey::hotkey::HotKey;
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use tray_icon::Icon as TrayIconImage;
 use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
@@ -55,16 +58,71 @@ use peek_runtime::{i18n, store};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Poll interval for the tray/hotkey channels. Both crates deliver events on
-/// their own channels rather than through GPUI, so they are drained on a timer.
-/// Which global hotkey an input edits.
-#[derive(Clone, Copy)]
-enum HotkeyField {
-    Blank,
-    Screenshot,
-    Selection,
+thread_local! {
+    static UI_ZOOM: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) };
+    static PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn scaled(value: f32) -> f32 {
+    UI_ZOOM.with(|zoom| value * zoom.get())
+}
+fn ui_px(value: f32) -> Pixels {
+    px(scaled(value))
+}
+fn choice_label(label: &str) -> String {
+    if matches!(label.split('-').next(), Some("settings" | "language")) {
+        i18n::tr(label)
+    } else {
+        label.into()
+    }
+}
+fn apply_appearance(config: &Config, window: Option<&mut Window>, cx: &mut App) {
+    use gpui_kit::component::{Theme, ThemeMode};
+    match config.theme.as_str() {
+        "dark" => Theme::change(ThemeMode::Dark, window, cx),
+        "light" => Theme::change(ThemeMode::Light, window, cx),
+        _ => Theme::sync_system_appearance(window, cx),
+    }
+    UI_ZOOM.with(|zoom| zoom.set(config.zoom));
+    Theme::update(cx, |theme| {
+        theme.font_size = ui_px(16.);
+        theme.mono_font_size = ui_px(13.);
+    });
+    fonts::apply(cx, fonts::initial());
+}
+fn tray_image() -> TrayIconImage {
+    let mut rgba = vec![0; 16 * 16 * 4];
+    for y in 1..15 {
+        for x in 1..15 {
+            let index = (y * 16 + x) * 4;
+            let stem = (4..=5).contains(&x) && (4..=12).contains(&y);
+            let bowl = ((4..=10).contains(&x) && (y == 4 || y == 8))
+                || ((9..=10).contains(&x) && (4..=8).contains(&y));
+            let color = if stem || bowl {
+                [255, 255, 255, 255]
+            } else {
+                [40, 40, 44, 255]
+            };
+            rgba[index..index + 4].copy_from_slice(&color);
+        }
+    }
+    TrayIconImage::from_rgba(rgba, 16, 16).expect("valid tray bitmap")
+}
+fn parse_shortcuts(values: &[String; 3]) -> Result<Vec<HotKey>, String> {
+    let mut parsed = Vec::new();
+    for value in values {
+        let hotkey = value
+            .parse::<HotKey>()
+            .map_err(|_| i18n::format("status-hotkey-invalid", &[("key", value)]))?;
+        if parsed.iter().any(|old: &HotKey| old.id() == hotkey.id()) {
+            return Err(i18n::tr("error-config-shortcut-same"));
+        }
+        parsed.push(hotkey);
+    }
+    Ok(parsed)
 }
 
+/// Poll interval for the tray/hotkey channels. Both crates deliver events on
+/// their own channels rather than through GPUI, so they are drained on a timer.
 /// Which assignment a channel dropdown writes.
 #[derive(Clone, Copy)]
 enum ChannelSlot {
@@ -231,15 +289,15 @@ fn chrome_zone_contains(x: f32, y: f32, width: f32, input_top: f32, open: bool) 
 fn pointer_in_chrome_zone(position: Point<Pixels>, window: &Window) -> bool {
     let width = window.bounds().size.width.as_f32();
     let input_top = if CHROME_IN_FRAME.with(std::cell::Cell::get) {
-        PANEL_CHROME_HEIGHT
+        scaled(PANEL_CHROME_HEIGHT)
     } else {
         0.
     };
     chrome_zone_contains(
-        position.x.as_f32(),
-        position.y.as_f32(),
-        width,
-        input_top,
+        position.x.as_f32() / scaled(1.),
+        position.y.as_f32() / scaled(1.),
+        width / scaled(1.),
+        input_top / scaled(1.),
         chrome_visible(),
     )
 }
@@ -386,6 +444,7 @@ struct Peek {
     permissions: Vec<(&'static str, bool)>,
     /// Whether the settings page is showing.
     settings: bool,
+    onboarding: bool,
     /// A message waiting for a `Window`, with whether it reports a failure. A
     /// turn's outcome arrives through the poll loop, where no notification can
     /// be raised.
@@ -413,7 +472,9 @@ struct Peek {
     /// Identifies the drain loop that owns `receiver`. Older loops exit.
     turn_id: u64,
 
-    /// Editable global hotkeys, persisted as they are typed.
+    action_tx: std::sync::mpsc::Sender<Action>,
+    checking_update: bool,
+    /// Editable global hotkeys, applied after validation.
     blank_hotkey: Entity<InputState>,
     screenshot_hotkey: Entity<InputState>,
     selection_hotkey: Entity<InputState>,
@@ -467,7 +528,11 @@ impl Peek {
         native_window::hide_window_buttons(window);
         let activation = cx.observe_window_activation(window, |this, window, _cx| {
             // A pinned window behaves like a normal window and stays put.
-            if !this.pinned && !window.is_window_active() && !shown_recently() {
+            if this.config.hide_on_blur
+                && !this.pinned
+                && !window.is_window_active()
+                && !shown_recently()
+            {
                 native_window::hide(window);
             }
         });
@@ -572,7 +637,13 @@ impl Peek {
             }
         })
         .detach();
-        let config = store::load().unwrap_or_default();
+        let loaded = if std::env::var("PEEK_RENDER").is_ok() {
+            store::load_preview()
+        } else {
+            store::load_report()
+        };
+        let config = loaded.config;
+        apply_appearance(&config, Some(window), cx);
         i18n::set_language(&config.ui_language);
         for (input, value) in [
             (&blank_hotkey, &config.blank_hotkey),
@@ -582,30 +653,6 @@ impl Peek {
             let value = value.clone();
             input.update(cx, |state, cx| state.set_value(&value, window, cx));
         }
-        // Persisted as they are typed. The running app keeps the hotkeys it
-        // registered at startup, which is why the page says a restart applies
-        // a change.
-        for (input, which) in [
-            (&blank_hotkey, HotkeyField::Blank),
-            (&screenshot_hotkey, HotkeyField::Screenshot),
-            (&selection_hotkey, HotkeyField::Selection),
-        ] {
-            cx.observe(input, move |this, state, cx| {
-                let value = state.read(cx).value().trim().to_owned();
-                let slot = match which {
-                    HotkeyField::Blank => &mut this.config.blank_hotkey,
-                    HotkeyField::Screenshot => &mut this.config.screenshot_hotkey,
-                    HotkeyField::Selection => &mut this.config.selection_hotkey,
-                };
-                if *slot != value {
-                    *slot = value;
-                    this.persist_config();
-                    cx.notify();
-                }
-            })
-            .detach();
-        }
-
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
         // The configuration's `smart_mode` now only decides where the picker
         // starts: automatic, or a fixed task. Either way the user can change it.
@@ -616,6 +663,12 @@ impl Peek {
         };
         let tasks = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(initial)), window, cx));
 
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if this.config.theme == "system" {
+                apply_appearance(&this.config, Some(window), cx);
+            }
+        })
+        .detach();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -628,7 +681,7 @@ impl Peek {
             follow_up,
             settings_tab: 0,
             settings_measured: 0.,
-            pending_toast: None,
+            pending_toast: loaded.warning.map(|message| (true, message)),
             bubbles: Vec::new(),
             testing_channel: None,
             test_tx,
@@ -637,6 +690,8 @@ impl Peek {
             auto_decision: None,
             decision_cancel: None,
             turn_id: 0,
+            action_tx: action_tx.clone(),
+            checking_update: false,
             blank_hotkey,
             screenshot_hotkey,
             selection_hotkey,
@@ -672,6 +727,7 @@ impl Peek {
             // The peek always opens on the query page: settings is a view the
             // user steps into, not a place to be summoned back to.
             settings: false,
+            onboarding: false,
             config,
             client: Client::default(),
             runtime,
@@ -730,11 +786,12 @@ impl Peek {
                                 cx.update_window(panel_handle, |_, window, _| show_panel(window));
                             this.update(cx, |peek, cx| {
                                 peek.pending_input = Some(text.clone());
-                                peek.begin_turn(text, false, cx);
+                                peek.submit_text(text, cx);
                             })
                             .ok();
                         }
                         Action::Blank => {
+                            this.update(cx, |peek, _| peek.stop()).ok();
                             let _ =
                                 cx.update_window(panel_handle, |_, window, _| show_panel(window));
                         }
@@ -743,6 +800,7 @@ impl Peek {
                             return;
                         }
                         Action::Screenshot => {
+                            this.update(cx, |peek, _| peek.stop()).ok();
                             // The panel would otherwise sit under the overlay
                             // and compete with the selection.
                             let _ = cx.update_window(panel_handle, |_, window, _| {
@@ -754,7 +812,8 @@ impl Peek {
                             let close_on_copy = this
                                 .update(cx, |peek, _| peek.config.snip_close_on_copy)
                                 .unwrap_or(true);
-                            let opened = cx.update(|app| snip::open(app, tx, close_on_copy));
+                            let auto_query = this.update(cx, |peek, _| peek.config.ocr_auto_query).unwrap_or(true);
+                            let opened = cx.update(|app| snip::open(app, tx, close_on_copy, auto_query));
                             match opened {
                                 Ok((handle, bounds)) => {
                                     println!(
@@ -794,7 +853,8 @@ impl Peek {
                                 }
                             }
                         }
-                        Action::Translate { text, replies } => {
+                        Action::Translate { text, replies, cancel } => {
+                            if cancel.is_cancelled() { continue; }
                             // The overlay owns this turn. Finish the panel turn
                             // first, then run the overlay without touching the
                             // panel transcript.
@@ -803,6 +863,9 @@ impl Peek {
                                     peek.stop();
                                     peek.overlay = Some(replies);
                                     let started = peek.begin_isolated(text, cx);
+                                    if started && let Some(transport) = peek.cancel.clone() {
+                                        peek.runtime.spawn(async move { cancel.cancelled().await; transport.cancel(); });
+                                    }
                                     if !started {
                                         let status = peek.status.clone();
                                         peek.forward_overlay(OverlayEvent::Status(status));
@@ -825,13 +888,49 @@ impl Peek {
                                     cx.notify();
                                 } else {
                                     peek.pending_input = Some(text.clone());
-                                    peek.begin_turn(text, false, cx);
+                                    peek.submit_text(text, cx);
                                 }
                             })
                             .ok();
                         }
-                        // Settings and pause are not ported yet.
-                        Action::Settings | Action::TogglePause => {}
+                        Action::Settings => {
+                            this.update(cx, |peek, cx| { peek.settings = true; peek.settings_measured = 0.; cx.notify(); }).ok();
+                            let _ = cx.update_window(panel_handle, |_, window, _| show_panel(window));
+                        }
+                        Action::Error(error) => {
+                            this.update(cx, |peek, cx| { peek.notify_error(error); peek.settings = true; peek.settings_tab = 1; cx.notify(); }).ok();
+                            let _ = cx.update_window(panel_handle, |_, window, _| show_panel(window));
+                        }
+                        Action::TogglePause => {
+                            PAUSED.with(|paused| paused.set(!paused.get()));
+                            peek_runtime::selection::next_generation();
+                            this.update(cx, |peek, cx| { peek.stop(); cx.notify(); }).ok();
+                        }
+                        Action::SelectionRead { generation, text } => {
+                            if !peek_runtime::selection::is_current(generation) || PAUSED.with(|paused| paused.get()) { continue; }
+                            let _ = cx.update_window(panel_handle, |_, window, _| show_panel(window));
+                            this.update(cx, |peek, cx| {
+                                peek.stop();
+                                peek.pending_input = Some(text.clone());
+                                if !text.is_empty() { peek.submit_text(text, cx); }
+                                cx.notify();
+                            }).ok();
+                        }
+                        Action::UpdateChecked(result) => {
+                            this.update(cx, |peek, cx| {
+                                peek.checking_update = false;
+                                match result {
+                                    Ok(Some(version)) => peek.notify_success(i18n::format("status-update-available", &[("version", &version)])),
+                                    Ok(None) => peek.notify_success(i18n::tr("status-update-current")),
+                                    Err(error) => peek.notify_error(error),
+                                }
+                                cx.notify();
+                            }).ok();
+                        }
+                        Action::Welcome => {
+                            this.update(cx, |peek, cx| { peek.onboarding = true; peek.settings = false; cx.notify(); }).ok();
+                            let _ = cx.update_window(panel_handle, |_, window, _| show_panel(window));
+                        }
                     }
                 }
             }
@@ -928,7 +1027,7 @@ impl Peek {
                         let baseline = *anchor.get_or_insert(y);
                         let stable = (y - baseline).abs() < 0.5
                             && (frame_height - viewport_height).abs() < 0.5
-                            && (offset - if open { PANEL_CHROME_HEIGHT } else { 0. }).abs() < 0.5;
+                            && (offset - if open { scaled(PANEL_CHROME_HEIGHT) } else { 0. }).abs() < 0.5;
                         passed &= stable;
                         println!("[chrome-test] open={open} input_y={y:.1} frame={frame_height:.1} viewport={viewport_height:.1} stable={stable}");
                     } else {
@@ -977,8 +1076,8 @@ impl Peek {
     /// follow-up controls. Long answers scroll at the panel's reading limit.
     fn result_height(&self) -> f32 {
         self.query_measured
-            .max(self.input_measured + 80.)
-            .clamp(180., PANEL_RESULT_MAX_HEIGHT)
+            .max(self.input_measured + scaled(80.))
+            .clamp(scaled(180.), scaled(PANEL_RESULT_MAX_HEIGHT))
     }
 
     /// The chosen task, or `None` for the automatic choice.
@@ -1086,6 +1185,11 @@ impl Peek {
         // The text stays in the box: clearing it before there is a result takes
         // away what the user just wrote, and they may want to edit it.
         let text = self.input.read(cx).value().trim().to_owned();
+        self.submit_text(text, cx);
+    }
+
+    fn submit_text(&mut self, text: String, cx: &mut Context<Self>) {
+        peek_runtime::selection::next_generation();
         if text.is_empty() {
             return;
         }
@@ -1145,9 +1249,9 @@ impl Peek {
         let height = if self.settings_measured > 1. {
             self.settings_measured
         } else {
-            420.
+            scaled(420.)
         };
-        height.clamp(220., 900.)
+        height.clamp(scaled(220.), scaled(900.))
     }
 
     /// Settings labels share the left column; controls have a fixed width
@@ -1160,20 +1264,20 @@ impl Peek {
     ) -> AnyElement {
         h_flex()
             .w_full()
-            .min_h(px(36.))
+            .min_h(ui_px(36.))
             .items_center()
-            .gap(px(10.))
+            .gap(ui_px(10.))
             .child(
                 div()
                     .flex_1()
-                    .min_w(px(0.))
+                    .min_w(ui_px(0.))
                     .font_family(set.latin)
-                    .text_size(px(12.))
+                    .text_size(ui_px(12.))
                     .child(label),
             )
             .child(
                 div()
-                    .w(px(SETTINGS_CONTROL_WIDTH))
+                    .w(ui_px(SETTINGS_CONTROL_WIDTH))
                     .flex_none()
                     .child(picker),
             )
@@ -1255,7 +1359,7 @@ impl Peek {
             .collect();
         v_flex()
             .w_full()
-            .gap(px(8.))
+            .gap(ui_px(8.))
             .child(self.section_label(
                 i18n::tr("channels-quick"),
                 self.set,
@@ -1263,7 +1367,7 @@ impl Peek {
             ))
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(ui_px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child(i18n::tr("channels-quick-hint")),
             )
@@ -1271,15 +1375,15 @@ impl Peek {
                 v_flex()
                     .id("quick-priority-list")
                     .w_full()
-                    .max_h(px(240.))
+                    .max_h(ui_px(240.))
                     .overflow_y_scroll()
-                    .gap(px(4.))
+                    .gap(ui_px(4.))
                     .border_1()
                     .border_color(cx.theme().border)
-                    .rounded(px(10.))
-                    .p(px(8.))
+                    .rounded(ui_px(10.))
+                    .p(ui_px(8.))
                     .when(ids.is_empty(), |this| {
-                        this.child(div().text_size(px(12.)).child(i18n::tr("channels-none")))
+                        this.child(div().text_size(ui_px(12.)).child(i18n::tr("channels-none")))
                     })
                     .children(ids.iter().enumerate().filter_map(|(index, id)| {
                         let channel = self.config.channel(id)?;
@@ -1291,8 +1395,8 @@ impl Peek {
                                 .w_full()
                                 .flex_none()
                                 .items_center()
-                                .gap(px(6.))
-                                .child(div().flex_1().text_size(px(12.)).child(format!(
+                                .gap(ui_px(6.))
+                                .child(div().flex_1().text_size(ui_px(12.)).child(format!(
                                     "{}. {}",
                                     index + 1,
                                     channel.name
@@ -1356,7 +1460,7 @@ impl Peek {
     ) -> AnyElement {
         div()
             .font_family(set.latin)
-            .text_size(px(11.))
+            .text_size(ui_px(11.))
             .text_color(muted)
             .child(text)
             .into_any_element()
@@ -1450,8 +1554,8 @@ impl Peek {
             let ok_entity = entity.clone();
             dialog
                 .title(title.clone())
-                .margin_top(px(16.))
-                .w(px(420.))
+                .margin_top(ui_px(16.))
+                .w(ui_px(420.))
                 .content(move |content, _window, cx| {
                     let peek = content_entity.read(cx);
                     let kind = peek.draft_kind(cx);
@@ -1459,8 +1563,8 @@ impl Peek {
                     let field = |label: String, control: AnyElement| {
                         v_flex()
                             .w_full()
-                            .gap(px(4.))
-                            .child(div().text_size(px(11.)).text_color(muted).child(label))
+                            .gap(ui_px(4.))
+                            .child(div().text_size(ui_px(11.)).text_color(muted).child(label))
                             .child(control)
                             .into_any_element()
                     };
@@ -1485,7 +1589,7 @@ impl Peek {
                                 }
                             })
                             .w_full()
-                            .gap(px(10.))
+                            .gap(ui_px(10.))
                             .child(field(
                                 i18n::tr("channels-kind"),
                                 Select::new(&peek.channel_kind)
@@ -1538,7 +1642,7 @@ impl Peek {
                                 ))
                                 .child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_size(ui_px(11.))
                                         .text_color(muted)
                                         .child(i18n::tr("channels-reasoning-hint")),
                                 )
@@ -1546,7 +1650,7 @@ impl Peek {
                             .when(kind.supports_decision(), |this| {
                                 this.child(
                                     div()
-                                        .text_size(px(11.))
+                                        .text_size(ui_px(11.))
                                         .text_color(muted)
                                         .child(i18n::tr("channels-decision-hint")),
                                 )
@@ -1559,7 +1663,7 @@ impl Peek {
                     h_flex()
                         .w_full()
                         .justify_end()
-                        .gap(px(8.))
+                        .gap(ui_px(8.))
                         .child(
                             Button::new("channel-cancel")
                                 .label(i18n::tr("channels-cancel"))
@@ -1636,7 +1740,7 @@ impl Peek {
         });
         // An existing key is kept when the field is left empty, so the secret
         // never has to be re-entered to change another field. It is stored with
-        // the channel rather than in the keychain: see `Channel::api_key`.
+        // memory; the configuration store persists only its secure reference.
         let api_key = if key.trim().is_empty() {
             editing
                 .as_deref()
@@ -2186,11 +2290,19 @@ impl Peek {
                 Event::Route { note, .. } => {
                     if overlay {
                         self.forward_overlay(OverlayEvent::Status(note));
+                        if self.overlay.is_none() {
+                            self.stop_transport();
+                            return;
+                        }
                     }
                 }
                 Event::Text(delta) => {
                     if overlay {
                         self.forward_overlay(OverlayEvent::Chunk(delta));
+                        if self.overlay.is_none() {
+                            self.stop_transport();
+                            return;
+                        }
                         continue;
                     }
                     if self.answer.len() + delta.len() > peek_core::MAX_OUTPUT_BYTES {
@@ -2263,14 +2375,16 @@ impl Render for Peek {
         // Resize before drawing. The query page stays compact until it has
         // something to show, while the settings page is always tall; sizing it
         // only from the query page left settings clipped to a compact window.
-        let mut height = if self.settings {
+        let mut height = if self.onboarding {
+            scaled(420.)
+        } else if self.settings {
             self.settings_height()
         } else if self.has_result() {
             // Same as the compact panel: the row grows the window upward
             // instead of covering the result.
             self.result_height()
                 + if chrome_visible() {
-                    PANEL_CHROME_HEIGHT
+                    scaled(PANEL_CHROME_HEIGHT)
                 } else {
                     0.
                 }
@@ -2279,23 +2393,26 @@ impl Render for Peek {
             // panel follows it rather than guessing a single height.
             let rows = self.input.read(cx).value().lines().count().clamp(2, 5) as f32;
             let chrome = if chrome_visible() {
-                PANEL_CHROME_HEIGHT
+                scaled(PANEL_CHROME_HEIGHT)
             } else {
                 0.
             };
-            (self.input_measured + 8.).max(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows) + chrome
+            (self.input_measured + scaled(8.))
+                .max(scaled(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows))
+                + chrome
         };
         // The task list hangs down from the button. A compact panel ends at
         // that button, so the window has to grow while the list is open.
         if self.task_menu_open && !self.settings {
             let chrome = if chrome_visible() {
-                PANEL_CHROME_HEIGHT
+                scaled(PANEL_CHROME_HEIGHT)
             } else {
                 0.
             };
-            let needed = (self.input_measured + 8.).max(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.)
+            let needed = (self.input_measured + scaled(8.))
+                .max(scaled(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.))
                 + chrome
-                + 240.;
+                + scaled(240.);
             if height < needed {
                 height = needed;
             }
@@ -2304,18 +2421,18 @@ impl Render for Peek {
         // Closing the dialog restores the height of the underlying settings tab.
         if window.has_active_dialog(cx) {
             let fallback = if self.draft_kind(cx) == ChannelKind::GoogleFree {
-                240.
+                scaled(240.)
             } else {
-                450.
+                scaled(450.)
             };
             height = height.max(if self.dialog_measured > 0. {
-                self.dialog_measured + 32.
+                self.dialog_measured + scaled(32.)
             } else {
                 fallback
             });
         }
         let chrome_offset = if !self.settings && chrome_visible() {
-            PANEL_CHROME_HEIGHT
+            scaled(PANEL_CHROME_HEIGHT)
         } else {
             0.
         };
@@ -2329,7 +2446,7 @@ impl Render for Peek {
             let entity = cx.entity();
             native_window::resize_panel(
                 window,
-                size(px(PANEL_WIDTH), px(height)),
+                size(ui_px(PANEL_WIDTH), px(height)),
                 chrome_offset - self.chrome_offset,
                 cx,
                 move |window, cx| {
@@ -2345,6 +2462,9 @@ impl Render for Peek {
         }
         // The pointer zone follows the frame actually painted, not the request.
         set_chrome_in_frame(!self.settings && self.chrome_offset > 0.);
+        if self.onboarding {
+            return self.welcome_page(cx);
+        }
         if self.settings {
             return self.settings_page(cx).into_any_element();
         }
@@ -2457,13 +2577,13 @@ impl Peek {
         };
         div()
             .absolute()
-            .top(px(5.))
-            .right(px(5.))
+            .top(ui_px(5.))
+            .right(ui_px(5.))
             .child(
                 Button::new(id)
                     .ghost()
-                    .w(px(24.))
-                    .h(px(24.))
+                    .w(ui_px(24.))
+                    .h(ui_px(24.))
                     .icon(Self::task_icon(decision.task))
                     .tooltip(decision.tooltip())
                     .accessibility_label(decision.tooltip()),
@@ -2492,10 +2612,10 @@ impl Peek {
             .w_full()
             .when(
                 self.auto_decision.is_some() && self.selected_task(cx).is_none(),
-                |this| this.pr(px(22.)),
+                |this| this.pr(ui_px(22.)),
             )
             .flex_none()
-            .gap(px(8.))
+            .gap(ui_px(8.))
             .children(children)
             .into_any_element()
     }
@@ -2534,10 +2654,10 @@ impl Peek {
                 (secondary, secondary_foreground)
             };
             let body: AnyElement = if from_user {
-                div().text_size(px(13.)).child(text).into_any_element()
+                div().text_size(ui_px(13.)).child(text).into_any_element()
             } else {
                 TextView::markdown(SharedString::from(format!("bubble-{index}")), text)
-                    .text_size(px(13.))
+                    .text_size(ui_px(13.))
                     .into_any_element()
             };
             h_flex()
@@ -2547,12 +2667,12 @@ impl Peek {
                 .when(!from_user, |this| this.justify_start())
                 .child(
                     div()
-                        .max_w(px(340.))
+                        .max_w(ui_px(340.))
                         .bg(bubble_bg)
                         .text_color(bubble_fg)
-                        .rounded(px(14.))
-                        .px(px(12.))
-                        .py(px(9.))
+                        .rounded(ui_px(14.))
+                        .px(ui_px(12.))
+                        .py(ui_px(9.))
                         .child(body),
                 )
                 .into_any_element()
@@ -2629,10 +2749,10 @@ impl Peek {
             // The sides hug the input box whether or not the title row is
             // showing; only the top needs room for it. The gap keeps the input,
             // the answer and the follow-up row from touching.
-            .px(px(4.))
-            .pt(px(4.))
-            .pb(px(4.))
-            .gap(px(5.))
+            .px(ui_px(4.))
+            .pt(ui_px(4.))
+            .pb(ui_px(4.))
+            .gap(ui_px(5.))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -2653,25 +2773,25 @@ impl Peek {
                 this.child(
                     h_flex()
                         .id("chrome-row")
-                        .h(px(PANEL_CHROME_HEIGHT - 5.))
+                        .h(ui_px(PANEL_CHROME_HEIGHT - 5.))
                         .flex_none()
                         .w_full()
                         .items_center()
-                        .gap(px(10.))
+                        .gap(ui_px(10.))
                         // Inset so the title lines up with the text inside the
                         // input box, whose own padding starts at the same place.
-                        .px(px(14.))
+                        .px(ui_px(14.))
                         .child(
                             // A tag rather than plain text, so the title and
                             // the buttons look like one row of controls.
                             Tag::secondary()
-                                .rounded(px(8.))
-                                .h(px(28.))
-                                .px(px(10.))
+                                .rounded(ui_px(8.))
+                                .h(ui_px(28.))
+                                .px(ui_px(10.))
                                 .child(
                                     div()
                                         .font_family(set.latin)
-                                        .text_size(px(12.))
+                                        .text_size(ui_px(12.))
                                         .font_semibold()
                                         .child("Crant Peek"),
                                 ),
@@ -2781,8 +2901,8 @@ impl Peek {
                     .w_full()
                     .border_1()
                     .border_color(border)
-                    .rounded(px(16.))
-                    .p(px(14.))
+                    .rounded(ui_px(16.))
+                    .p(ui_px(14.))
                     .child(
                         // Clip the text, not the task list. The list is a
                         // sibling of this box and has to paint past it.
@@ -2792,18 +2912,18 @@ impl Peek {
                                 .appearance(false)
                                 .bordered(false)
                                 // Room for the controls drawn over the corner.
-                                .pb(px(34.)),
+                                .pb(ui_px(34.)),
                         ),
                     )
                     .child(
                         div()
                             .absolute()
-                            .left(px(10.))
-                            .right(px(10.))
-                            .bottom(px(8.))
+                            .left(ui_px(10.))
+                            .right(ui_px(10.))
+                            .bottom(ui_px(8.))
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(ui_px(6.))
                             .child(self.task_picker(cx))
                             .child(div().flex_1())
                             .when(self.busy && !self.follow_up_turn, |this| {
@@ -2840,17 +2960,17 @@ impl Peek {
                                 .w_full()
                                 .border_1()
                                 .border_color(border)
-                                .rounded(px(14.))
-                                .p(px(14.))
+                                .rounded(ui_px(14.))
+                                .p(ui_px(14.))
                                 .flex_none()
                                 .font_family(set.sc)
-                                .text_size(px(13.))
+                                .text_size(ui_px(13.))
                                 .when(
                                     !conversation
                                         && plain.is_none()
                                         && self.auto_decision.is_some()
                                         && self.selected_task(cx).is_none(),
-                                    |this| this.pr(px(36.)),
+                                    |this| this.pr(ui_px(36.)),
                                 )
                                 .child(self.dictionary_note.clone())
                                 .when(!conversation && plain.is_none(), |this| {
@@ -2869,8 +2989,8 @@ impl Peek {
                                 .flex_1()
                                 .border_1()
                                 .border_color(border)
-                                .rounded(px(14.))
-                                .p(px(14.))
+                                .rounded(ui_px(14.))
+                                .p(ui_px(14.))
                                 .overflow_y_scroll()
                                 .child(self.result_body(
                                     {
@@ -2907,12 +3027,12 @@ impl Peek {
                                 .overflow_y_scroll()
                                 .border_1()
                                 .border_color(border)
-                                .rounded(px(14.))
-                                .p(px(14.))
+                                .rounded(ui_px(14.))
+                                .p(ui_px(14.))
                                 .child(self.result_body(
                                     vec![
                                             TextView::markdown("plain-answer", text)
-                                                .text_size(px(13.))
+                                                .text_size(ui_px(13.))
                                                 .into_any_element(),
                                         ],
                                     cx,
@@ -2944,8 +3064,8 @@ impl Peek {
                             .w_full()
                             .flex_none()
                             .items_end()
-                            .gap(px(8.))
-                            .child(Textarea::new(&self.follow_up).flex_1().rounded(px(10.)))
+                            .gap(ui_px(8.))
+                            .child(Textarea::new(&self.follow_up).flex_1().rounded(ui_px(10.)))
                             .when(self.busy && self.follow_up_turn, |this| {
                                 this.child(
                                     Button::new("follow-stop")
@@ -2976,6 +3096,176 @@ impl Peek {
     /// Settings page. Only the font set is live so far: it is the one item the
     /// migration is required to expose as a choice, and it is verifiable from
     /// an offscreen render.
+    fn welcome_page(&self, cx: &Context<Self>) -> AnyElement {
+        v_flex()
+            .size_full()
+            .p(ui_px(24.))
+            .gap(ui_px(16.))
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(div().text_size(ui_px(22.)).child(i18n::tr("welcome-title")))
+            .child(div().child(i18n::tr("welcome-intro")))
+            .child(div().child(i18n::tr("welcome-channels")))
+            .child(div().child(i18n::tr("welcome-shortcuts")))
+            .child(div().child(i18n::tr(if cfg!(target_os = "macos") {
+                "welcome-macos"
+            } else {
+                "welcome-windows"
+            })))
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(i18n::tr("welcome-privacy")),
+            )
+            .child(
+                h_flex()
+                    .gap(ui_px(8.))
+                    .child(
+                        Button::new("welcome-settings")
+                            .label(i18n::tr("welcome-configure"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.config.onboarding_complete = true;
+                                if this.persist_config() {
+                                    this.onboarding = false;
+                                    this.settings = true;
+                                    this.settings_tab = 2;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("welcome-done")
+                            .primary()
+                            .label(i18n::tr("welcome-start"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.config.onboarding_complete = true;
+                                if this.persist_config() {
+                                    this.onboarding = false;
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn setting_row(&self, field: Setting, cx: &Context<Self>) -> AnyElement {
+        let current = field.value(&self.config);
+        let label = field
+            .choices()
+            .iter()
+            .find(|(value, _)| *value == current)
+            .map(|(_, label)| choice_label(label))
+            .unwrap_or(current.clone());
+        let entity = cx.entity();
+        let id = field.key();
+        let picker = DropdownButton::new(SharedString::from(id))
+            .w_full()
+            .button(
+                Button::new(SharedString::from(format!("{id}-value")))
+                    .label(label)
+                    .flex_1(),
+            )
+            .dropdown_menu(move |mut menu, _, _| {
+                for &(value, label) in field.choices() {
+                    let entity = entity.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(choice_label(label))
+                            .checked(value == current)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    let previous = this.config.clone();
+                                    field.assign(&mut this.config, value);
+                                    if !this.persist_config() {
+                                        this.config = previous;
+                                        return;
+                                    }
+                                    i18n::set_language(&this.config.ui_language);
+                                    apply_appearance(&this.config, Some(window), cx);
+                                    fonts::apply(cx, this.set);
+                                    this.follow_up.update(cx, |state, cx| {
+                                        state.set_placeholder(
+                                            i18n::tr("query-followup-placeholder"),
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                    this.settings_measured = 0.;
+                                    this.input_measured = 0.;
+                                    this.query_measured = 0.;
+                                    this.applied_height = None;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        self.picker_row(i18n::tr(id), picker, self.set)
+    }
+
+    fn preference_toggle(
+        &self,
+        key: &'static str,
+        checked: bool,
+        assign: fn(&mut Config, bool),
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        self.picker_row(
+            i18n::tr(key),
+            Switch::new(key).checked(checked).on_click(cx.listener(
+                move |this, value: &bool, _, cx| {
+                    let previous = this.config.clone();
+                    assign(&mut this.config, *value);
+                    if !this.persist_config() {
+                        this.config = previous;
+                    }
+                    cx.notify();
+                },
+            )),
+            self.set,
+        )
+    }
+
+    fn apply_shortcuts(&mut self, cx: &mut Context<Self>) {
+        let values = [
+            &self.blank_hotkey,
+            &self.screenshot_hotkey,
+            &self.selection_hotkey,
+        ]
+        .map(|input| input.read(cx).value().trim().to_owned());
+        match parse_shortcuts(&values) {
+            Err(error) => self.notify_error(error),
+            Ok(_) => {
+                let previous = self.config.clone();
+                self.config.blank_hotkey = values[0].clone();
+                self.config.screenshot_hotkey = values[1].clone();
+                self.config.selection_hotkey = values[2].clone();
+                match shortcuts::apply(parse_shortcuts(&values).unwrap()) {
+                    Err(error) => {
+                        self.config = previous;
+                        self.notify_error(error);
+                    }
+                    Ok(()) => {
+                        if self.persist_config() {
+                            self.notify_success(i18n::tr("status-hotkey-applied"));
+                        } else {
+                            self.config = previous;
+                            if let Ok(old) = parse_shortcuts(&[
+                                self.config.blank_hotkey.clone(),
+                                self.config.screenshot_hotkey.clone(),
+                                self.config.selection_hotkey.clone(),
+                            ]) {
+                                let _ = shortcuts::apply(old);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn settings_page(&self, cx: &Context<Self>) -> AnyElement {
         // Collected up front so the button closures do not borrow the config
         // while the layout is being built.
@@ -3029,7 +3319,7 @@ impl Peek {
                     // The page padding is 20 on each edge. Inputs paint a little
                     // past the layout box, so the last field needs a few more
                     // points or the window clips it.
-                    let needed = (stacked + gaps + 56.).clamp(220., 900.);
+                    let needed = (stacked + gaps + scaled(56.)).clamp(scaled(220.), scaled(900.));
                     let measure = measure.clone();
                     cx.defer(move |cx| {
                         measure.update(cx, |this, cx| {
@@ -3046,8 +3336,8 @@ impl Peek {
             .items_start()
             .bg(bg)
             .text_color(fg)
-            .p(px(20.))
-            .gap(px(14.))
+            .p(ui_px(20.))
+            .gap(ui_px(14.))
             .overflow_y_scroll()
             .on_key_down(|event, window, _cx| {
                 if event.keystroke.key == "escape" {
@@ -3059,7 +3349,7 @@ impl Peek {
                     .w_full()
                     .flex_none()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(ui_px(10.))
                     .child(
                         Button::new("settings-back")
                             .icon(gpui_kit::assets::IconName::ArrowLeft)
@@ -3074,7 +3364,7 @@ impl Peek {
                         div()
                             .flex_1()
                             .font_family(set.latin)
-                            .text_size(px(15.))
+                            .text_size(ui_px(15.))
                             .font_semibold()
                             .child(i18n::tr("settings-title")),
                     ),
@@ -3103,15 +3393,19 @@ impl Peek {
                 ),
             )
             .when(self.settings_tab == 0, |this| {
-                this.child(
+                this.child(self.setting_row(Setting::Theme, cx))
+                    .child(self.setting_row(Setting::Zoom, cx))
+                    .child(self.setting_row(Setting::Language, cx))
+                    .child(self.preference_toggle("settings-hide-on-blur", self.config.hide_on_blur, |config, value| config.hide_on_blur = value, cx))
+                    .child(
                     v_flex()
                         .w_full()
                         .flex_none()
-                        .gap(px(6.))
+                        .gap(ui_px(6.))
                         .child(
                             div()
                                 .font_family(set.latin)
-                                .text_size(px(11.))
+                                .text_size(ui_px(11.))
                                 .text_color(muted)
                                 .child(i18n::tr("settings-font-set")),
                         )
@@ -3127,18 +3421,39 @@ impl Peek {
                         })),
                 )
             })
+            .when(self.settings_tab == 0, |this| {
+                this.child(div().text_color(muted).child(format!("Crant Peek {}", env!("CARGO_PKG_VERSION"))))
+                    .child(h_flex().gap(ui_px(8.))
+                        .child(Button::new("check-version").label(i18n::tr("settings-check-updates"))
+                            .loading(self.checking_update).on_click(cx.listener(|this, _, _, cx| {
+                                if this.checking_update { return; }
+                                this.checking_update = true;
+                                let client = this.client.clone(); let tx = this.action_tx.clone();
+                                let locale = i18n::I18n::new(&this.config.ui_language);
+                                this.runtime.spawn(async move {
+                                    let result = client.latest_version(env!("CARGO_PKG_VERSION")).await.map_err(|error| locale.network_error(&error));
+                                    let _ = tx.send(Action::UpdateChecked(result));
+                                });
+                                cx.notify();
+                            })))
+                        .child(Button::new("download-version").label(i18n::tr("settings-download-updates"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Err(error) = peek_runtime::updates::open_releases() { this.notify_error(error); }
+                                cx.notify();
+                            }))))
+            })
             .when(self.settings_tab == 2, |this| {
                 this.child(
                     v_flex()
                         .w_full()
                         .flex_none()
-                        .gap(px(6.))
+                        .gap(ui_px(6.))
                         .child(self.section_label(i18n::tr("channels-title"), set, muted))
                         .when(self.config.channels.is_empty(), |this| {
                             this.child(
                                 div()
                                     .font_family(set.latin)
-                                    .text_size(px(11.))
+                                    .text_size(ui_px(11.))
                                     .text_color(muted)
                                     .child(i18n::tr("channels-empty")),
                             )
@@ -3158,17 +3473,17 @@ impl Peek {
                                 .is_some_and(|tested| tested == id);
                             v_flex()
                                 .w_full()
-                                .gap(px(4.))
+                                .gap(ui_px(4.))
                                 .child(
                                     h_flex()
                                         .w_full()
                                         .items_center()
-                                        .gap(px(8.))
+                                        .gap(ui_px(8.))
                                         .child(
                                             div()
                                                 .flex_1()
                                                 .font_family(set.latin)
-                                                .text_size(px(12.))
+                                                .text_size(ui_px(12.))
                                                 .child(label),
                                         )
                                         .child(
@@ -3225,11 +3540,11 @@ impl Peek {
                     v_flex()
                         .w_full()
                         .flex_none()
-                        .gap(px(10.))
+                        .gap(ui_px(10.))
                         .child(
                             div()
                                 .font_family(set.latin)
-                                .text_size(px(11.))
+                                .text_size(ui_px(11.))
                                 .text_color(muted)
                                 .child(i18n::tr("settings-section-shortcuts")),
                         )
@@ -3248,13 +3563,9 @@ impl Peek {
                             Input::new(&self.selection_hotkey).into_any_element(),
                             set,
                         ))
-                        .child(
-                            div()
-                                .font_family(set.latin)
-                                .text_size(px(10.5))
-                                .text_color(muted)
-                                .child(i18n::tr("settings-shortcuts-hint")),
-                        ),
+                        .child(Button::new("apply-shortcuts").label(i18n::tr("settings-shortcuts-apply"))
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_shortcuts(cx))))
+                        .child(div().text_color(muted).child(i18n::tr("settings-shortcuts-hint"))),
                 )
             })
             // Which channel serves which place, plus the copy behaviour.
@@ -3263,17 +3574,17 @@ impl Peek {
                     v_flex()
                         .w_full()
                         .flex_none()
-                        .gap(px(10.))
+                        .gap(ui_px(10.))
                         .child(
                             h_flex()
                                 .w_full()
                                 .items_center()
-                                .gap(px(10.))
+                                .gap(ui_px(10.))
                                 .child(
                                     div()
                                         .flex_1()
                                         .font_family(set.latin)
-                                        .text_size(px(12.))
+                                        .text_size(ui_px(12.))
                                         .child(i18n::tr("settings-snip-close-on-copy")),
                                 )
                                 .child(
@@ -3288,6 +3599,12 @@ impl Peek {
                                         )),
                                 ),
                         )
+                        .child(self.setting_row(Setting::Target, cx))
+                        .child(self.setting_row(Setting::ChineseTarget, cx))
+                        .child(self.setting_row(Setting::Style, cx))
+                        .child(self.setting_row(Setting::Confidence, cx))
+                        .child(self.setting_row(Setting::Timeout, cx))
+                        .child(self.preference_toggle("settings-ocr-auto", self.config.ocr_auto_query, |config, value| config.ocr_auto_query = value, cx))
                         .child(self.section_label(i18n::tr("channels-usage"), set, muted))
                         .child(self.quick_channel_list(cx))
                         .child(self.picker_row(
@@ -3319,16 +3636,16 @@ impl Peek {
                     v_flex()
                         .w_full()
                         .flex_none()
-                        .gap(px(4.))
+                        .gap(ui_px(4.))
                         .child(
                             div()
                                 .font_family(set.latin)
-                                .text_size(px(11.))
+                                .text_size(ui_px(11.))
                                 .text_color(muted)
                                 .child(i18n::tr("settings-permissions")),
                         )
                         .when(cfg!(windows), |this| {
-                            this.child(div().text_size(px(11.)).text_color(muted)
+                            this.child(div().text_size(ui_px(11.)).text_color(muted)
                                 .child(i18n::tr("settings-permission-windows")))
                         })
                         // One row per permission with a status chip, rather
@@ -3342,36 +3659,36 @@ impl Peek {
                             h_flex()
                                 .w_full()
                                 .items_center()
-                                .gap(px(8.))
+                                .gap(ui_px(8.))
                                 .child(
                                     // Name on top, purpose underneath in the
                                     // muted colour: a parenthetical would make
                                     // one dense line instead of a readable pair.
                                     v_flex()
                                         .flex_1()
-                                        .gap(px(1.))
+                                        .gap(ui_px(1.))
                                         .child(
                                             div()
                                                 .font_family(set.latin)
-                                                .text_size(px(12.))
+                                                .text_size(ui_px(12.))
                                                 .child(i18n::tr(key)),
                                         )
                                         .child(
                                             div()
                                                 .font_family(set.latin)
-                                                .text_size(px(10.5))
+                                                .text_size(ui_px(10.5))
                                                 .text_color(muted)
                                                 .child(i18n::tr(&format!("{key}-purpose"))),
                                         ),
                                 )
                                 .child(
                                     div()
-                                        .px(px(8.))
-                                        .py(px(2.))
-                                        .rounded(px(999.))
+                                        .px(ui_px(8.))
+                                        .py(ui_px(2.))
+                                        .rounded(ui_px(999.))
                                         .bg(background)
                                         .text_color(foreground)
-                                        .text_size(px(11.))
+                                        .text_size(ui_px(11.))
                                         .child(i18n::tr(if *granted {
                                             "settings-permission-granted"
                                         } else {
@@ -3398,8 +3715,8 @@ impl Peek {
                         .child(
                             h_flex()
                                 .w_full()
-                                .gap(px(8.))
-                                .pt(px(8.))
+                                .gap(ui_px(8.))
+                                .pt(ui_px(8.))
                                 .child(
                                     Button::new("refresh-permissions")
                                         .label(i18n::tr("settings-permission-refresh"))
@@ -3478,9 +3795,9 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     let page = std::env::var("PEEK_PAGE").unwrap_or_default();
     // The overlay preview needs a desktop-sized canvas; the panel is a popup.
     let preview_size = if page == "snip" {
-        size(px(1400.), px(900.))
+        size(ui_px(1400.), ui_px(900.))
     } else {
-        size(px(480.), px(560.))
+        size(ui_px(480.), ui_px(560.))
     };
     // The component layer must be initialised before a window opens: it
     // registers per-window state that notifications and dialogs look up. The
@@ -3621,7 +3938,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                     view.read(cx).input.clone()
                 };
                 let id = ElementId::from(("input", state.entity_id()));
-                window.click_at(id, point(px(12.), px(12.)), cx);
+                window.click_at(id, point(ui_px(12.), ui_px(12.)), cx);
             })?;
             cx.run_until_parked();
             cx.update_window(window.into(), |_, window, cx| {
@@ -3719,10 +4036,10 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
 fn window_options() -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(320.), px(200.)),
+            origin: point(ui_px(320.), ui_px(200.)),
             size: size(
-                px(PANEL_WIDTH),
-                px(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.),
+                ui_px(PANEL_WIDTH),
+                ui_px(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.),
             ),
         })),
         titlebar: Some(TitlebarOptions {
@@ -3898,20 +4215,27 @@ fn main() -> anyhow::Result<()> {
         let menu = Menu::new();
         let show_item = MenuItem::new(i18n::tr("tray-open"), true, None);
         let snip_item = MenuItem::new(i18n::tr("tray-screenshot"), true, None);
+        let settings_item = MenuItem::new(i18n::tr("settings-title"), true, None);
+        let pause_item =
+            tray_icon::menu::CheckMenuItem::new(i18n::tr("tray-pause"), true, false, None);
+        let guide_item = MenuItem::new(i18n::tr("welcome-title"), true, None);
+        let settings_id = settings_item.id().clone();
+        let pause_id = pause_item.id().clone();
+        let guide_id = guide_item.id().clone();
         let quit_item = MenuItem::new(i18n::tr("tray-quit"), true, None);
         let show_id = show_item.id().clone();
         let snip_id = snip_item.id().clone();
         let quit_id = quit_item.id().clone();
         let _ = menu.append(&show_item);
         let _ = menu.append(&snip_item);
+        let _ = menu.append(&settings_item);
+        let _ = menu.append(&pause_item);
+        let _ = menu.append(&guide_item);
         let _ = menu.append(&quit_item);
         match TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(i18n::tr("tray-tooltip"))
-            .with_icon(
-                TrayIconImage::from_rgba(vec![0x28, 0x28, 0x2c, 0xff], 1, 1)
-                    .expect("1x1 tray icon"),
-            )
+            .with_icon(tray_image())
             .build()
         {
             Ok(tray) => {
@@ -3926,48 +4250,16 @@ fn main() -> anyhow::Result<()> {
         // settings without rebuilding. A string the platform cannot parse is
         // reported and skipped rather than stopping the app.
         let hotkey_config = store::load().unwrap_or_default();
-        let parsed: Vec<(&str, Option<HotKey>)> = [
-            ("blank", hotkey_config.blank_hotkey.as_str()),
-            ("screenshot", hotkey_config.screenshot_hotkey.as_str()),
-            ("selection", hotkey_config.selection_hotkey.as_str()),
-        ]
-        .into_iter()
-        .map(|(name, text)| {
-            let parsed = text.parse::<HotKey>().map_err(|err| {
-                eprintln!("hotkey \"{text}\" for {name} is invalid: {err}");
-                err
-            });
-            (name, parsed.ok())
-        })
-        .collect();
-        let toggle_id = parsed
-            .iter()
-            .find(|(name, _)| *name == "blank")
-            .and_then(|(_, hotkey)| hotkey.as_ref())
-            .map(HotKey::id);
-        let snip_hotkey_id = parsed
-            .iter()
-            .find(|(name, _)| *name == "screenshot")
-            .and_then(|(_, hotkey)| hotkey.as_ref())
-            .map(HotKey::id);
-        let selection_hotkey_id = parsed
-            .iter()
-            .find(|(name, _)| *name == "selection")
-            .and_then(|(_, hotkey)| hotkey.as_ref())
-            .map(HotKey::id);
-        match GlobalHotKeyManager::new() {
-            Ok(manager) => {
-                let mut registered = 0;
-                for (name, hotkey) in parsed.into_iter().filter_map(|(n, h)| h.map(|h| (n, h))) {
-                    match manager.register(hotkey) {
-                        Ok(()) => registered += 1,
-                        Err(err) => eprintln!("hotkey register failed for {name}: {err}"),
-                    }
-                }
-                println!("{registered} global hotkey(s) registered");
-                std::mem::forget(manager);
-            }
-            Err(err) => eprintln!("hotkey manager failed: {err}"),
+        let keys = [
+            hotkey_config.blank_hotkey,
+            hotkey_config.screenshot_hotkey,
+            hotkey_config.selection_hotkey,
+        ];
+        if let Err(error) = parse_shortcuts(&keys).and_then(shortcuts::apply) {
+            let _ = action_tx.send(Action::Error(error));
+        }
+        if !hotkey_config.onboarding_complete && !selftest {
+            let _ = action_tx.send(Action::Welcome);
         }
 
         // Automated check of the show/hide path, so the native shim does not
@@ -4022,14 +4314,14 @@ fn main() -> anyhow::Result<()> {
                 let mut ask_selection = false;
 
                 while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                    if event.state != HotKeyState::Pressed {
+                    if PAUSED.with(|paused| paused.get()) || event.state != HotKeyState::Pressed {
                         continue;
                     }
-                    if Some(event.id) == toggle_id {
+                    if shortcuts::role(event.id) == Some(0) {
                         toggle = true;
-                    } else if Some(event.id) == snip_hotkey_id {
+                    } else if shortcuts::role(event.id) == Some(1) {
                         screenshot = true;
-                    } else if Some(event.id) == selection_hotkey_id {
+                    } else if shortcuts::role(event.id) == Some(2) {
                         ask_selection = true;
                     }
                 }
@@ -4039,16 +4331,14 @@ fn main() -> anyhow::Result<()> {
                     // which can take a moment, so it happens off this thread.
                     // An empty or unreadable selection opens the panel ready for
                     // input rather than doing nothing at all.
+                    let generation = peek_runtime::selection::next_generation();
                     let tx = selection_tx.clone();
                     std::thread::spawn(move || {
                         let text = peek_runtime::selection::read().unwrap_or_default();
                         let text = text.trim().to_owned();
-                        let action = if text.is_empty() {
-                            Action::Blank
-                        } else {
-                            Action::Selection(text)
-                        };
-                        let _ = tx.send(action);
+                        if peek_runtime::selection::is_current(generation) {
+                            let _ = tx.send(Action::SelectionRead { generation, text });
+                        }
                     });
                 }
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -4056,18 +4346,28 @@ fn main() -> anyhow::Result<()> {
                         toggle = true;
                     } else if event.id == snip_id {
                         screenshot = true;
+                    } else if event.id == settings_id {
+                        let _ = tray_tx.send(Action::Settings);
+                    } else if event.id == pause_id {
+                        let _ = tray_tx.send(Action::TogglePause);
+                    } else if event.id == guide_id {
+                        let _ = tray_tx.send(Action::Welcome);
                     } else if event.id == quit_id {
                         quit = true;
                     }
                 }
 
+                pause_item.set_checked(PAUSED.with(|paused| paused.get()));
+
                 // The overlay is opened by the view, which owns that state, so
                 // the request goes through the same channel as the hook's.
                 if screenshot {
+                    peek_runtime::selection::next_generation();
                     let _ = tray_tx.send(Action::Screenshot);
                 }
 
                 if toggle {
+                    peek_runtime::selection::next_generation();
                     let visible = cx
                         .update_window(handle, |_, window, _| native_window::is_visible(window))
                         .unwrap_or(false);
@@ -4211,5 +4511,27 @@ mod automatic_decision_tests {
             assert!(detail.contains("judge-model"));
             assert!(detail.contains("92%"));
         }
+    }
+}
+
+#[cfg(test)]
+mod shortcut_validation_tests {
+    #[test]
+    fn aliases_of_the_same_shortcut_conflict_before_registration() {
+        assert!(
+            super::parse_shortcuts(&["Ctrl+A".into(), "Control+A".into(), "Alt+E".into()]).is_err()
+        );
+        assert!(
+            super::parse_shortcuts(&["Alt+Shift+A".into(), "Alt+Shift+D".into(), "Alt+E".into()])
+                .is_ok()
+        );
+        assert!(
+            super::parse_shortcuts(&[
+                "not-a-shortcut".into(),
+                "Alt+Shift+D".into(),
+                "Alt+E".into()
+            ])
+            .is_err()
+        );
     }
 }

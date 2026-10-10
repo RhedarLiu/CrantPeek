@@ -23,22 +23,131 @@ pub fn dictionary_candidates() -> Vec<PathBuf> {
     paths.push(PathBuf::from("local-assets/ecdict.pkd"));
     paths
 }
-pub fn load() -> Result<Config, String> {
-    let path = config_path()?;
-    if !path.exists() {
-        return Ok(Config::default());
+pub struct LoadedConfig {
+    pub config: Config,
+    pub warning: Option<String>,
+}
+trait Credentials {
+    fn get(&self, id: &str) -> Result<String, String>;
+    fn set(&self, id: &str, value: &str) -> Result<(), String>;
+}
+struct SystemCredentials;
+impl Credentials for SystemCredentials {
+    fn get(&self, id: &str) -> Result<String, String> {
+        secret(id)
     }
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    fn set(&self, id: &str, value: &str) -> Result<(), String> {
+        save_secret(id, value)
+    }
+}
+fn decode(path: &std::path::Path) -> Result<Config, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mut config: Config = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let changed = config.migrate();
+    config.migrate();
     config.validate().map_err(crate::i18n::tr)?;
-    if changed {
-        save_to(&config, &path)?;
-    }
     Ok(config)
 }
+/// Preview rendering never writes config or opens the system credential store.
+pub fn load_preview() -> LoadedConfig {
+    let mut config = config_path()
+        .and_then(|path| decode(&path))
+        .unwrap_or_default();
+    for channel in &mut config.channels {
+        channel.api_key.clear();
+    }
+    LoadedConfig {
+        config,
+        warning: None,
+    }
+}
+pub fn load_report() -> LoadedConfig {
+    match config_path() {
+        Ok(path) => load_from(&path, &SystemCredentials),
+        Err(error) => LoadedConfig {
+            config: Config::default(),
+            warning: Some(error),
+        },
+    }
+}
+pub fn load() -> Result<Config, String> {
+    Ok(load_report().config)
+}
+fn load_from(path: &std::path::Path, credentials: &impl Credentials) -> LoadedConfig {
+    if !path.exists() {
+        return LoadedConfig {
+            config: Config::default(),
+            warning: None,
+        };
+    }
+    let mut warning = None;
+    let mut config = match decode(path) {
+        Ok(config) => config,
+        Err(_) => {
+            // Preserve the original even if no valid backup exists. Never rename
+            // over an earlier corrupt copy or print its potentially secret bytes.
+            if let Some(parent) = path.parent()
+                && let Ok(copy) = tempfile::Builder::new()
+                    .prefix("config-damaged-")
+                    .suffix(".json")
+                    .tempfile_in(parent)
+                && std::fs::copy(path, copy.path()).is_ok()
+            {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        copy.path(),
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                let _ = copy.keep();
+            }
+            warning = Some(crate::i18n::tr("status-config-recovered"));
+            decode(&path.with_extension("json.bak")).unwrap_or_default()
+        }
+    };
+    let needs_migration = config
+        .channels
+        .iter()
+        .any(|channel| !channel.api_key.is_empty());
+    if needs_migration && save_with_credentials(&config, path, credentials).is_err() {
+        warning = Some(crate::i18n::tr("status-key-migration-failed"));
+    }
+    for channel in &mut config.channels {
+        if channel.api_key.is_empty() && !channel.credential_id.is_empty() {
+            match credentials.get(&channel.credential_id) {
+                Ok(secret) => channel.api_key = secret,
+                Err(_) => warning = Some(crate::i18n::tr("status-key-read-failed")),
+            }
+        }
+    }
+    LoadedConfig { config, warning }
+}
 pub fn save(config: &Config) -> Result<(), String> {
-    save_to(config, &config_path()?)
+    save_with_credentials(config, &config_path()?, &SystemCredentials)
+}
+fn save_with_credentials(
+    config: &Config,
+    path: &std::path::Path,
+    credentials: &impl Credentials,
+) -> Result<(), String> {
+    config.validate().map_err(crate::i18n::tr)?;
+    let mut public = config.clone();
+    for channel in &mut public.channels {
+        if !channel.api_key.is_empty() {
+            if channel.credential_id.is_empty() {
+                channel.credential_id = format!("channel-{}", channel.id);
+            }
+            if credentials.get(&channel.credential_id).ok().as_deref() != Some(&channel.api_key) {
+                credentials.set(&channel.credential_id, &channel.api_key)?;
+            }
+            channel.api_key.clear();
+        }
+    }
+    // A failed credential write must leave the original file untouched.
+    // Both copies are sanitised; write the primary last.
+    save_to(&public, &path.with_extension("json.bak"))?;
+    save_to(&public, path)
 }
 fn save_to(config: &Config, path: &std::path::Path) -> Result<(), String> {
     config.validate().map_err(crate::i18n::tr)?;
@@ -46,7 +155,6 @@ fn save_to(config: &Config, path: &std::path::Path) -> Result<(), String> {
         .parent()
         .ok_or_else(|| crate::i18n::tr("error-config-directory"))?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    // Unique file in the same directory: atomic cross-platform replace, auto-cleaned on failure.
     let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
     use std::io::Write;
     file.write_all(&serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?)
@@ -70,6 +178,100 @@ pub fn save_secret(id: &str, value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Default)]
+    struct FakeCredentials {
+        values: std::cell::RefCell<std::collections::HashMap<String, String>>,
+        fail: bool,
+    }
+    impl Credentials for FakeCredentials {
+        fn get(&self, id: &str) -> Result<String, String> {
+            self.values
+                .borrow()
+                .get(id)
+                .cloned()
+                .ok_or("missing".into())
+        }
+        fn set(&self, id: &str, value: &str) -> Result<(), String> {
+            if self.fail {
+                return Err("locked".into());
+            }
+            self.values.borrow_mut().insert(id.into(), value.into());
+            Ok(())
+        }
+    }
+    fn keyed_config() -> Config {
+        Config {
+            channels: vec![peek_core::Channel {
+                id: "sample".into(),
+                model: "sample-model".into(),
+                api_key: "sample-test-secret".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn legacy_credentials_migrate_without_plaintext_in_either_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        save_to(&keyed_config(), &path).unwrap();
+        let credentials = FakeCredentials::default();
+        let loaded = load_from(&path, &credentials);
+        assert!(loaded.warning.is_none());
+        assert_eq!(loaded.config.channels[0].api_key, "sample-test-secret");
+        for file in [&path, &path.with_extension("json.bak")] {
+            assert!(
+                !std::fs::read_to_string(file)
+                    .unwrap()
+                    .contains("sample-test-secret")
+            );
+        }
+        assert_eq!(
+            load_from(&path, &credentials).config.channels[0].api_key,
+            "sample-test-secret"
+        );
+    }
+    #[test]
+    fn locked_credential_store_preserves_legacy_file_and_saved_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        save_to(&keyed_config(), &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let loaded = load_from(
+            &path,
+            &FakeCredentials {
+                fail: true,
+                ..Default::default()
+            },
+        );
+        assert!(loaded.warning.is_some());
+        assert_eq!(loaded.config.channels[0].api_key, "sample-test-secret");
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+    #[test]
+    fn damaged_config_recovers_channels_and_credentials_from_sanitised_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let credentials = FakeCredentials::default();
+        let mut config = keyed_config();
+        config.target_language = "Japanese".into();
+        save_with_credentials(&config, &path, &credentials).unwrap();
+        std::fs::write(&path, b"{broken configuration").unwrap();
+        let loaded = load_from(&path, &credentials);
+        assert!(loaded.warning.is_some());
+        assert_eq!(loaded.config.target_language, "Japanese");
+        assert_eq!(loaded.config.channels[0].api_key, "sample-test-secret");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken configuration");
+        assert!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|item| item
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("config-damaged-"))
+        );
+    }
     #[test]
     fn saves_and_replaces_config_without_secrets() {
         let directory = tempfile::tempdir().unwrap();

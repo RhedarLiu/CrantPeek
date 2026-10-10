@@ -1,4 +1,12 @@
 //! Read only an explicit Accessibility selection. Never substitute clipboard text.
+use std::sync::atomic::{AtomicU64, Ordering};
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+pub fn next_generation() -> u64 {
+    GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+pub fn is_current(generation: u64) -> bool {
+    GENERATION.load(Ordering::SeqCst) == generation
+}
 #[cfg(target_os = "macos")]
 pub fn read() -> Option<String> {
     macos::read()
@@ -582,5 +590,18 @@ mod tests {
         assert!(!d.transition(false, t, w));
         d.transition(true, t, w);
         assert!(!d.transition(false, t, w));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    #[test]
+    fn new_read_or_invalidation_makes_previous_result_stale() {
+        let old = super::next_generation();
+        let latest = super::next_generation();
+        assert!(!super::is_current(old));
+        assert!(super::is_current(latest));
+        super::next_generation();
+        assert!(!super::is_current(latest));
     }
 }
