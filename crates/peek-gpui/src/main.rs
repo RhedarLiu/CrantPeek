@@ -91,8 +91,31 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// Whether the title row is showing.
+    ///
+    /// It lives outside the view because showing the window is a free
+    /// function: every summon has to start minimal, and this is the piece of
+    /// state that reset needs to reach.
+    static CHROME_VISIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the title row is showing.
+fn chrome_visible() -> bool {
+    CHROME_VISIBLE.with(std::cell::Cell::get)
+}
+
+/// Shows or hides the title row.
+fn set_chrome_visible(visible: bool) {
+    CHROME_VISIBLE.with(|cell| cell.set(visible));
+}
+
 /// Shows the panel and records when, so focus loss is ignored briefly.
+///
+/// The title row is hidden on the way in: a panel reopened after the pointer
+/// found it once must look the same as one opened for the first time.
 fn show_panel(window: &mut Window) {
+    set_chrome_visible(false);
     native_window::show(window);
     SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
 }
@@ -161,9 +184,6 @@ struct Peek {
     /// Sends test results from the network task to the poll loop: the channel
     /// id, whether it failed, and the message to show.
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
-    /// Whether the title row is showing. It occupies no space while hidden: the
-    /// window is short, with only a thin strip to hover.
-    chrome_visible: bool,
     /// Editable global hotkeys, persisted as they are typed.
     blank_hotkey: Entity<InputState>,
     screenshot_hotkey: Entity<InputState>,
@@ -275,7 +295,6 @@ impl Peek {
             pending_toast: None,
             testing_channel: None,
             test_tx,
-            chrome_visible: false,
             blank_hotkey,
             screenshot_hotkey,
             editing_channel: None,
@@ -1394,7 +1413,7 @@ impl Render for Peek {
             // The textarea auto-grows between two and five rows, so the compact
             // panel follows it rather than guessing a single height.
             let rows = self.input.read(cx).value().lines().count().clamp(2, 5) as f32;
-            let chrome = if self.chrome_visible {
+            let chrome = if chrome_visible() {
                 PANEL_CHROME_HEIGHT
             } else {
                 0.
@@ -1488,10 +1507,10 @@ impl Peek {
             // Hidden, the panel hugs the input box; revealed, it needs room
             // for the title row above it.
             .relative()
-            .px(px(if self.chrome_visible { 20. } else { 4. }))
-            .pt(px(if self.chrome_visible { 20. } else { 4. }))
-            .pb(px(if self.chrome_visible { 20. } else { 4. }))
-            .gap(px(if self.chrome_visible { 10. } else { 0. }))
+            .px(px(if chrome_visible() { 20. } else { 4. }))
+            .pt(px(if chrome_visible() { 20. } else { 4. }))
+            .pb(px(if chrome_visible() { 20. } else { 4. }))
+            .gap(px(if chrome_visible() { 10. } else { 0. }))
             // Esc hides the panel — "appear when needed, gone when done". A
             // pinned window is a normal window, so Esc leaves it alone.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -1501,14 +1520,14 @@ impl Peek {
                 }
                 // A keystroke means the user is working in the box, so the
                 // title row goes away again.
-                if this.chrome_visible {
-                    this.chrome_visible = false;
+                if chrome_visible() {
+                    set_chrome_visible(false);
                     cx.notify();
                 }
             }))
             // Hidden, the row is replaced by a thin strip that catches the
             // pointer; the window is sized for whichever of the two is showing.
-            .when(!self.chrome_visible, |this| {
+            .when(!chrome_visible(), |this| {
                 this.child(
                     // An overlay, so the hidden panel can hug the input box
                     // while still offering something to hover.
@@ -1525,19 +1544,19 @@ impl Peek {
                                 .ghost()
                                 .w_full()
                                 .h_full()
-                                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                                .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
                                     // An offscreen render parks the pointer at the origin, which
                                     // is over this strip, so previews ignore it.
                                     let preview = std::env::var("PEEK_RENDER").is_ok();
-                                    if *hovered && !preview && !this.chrome_visible {
-                                        this.chrome_visible = true;
+                                    if *hovered && !preview && !chrome_visible() {
+                                        set_chrome_visible(true);
                                         cx.notify();
                                     }
                                 })),
                         ),
                 )
             })
-            .when(self.chrome_visible, |this| {
+            .when(chrome_visible(), |this| {
                 this.child(
                     h_flex()
                         .w_full()
@@ -2250,7 +2269,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                 // The default state: only the input box, nothing else.
                 "compact" => {
                     if std::env::var("PEEK_CHROME").is_ok() {
-                        peek.chrome_visible = true;
+                        set_chrome_visible(true);
                     }
                 }
                 _ => {
