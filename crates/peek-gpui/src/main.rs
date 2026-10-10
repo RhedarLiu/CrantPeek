@@ -80,7 +80,7 @@ const PANEL_COMPACT_BASE: f32 = 70.;
 /// That overlap is the point: revealing the row moves the window up, so the
 /// pointer that revealed it would otherwise end up just below the row, un-hover
 /// it, and start the two flashing at each other.
-const PANEL_CHROME_ROW: f32 = 50.;
+const PANEL_CHROME_STRIP: f32 = 26.;
 /// What the revealed title row adds: the extra top padding, the row and the gap
 /// that follows it, less the padding the collapsed state already has.
 const PANEL_CHROME_HEIGHT: f32 = 40.;
@@ -1718,17 +1718,48 @@ impl Peek {
             }))
             // Hidden, the row is replaced by a thin strip that catches the
             // pointer; the window is sized for whichever of the two is showing.
+            // A deliberate target above the input box, rather than the whole
+            // panel: revealing the row moves the window, and a target the
+            // pointer does not leave by accident cannot be crossed by that move.
+            .when(!chrome_visible(), |this| {
+                this.child(
+                    div()
+                        .id("chrome-strip")
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .h(px(PANEL_CHROME_STRIP))
+                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
+                            // An offscreen render parks the pointer at the
+                            // origin, which is over this strip.
+                            let preview = std::env::var("PEEK_RENDER").is_ok();
+                            if !*hovered {
+                                // Left the strip: it may reveal again.
+                                STRIP_ARMED.with(|cell| cell.set(true));
+                            } else if !preview
+                                && !chrome_visible()
+                                && STRIP_ARMED.with(std::cell::Cell::get)
+                            {
+                                set_chrome_visible(true);
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
             .when(chrome_visible(), |this| {
                 this.child(
                     h_flex()
                         .id("chrome-row")
                         .w_full()
-                        .h(px(PANEL_CHROME_ROW))
-                        // Content at the top, with the rest of the row left
-                        // empty so it still catches the pointer once the window
-                        // has moved up.
-                        .items_start()
-                        .pt(px(2.))
+                        .items_center()
+                        .on_hover(cx.listener(|_this, hovered: &bool, _window, cx| {
+                            if !*hovered && chrome_visible() {
+                                set_chrome_visible(false);
+                                STRIP_ARMED.with(|cell| cell.set(false));
+                                cx.notify();
+                            }
+                        }))
                         .gap(px(10.))
                         // Inset so the title lines up with the text inside the
                         // input box, whose own padding starts at the same place.
@@ -1831,9 +1862,6 @@ impl Peek {
                 div()
                     .relative()
                     .w_full()
-                    // Slid back under the row, so the overlap that steadies the
-                    // hover costs no visible space.
-                    .mt(px(if chrome_visible() { -16. } else { 0. }))
                     // The textarea grows with its content up to five rows; a
                     // fixed height here let it paint over the row below, and
                     // clipping keeps that from ever happening again.
