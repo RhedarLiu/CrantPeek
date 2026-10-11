@@ -3034,7 +3034,7 @@ impl Peek {
                                     .ghost()
                                     .w(ui_px(24.))
                                     .h(ui_px(24.))
-                                    .icon(gpui_kit::assets::IconName::Delete)
+                                    .icon(gpui_kit::assets::IconName::Trash)
                                     .tooltip(i18n::tr("query-clear"))
                                     .accessibility_label(i18n::tr("query-clear"))
                                     .on_click(cx.listener(|this, _event, window, cx| {
