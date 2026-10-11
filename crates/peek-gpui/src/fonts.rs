@@ -1,7 +1,7 @@
 //! Bundled fonts and the per-language family map.
 //!
-//! Every font ships with the app so macOS and Windows render identically, and
-//! so the two platforms need no OS font assumptions.
+//! Noto Serif and the code font are bundled. CJK uses the existing regional
+//! system serif families on each platform.
 //!
 //! gpui's `Font` carries `family` / `features` / `fallbacks` / `weight` /
 //! `style` and **no language or script field**, so a single Pan-CJK face cannot
@@ -16,9 +16,6 @@ use std::borrow::Cow;
 use gpui_kit::App;
 use gpui_kit::component::theme::Theme;
 
-const INTER: &[u8] = include_bytes!("../assets/fonts/Inter.ttf");
-const NOTO_SANS_SC: &[u8] = include_bytes!("../assets/fonts/NotoSansSC.ttf");
-const NOTO_SANS_JP: &[u8] = include_bytes!("../assets/fonts/NotoSansJP.ttf");
 const JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono.ttf");
 const NOTO_SERIF: &[u8] = include_bytes!("../assets/fonts/NotoSerif.ttf");
 
@@ -26,18 +23,12 @@ const NOTO_SERIF: &[u8] = include_bytes!("../assets/fonts/NotoSerif.ttf");
 pub struct FontSet {
     /// Stable id persisted in `ui.json`.
     pub id: &'static str,
-    /// Shown in settings.
-    pub name: &'static str,
     /// Latin and UI chrome.
     pub latin: &'static str,
     /// Simplified Chinese.
     pub sc: &'static str,
-    /// Japanese.
-    pub jp: &'static str,
     /// Code, identifiers and error output.
     pub mono: &'static str,
-    /// Whether the CJK faces are bundled rather than taken from the OS.
-    pub cjk_bundled: bool,
     bytes: &'static [&'static [u8]],
 }
 
@@ -55,67 +46,28 @@ impl FontSet {
 /// so the names are at least correct per platform.
 #[cfg(target_os = "macos")]
 const SERIF_SC: &str = "Songti SC";
-#[cfg(target_os = "macos")]
-const SERIF_JP: &str = "Hiragino Mincho ProN";
 #[cfg(windows)]
 const SERIF_SC: &str = "SimSun";
-#[cfg(windows)]
-const SERIF_JP: &str = "Yu Mincho";
-
-/// Default bundle: Inter for Latin, Noto Sans for CJK, JetBrains Mono for code.
-pub const DEFAULT: FontSet = FontSet {
-    id: "default",
-    name: "Inter + Noto Sans",
-    latin: "Inter",
-    sc: "Noto Sans SC",
-    jp: "Noto Sans JP",
-    mono: "JetBrains Mono",
-    cjk_bundled: true,
-    bytes: &[INTER, NOTO_SANS_SC, NOTO_SANS_JP, JETBRAINS_MONO],
-};
 
 /// Optional serif theme, for long-form reading. Latin and mono are bundled;
 /// the CJK faces come from the OS for now.
 pub const SERIF: FontSet = FontSet {
     id: "serif",
-    name: "Noto Serif（衬线）",
     latin: "Noto Serif",
     sc: SERIF_SC,
-    jp: SERIF_JP,
     mono: "JetBrains Mono",
-    cjk_bundled: false,
     bytes: &[NOTO_SERIF, JETBRAINS_MONO],
 };
 
-pub const ALL: &[&FontSet] = &[&DEFAULT, &SERIF];
-
-/// Looks a set up by its persisted id, falling back to the default so an
-/// unknown or stale value can never leave the shell without fonts.
-pub fn by_id(id: &str) -> &'static FontSet {
-    ALL.iter()
-        .find(|set| set.id == id)
-        .copied()
-        .unwrap_or(&DEFAULT)
-}
-
-/// The set the shell starts with. `PEEK_FONT_SET` wins so the offscreen
-/// previews can render a specific bundle without touching the user's choice.
+/// The sole font bundle; legacy preferences and preview overrides no longer change it.
 pub fn initial() -> &'static FontSet {
-    match std::env::var("PEEK_FONT_SET") {
-        Ok(id) => by_id(&id),
-        Err(_) => by_id(&peek_runtime::prefs::load().font_set),
-    }
+    &SERIF
 }
 
 /// Registers the bundled faces. Must run before the first window is opened,
 /// because GPUI measures text when a view is first laid out.
 pub fn register(cx: &mut App) -> anyhow::Result<()> {
-    // Union of every set, so switching themes at runtime needs no re-register.
-    let mut fonts: Vec<Cow<'static, [u8]>> = Vec::new();
-    for set in ALL {
-        fonts.extend(set.bytes());
-    }
-    cx.text_system().add_fonts(fonts)?;
+    cx.text_system().add_fonts(SERIF.bytes())?;
     Ok(())
 }
 
@@ -136,18 +88,8 @@ pub fn missing(cx: &App) -> Vec<&'static str> {
         .into_iter()
         .map(|name| name.to_string())
         .collect();
-    let mut missing = Vec::new();
-    for set in ALL {
-        if !set.cjk_bundled {
-            continue;
-        }
-        for family in [set.latin, set.sc, set.jp, set.mono] {
-            if !available.iter().any(|name| name == family) {
-                missing.push(family);
-            }
-        }
-    }
-    missing.sort_unstable();
-    missing.dedup();
-    missing
+    [SERIF.latin, SERIF.mono]
+        .into_iter()
+        .filter(|family| !available.iter().any(|name| name == family))
+        .collect()
 }

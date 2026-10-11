@@ -1232,26 +1232,6 @@ impl Peek {
         cx.notify();
     }
 
-    /// Switches the bundled font set, applies it to the theme and persists it.
-    fn choose_font_set(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        let set = fonts::by_id(id);
-        self.set = set;
-        fonts::apply(cx, set);
-        self.persist_prefs();
-        cx.notify();
-    }
-
-    /// Writes the UI-only preferences. Failures are cosmetic, so they are
-    /// reported but never block the interaction.
-    fn persist_prefs(&self) {
-        let prefs = peek_runtime::prefs::UiPrefs {
-            font_set: self.set.id.to_string(),
-        };
-        if let Err(err) = peek_runtime::prefs::save(&prefs) {
-            eprintln!("saving ui prefs failed: {err}");
-        }
-    }
-
     /// Reads the input box and starts a turn, clearing it only if one began.
     fn start_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.submit(cx);
@@ -2912,7 +2892,6 @@ impl Peek {
                             cx,
                             |this, _window, cx| {
                                 this.settings = true;
-                                this.persist_prefs();
                                 cx.notify();
                             },
                         ))
@@ -3576,7 +3555,6 @@ impl Peek {
                             .tooltip(i18n::tr("header-back"))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.settings = false;
-                                this.persist_prefs();
                                 cx.notify();
                             })),
                     )
@@ -3619,29 +3597,7 @@ impl Peek {
                     .child(self.setting_row(Setting::Native, cx))
                     .child(self.setting_row(Setting::PreferredTarget, cx))
                     .child(self.preference_toggle("settings-hide-on-blur", self.config.hide_on_blur, |config, value| config.hide_on_blur = value, cx))
-                    .child(
-                    v_flex()
-                        .w_full()
-                        .flex_none()
-                        .gap(ui_px(6.))
-                        .child(
-                            div()
-                                .font_family(set.latin)
-                                .text_size(ui_px(11.))
-                                .text_color(muted)
-                                .child(i18n::tr("settings-font-set")),
-                        )
-                        .children(fonts::ALL.iter().map(|candidate| {
-                            let id = candidate.id;
-                            let active = id == set.id;
-                            Button::new(id)
-                                .when(active, |button| button.primary())
-                                .label(candidate.name)
-                                .on_click(cx.listener(move |this, _event, _window, cx| {
-                                    this.choose_font_set(id, cx);
-                                }))
-                        })),
-                )
+
             })
             .when(self.settings_tab == 0, |this| {
                 this.child(div().text_color(muted).child(format!("Crant Peek {}", env!("CARGO_PKG_VERSION"))))
