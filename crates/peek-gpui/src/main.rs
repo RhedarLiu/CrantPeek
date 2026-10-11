@@ -16,6 +16,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod assets;
 mod fonts;
 mod native_window;
 mod settings;
@@ -3959,10 +3960,8 @@ fn main() {
 fn render_preview(path: &str) -> anyhow::Result<()> {
     let mut cx = gpui_kit::HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
-        // `AllAssets` is the full Lucide catalog; the default `Assets` only
-        // embeds the icons the component library itself uses, so an app icon
-        // like `Pin` renders as nothing with it.
-        std::sync::Arc::new(gpui_kit::assets::AllAssets),
+        // Match the production asset source, including application-specific icons.
+        std::sync::Arc::new(assets::AppAssets),
         gpui_kit::platform::current_headless_renderer,
     );
 
@@ -4444,7 +4443,7 @@ fn main() -> anyhow::Result<()> {
         std::rc::Rc::new(std::cell::Cell::new(None));
     let reopen_for_hook = reopen_target.clone();
 
-    let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    let application = gpui_kit::application().with_assets(assets::AppAssets);
     // Double-clicking the Dock icon of a pinned window brings the panel back;
     // without this the icon appears to do nothing. `on_reopen` borrows the
     // application, so it is a statement rather than part of the chain.
