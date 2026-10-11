@@ -32,7 +32,7 @@ use gpui_kit::base::Disableable as _;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
@@ -577,6 +577,7 @@ impl Peek {
             // A pinned window behaves like a normal window and stays put.
             if this.config.hide_on_blur
                 && !this.pinned
+                && !this.task_menu_open
                 && !window.is_window_active()
                 && !shown_recently()
             {
@@ -939,6 +940,18 @@ impl Peek {
                                 }
                             })
                             .ok();
+                        }
+                        Action::SelectTask(index) => {
+                            if index <= TASK_AUTO_INDEX {
+                                let _ = cx.update_window(panel_handle, |_, window, cx| {
+                                    this.update(cx, |peek, cx| {
+                                        peek.tasks.update(cx, |state, cx| {
+                                            state.set_selected_index(Some(IndexPath::new(index)), window, cx);
+                                        });
+                                        cx.notify();
+                                    }).ok();
+                                });
+                            }
                         }
                         Action::Settings => {
                             this.update(cx, |peek, cx| { peek.settings = true; peek.settings_measured = 0.; cx.notify(); }).ok();
@@ -2503,22 +2516,6 @@ impl Render for Peek {
                 .max(scaled(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows))
                 + chrome
         };
-        // The task list hangs down from the button. A compact panel ends at
-        // that button, so the window has to grow while the list is open.
-        if self.task_menu_open && !self.settings {
-            let chrome = if chrome_visible() {
-                scaled(PANEL_CHROME_HEIGHT)
-            } else {
-                0.
-            };
-            let needed = (self.input_measured + scaled(8.))
-                .max(scaled(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.))
-                + chrome
-                + scaled(240.);
-            if height < needed {
-                height = needed;
-            }
-        }
         // Dialogs need enough viewport space for their fields and popup menus.
         // Closing the dialog restores the height of the underlying settings tab.
         if window.has_active_dialog(cx) {
@@ -2585,9 +2582,6 @@ impl Peek {
     fn task_picker(&self, cx: &Context<Self>) -> impl IntoElement {
         // `None` is the automatic choice, which the content decides.
         let current = self.selected_task(cx);
-        let tasks = self.tasks.clone();
-        let entity = cx.entity();
-        let automatic = current.is_none();
         let (icon, tooltip) = match current {
             Some(task) => (
                 Self::task_icon(task),
@@ -2603,63 +2597,50 @@ impl Peek {
                 i18n::tr("task-auto-tooltip"),
             ),
         };
-        // Opens down and to the right. The split control's default anchor
-        // hangs the list off the left edge of this narrow panel.
         Button::new("task-picker")
             .icon(icon)
             .tooltip(tooltip)
-            .dropdown_menu(move |mut menu, _window, _cx| {
-                for (index, task) in TASK_ORDER.iter().enumerate() {
-                    let target = entity.clone();
-                    let tasks = tasks.clone();
-                    let task = *task;
-                    menu = menu.item(
-                        PopupMenuItem::new(i18n::tr(TASK_KEYS[index]))
-                            .icon(Self::task_icon(task))
-                            .checked(current == Some(task))
-                            .on_click(move |_event, window, cx| {
-                                tasks.update(cx, |state, cx| {
-                                    state.set_selected_index(
-                                        Some(IndexPath::new(index)),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                                target.update(cx, |_, cx| cx.notify());
-                            }),
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                if this.task_menu_open {
+                    return;
+                }
+                let menu = Menu::new();
+                let selected = this.selected_task(cx);
+                for (index, key) in TASK_KEYS.iter().copied().enumerate() {
+                    let label = i18n::tr(key);
+                    let checked = TASK_ORDER.get(index).copied() == selected;
+                    let item = tray_icon::menu::CheckMenuItem::with_id(
+                        format!("peek-task-{index}"),
+                        label,
+                        true,
+                        checked,
+                        None,
                     );
+                    if menu.append(&item).is_err() {
+                        return;
+                    }
                 }
-                let target = entity.clone();
-                let tasks = tasks.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(i18n::tr("task-auto"))
-                        .icon(gpui_kit::assets::IconName::Sparkles)
-                        .checked(automatic)
-                        .on_click(move |_event, window, cx| {
-                            tasks.update(cx, |state, cx| {
-                                state.set_selected_index(
-                                    Some(IndexPath::new(TASK_AUTO_INDEX)),
-                                    window,
-                                    cx,
-                                );
-                            });
-                            target.update(cx, |_, cx| cx.notify());
-                        }),
-                );
-                menu
-            })
-            .on_open_change({
+                this.task_menu_open = true;
                 let entity = cx.entity();
-                move |open, _window, cx| {
-                    let open = *open;
-                    entity.update(cx, |this, cx| {
-                        if this.task_menu_open != open {
-                            this.task_menu_open = open;
+                native_window::show_context_menu(
+                    menu,
+                    event.position(),
+                    window,
+                    cx,
+                    move |window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.task_menu_open = false;
+                            if this.config.hide_on_blur
+                                && !this.pinned
+                                && !window.is_window_active()
+                            {
+                                native_window::hide(window);
+                            }
                             cx.notify();
-                        }
-                    });
-                }
-            })
+                        });
+                    },
+                );
+            }))
     }
 
     /// The icon that stands for a task, so the picker can collapse to it.
@@ -2836,7 +2817,11 @@ impl Peek {
             // laid over the text. Leaving the window closes the row; a layout
             // change under a still pointer does not.
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if this.pinned || std::env::var("PEEK_RENDER").is_ok() || chrome_settling() {
+                if this.pinned
+                    || this.task_menu_open
+                    || std::env::var("PEEK_RENDER").is_ok()
+                    || chrome_settling()
+                {
                     return;
                 }
                 let want = pointer_in_chrome_zone(event.position, window);
@@ -2846,7 +2831,11 @@ impl Peek {
                 }
             }))
             .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
-                if this.pinned || std::env::var("PEEK_RENDER").is_ok() || chrome_settling() {
+                if this.pinned
+                    || this.task_menu_open
+                    || std::env::var("PEEK_RENDER").is_ok()
+                    || chrome_settling()
+                {
                     return;
                 }
                 if chrome_visible() {
@@ -4731,7 +4720,14 @@ fn main() -> anyhow::Result<()> {
                     });
                 }
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
-                    if event.id == show_id {
+                    if let Some(index) = event
+                        .id
+                        .0
+                        .strip_prefix("peek-task-")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
+                        let _ = tray_tx.send(Action::SelectTask(index));
+                    } else if event.id == show_id {
                         toggle = true;
                     } else if event.id == snip_id {
                         screenshot = true;
