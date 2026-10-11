@@ -10,3 +10,6 @@
 
 # Local delivery bundle (includes a nested source clone and executables).
 /CrantPeek/
+
+# Website release binaries are copied locally for nginx, not stored in source history.
+/website/public/downloads/
