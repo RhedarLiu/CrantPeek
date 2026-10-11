@@ -21,6 +21,7 @@ mod native_window;
 mod settings;
 mod shortcuts;
 mod snip;
+mod task_menu;
 use settings::Setting;
 
 use std::time::Duration;
@@ -940,18 +941,6 @@ impl Peek {
                                 }
                             })
                             .ok();
-                        }
-                        Action::SelectTask(index) => {
-                            if index <= TASK_AUTO_INDEX {
-                                let _ = cx.update_window(panel_handle, |_, window, cx| {
-                                    this.update(cx, |peek, cx| {
-                                        peek.tasks.update(cx, |state, cx| {
-                                            state.set_selected_index(Some(IndexPath::new(index)), window, cx);
-                                        });
-                                        cx.notify();
-                                    }).ok();
-                                });
-                            }
                         }
                         Action::Settings => {
                             this.update(cx, |peek, cx| { peek.settings = true; peek.settings_measured = 0.; cx.notify(); }).ok();
@@ -2604,42 +2593,8 @@ impl Peek {
                 if this.task_menu_open {
                     return;
                 }
-                let menu = Menu::new();
-                let selected = this.selected_task(cx);
-                for (index, key) in TASK_KEYS.iter().copied().enumerate() {
-                    let label = i18n::tr(key);
-                    let checked = TASK_ORDER.get(index).copied() == selected;
-                    let item = tray_icon::menu::CheckMenuItem::with_id(
-                        format!("peek-task-{index}"),
-                        label,
-                        true,
-                        checked,
-                        None,
-                    );
-                    if menu.append(&item).is_err() {
-                        return;
-                    }
-                }
                 this.task_menu_open = true;
-                let entity = cx.entity();
-                native_window::show_context_menu(
-                    menu,
-                    event.position(),
-                    window,
-                    cx,
-                    move |window, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.task_menu_open = false;
-                            if this.config.hide_on_blur
-                                && !this.pinned
-                                && !window.is_window_active()
-                            {
-                                native_window::hide(window);
-                            }
-                            cx.notify();
-                        });
-                    },
-                );
+                task_menu::open(cx.entity(), event.position(), window, cx);
             }))
     }
 
@@ -4720,14 +4675,7 @@ fn main() -> anyhow::Result<()> {
                     });
                 }
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
-                    if let Some(index) = event
-                        .id
-                        .0
-                        .strip_prefix("peek-task-")
-                        .and_then(|s| s.parse::<usize>().ok())
-                    {
-                        let _ = tray_tx.send(Action::SelectTask(index));
-                    } else if event.id == show_id {
+                    if event.id == show_id {
                         toggle = true;
                     } else if event.id == snip_id {
                         screenshot = true;

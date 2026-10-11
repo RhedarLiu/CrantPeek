@@ -48,8 +48,6 @@ pub enum Action {
         generation: u64,
         text: String,
     },
-    /// A task selected in the native panel popup (the final index is automatic).
-    SelectTask(usize),
     Settings,
     TogglePause,
     Quit,

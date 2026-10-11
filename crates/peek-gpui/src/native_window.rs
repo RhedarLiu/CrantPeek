@@ -54,53 +54,18 @@ pub fn activate_text_input(window: &mut Window, cx: &mut gpui_kit::App) {
     let _ = (window, cx);
 }
 
-/// A native popup can extend beyond the panel without resizing it. Tracking
-/// runs outside the App borrow because the OS dispatches events synchronously.
-pub fn show_context_menu(
-    menu: tray_icon::menu::Menu,
-    position: gpui_kit::Point<gpui_kit::Pixels>,
-    window: &mut Window,
-    cx: &mut gpui_kit::App,
-    on_closed: impl FnOnce(&mut Window, &mut gpui_kit::App) + 'static,
-) {
-    let handle = window.window_handle();
-    cx.spawn(async move |cx| {
-        #[cfg(any(target_os = "macos", windows))]
-        {
-            use tray_icon::menu::ContextMenu as _;
-            let native = cx
-                .update_window(handle, |_, window, _| {
-                    #[cfg(target_os = "macos")]
-                    {
-                        macos_view(window)
-                    }
-                    #[cfg(windows)]
-                    {
-                        hwnd(window)
-                    }
-                })
-                .ok()
-                .flatten();
-            if let Some(native) = native {
-                let position = tray_icon::dpi::LogicalPosition::new(
-                    f64::from(position.x.as_f32()),
-                    f64::from(position.y.as_f32()),
-                )
-                .into();
-                // The handle remains valid: no await between lookup and tracking.
-                unsafe {
-                    #[cfg(target_os = "macos")]
-                    menu.show_context_menu_for_nsview(native, Some(position));
-                    #[cfg(windows)]
-                    menu.show_context_menu_for_hwnd(native as isize, Some(position));
-                }
-            }
+/// Component popups draw their own border and shadow on a transparent window.
+pub fn prepare_popup(window: &mut Window) {
+    hide_window_buttons(window);
+    #[cfg(target_os = "macos")]
+    if let Some(view) = macos_view(window) {
+        unsafe {
+            use objc2::{msg_send, runtime::AnyObject};
+            let native: *mut AnyObject = msg_send![view as *mut AnyObject, window];
+            let _: () = msg_send![native, setStyleMask: 0usize];
+            let _: () = msg_send![native, setHasShadow: false];
         }
-        #[cfg(not(any(target_os = "macos", windows)))]
-        let _ = (menu, position);
-        let _ = cx.update_window(handle, |_, window, cx| on_closed(window, cx));
-    })
-    .detach();
+    }
 }
 
 /// Hides the peek window, keeping it alive for the next summon.
