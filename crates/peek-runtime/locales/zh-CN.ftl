@@ -27,7 +27,7 @@ query-target-auto = 自动
 query-target-custom = 自定义语言
 query-followup-placeholder = 继续追问…
 query-send = 发送
-query-empty-title = 需要时出现，看完即走
+query-empty-title = 快捷查询，即用即走。
 query-empty-hint = 选中文字后双击 Ctrl，或在上方输入内容。{ $submit } 查询。
 query-section-answer = AI 回答
 

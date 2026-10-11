@@ -2805,7 +2805,7 @@ impl Peek {
             .pt(ui_px(4.))
             .pb(ui_px(4.))
             .gap(ui_px(5.))
-            // Esc hides the panel — "appear when needed, gone when done". A
+            // Esc hides the panel after a quick lookup. A
             // pinned window is a normal window, so Esc leaves it alone.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if !this.pinned && event.keystroke.key == "escape" {
@@ -3981,7 +3981,7 @@ fn dictionary_text(entry: &peek_dict::Entry) -> String {
 
 /// Sample answer for the offscreen preview. Exercises the Markdown renderer
 /// with the scripts this app actually handles.
-const SAMPLE_ANSWER: &str = r#"## 需要时出现，看完即走
+const SAMPLE_ANSWER: &str = r#"## 快捷查询，即用即走。
 
 **Crant Peek** 是一个*浮窗式*阅读助手：选中文字、双击 Ctrl 即可查词或翻译。
 
