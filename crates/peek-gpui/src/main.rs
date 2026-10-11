@@ -653,6 +653,9 @@ impl Peek {
         // Enter is handled inside the input, so it is picked up from its event
         // rather than from a key listener above it, which never sees the key.
         cx.subscribe(&input, |this, _input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
             if let InputEvent::PressEnter { secondary, shift } = event
                 && !*secondary
                 && !*shift
@@ -1179,6 +1182,37 @@ impl Peek {
             return;
         }
         self.settle_stopped_turn();
+    }
+
+    /// Clear the whole query, including work that could otherwise arrive late.
+    fn clear_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        peek_runtime::selection::next_generation();
+        self.stop();
+        self.pending_input = None;
+        self.input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.follow_up
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.clear_follow_up = false;
+        self.answer.clear();
+        self.bubbles.clear();
+        self.messages.clear();
+        self.original_query.clear();
+        self.dictionary_note.clear();
+        self.auto_decision = None;
+        self.status.clear();
+        self.pending_toast = None;
+        self.task_menu_open = false;
+        self.input_measured = 0.;
+        self.answer_measured = 0.;
+        self.query_measured = 0.;
+        self.dialog_measured = 0.;
+        self.follow_height = 38.;
+        if !self.pinned {
+            set_chrome_visible(false);
+        }
+        self.input.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     /// Switches the bundled font set, applies it to the theme and persists it.
@@ -2692,6 +2726,7 @@ impl Peek {
             .cloned()
             .unwrap_or_default();
         let basic_entity = cx.entity();
+        let can_clear = !self.input.read(cx).value().is_empty() || self.has_result() || self.busy;
         let theme = cx.theme();
         let set = self.set;
         let fg = theme.foreground;
@@ -2964,15 +2999,35 @@ impl Peek {
                     .child(
                         // Clip the text, not the task list. The list is a
                         // sibling of this box and has to paint past it.
-                        div().w_full().overflow_hidden().child(
-                            Textarea::new(&self.input)
-                                .w_full()
-                                .appearance(false)
-                                .bordered(false)
-                                // Room for the controls drawn over the corner.
-                                .pb(ui_px(34.)),
-                        ),
+                        div()
+                            .w_full()
+                            .overflow_hidden()
+                            .when(can_clear, |this| this.pr(ui_px(24.)))
+                            .child(
+                                Textarea::new(&self.input)
+                                    .w_full()
+                                    .appearance(false)
+                                    .bordered(false)
+                                    // Room for the controls drawn over the corner.
+                                    .pb(ui_px(34.)),
+                            ),
                     )
+                    .when(can_clear, |this| {
+                        this.child(
+                            div().absolute().top(ui_px(5.)).right(ui_px(5.)).child(
+                                Button::new("clear-query")
+                                    .ghost()
+                                    .w(ui_px(24.))
+                                    .h(ui_px(24.))
+                                    .icon(gpui_kit::assets::IconName::Delete)
+                                    .tooltip(i18n::tr("query-clear"))
+                                    .accessibility_label(i18n::tr("query-clear"))
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.clear_query(window, cx)
+                                    })),
+                            ),
+                        )
+                    })
                     .child(
                         div()
                             .absolute()
@@ -4176,6 +4231,41 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             })?;
         }
         println!("[input-selftest] main and follow-up accept Chinese text after clicking");
+    }
+    // No network or real configuration writes: cancellation and reset must
+    // prevent old selection/decision/stream results from repopulating the card.
+    if std::env::var("PEEK_CLEAR_SELFTEST").is_ok()
+        && let Some(view) = published.borrow().clone()
+    {
+        cx.update_window(window.into(), |_, window, cx| {
+            view.update(cx, |peek, cx| {
+                let stream = CancellationToken::new();
+                let decision = CancellationToken::new();
+                let generation = peek_runtime::selection::next_generation();
+                let epoch = peek.decision_epoch;
+                peek.cancel = Some(stream.clone());
+                peek.decision_cancel = Some(decision.clone());
+                peek.busy = true;
+                peek.answer = "partial response".into();
+                peek.pending_input = Some("late input".into());
+                peek.follow_up
+                    .update(cx, |state, cx| state.set_value("follow-up", window, cx));
+                peek.clear_query(window, cx);
+                assert!(stream.is_cancelled() && decision.is_cancelled());
+                assert!(!peek_runtime::selection::is_current(generation));
+                assert_ne!(epoch, peek.decision_epoch);
+                assert!(!peek.busy && !peek.has_result());
+                assert!(peek.input.read(cx).value().is_empty());
+                assert!(peek.follow_up.read(cx).value().is_empty());
+                assert!(peek.pending_input.is_none() && peek.receiver.is_none());
+                assert!(peek.messages.is_empty() && peek.bubbles.is_empty());
+                assert!(peek.original_query.is_empty() && peek.auto_decision.is_none());
+            });
+        })?;
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+        println!("[clear-selftest] editors, results, history and pending work cleared");
     }
     // Shortcut boxes record keys: plain typing is refused, Esc cancels, and a
     // combination replaces the stored value.
