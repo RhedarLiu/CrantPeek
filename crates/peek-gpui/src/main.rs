@@ -49,9 +49,7 @@ use tray_icon::Icon as TrayIconImage;
 use tray_icon::TrayIconBuilder;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 
-use peek_core::{
-    Channel, ChannelKind, Config, DeepSeekEffort, Message, Task, effective_target, local_route,
-};
+use peek_core::{Channel, ChannelKind, Config, DeepSeekEffort, Message, Task, local_route};
 use peek_network::{Client, Event};
 use peek_runtime::action::{Action, OverlayEvent};
 use peek_runtime::{i18n, store};
@@ -1246,8 +1244,8 @@ impl Peek {
         let tx = self.route_tx.clone();
         let fallback = local_route(
             &text,
-            &self.config.target_language,
-            &self.config.chinese_target,
+            &self.config.native_language,
+            &self.config.preferred_target_language,
         )
         .task;
         // The previous turn is finished first, and this decision gets the epoch
@@ -2071,8 +2069,8 @@ impl Peek {
         };
         let route = local_route(
             routed_text,
-            &self.config.target_language,
-            &self.config.chinese_target,
+            &self.config.native_language,
+            &self.config.preferred_target_language,
         );
         let manual = self.selected_task(cx);
         let task = manual
@@ -2083,7 +2081,16 @@ impl Peek {
                     .flatten()
             })
             .unwrap_or(route.task);
-        let target = effective_target(&route.target, "").to_owned();
+        let target = if task == Task::Translate && !followup {
+            peek_core::translation_target(
+                routed_text,
+                &self.config.native_language,
+                &self.config.preferred_target_language,
+            )
+        } else {
+            &self.config.native_language
+        }
+        .to_owned();
         // A follow-up continues the conversation, which a translation-only
         // endpoint cannot do. The first translation may still use DeepLX.
         if !isolated && !followup {
@@ -2113,7 +2120,14 @@ impl Peek {
             self.auto_decision = manual.is_none().then(|| AutoDecision::local(task));
         }
 
-        let instruction = task.styled_instruction(&target, &self.config.translation_style);
+        let instruction = peek_core::learner_instruction(
+            task,
+            &self.config.native_language,
+            &self.config.preferred_target_language,
+            &target,
+            &self.config.translation_style,
+            followup,
+        );
         if !isolated {
             if !followup {
                 self.bubbles.clear();
@@ -3588,6 +3602,8 @@ impl Peek {
                 this.child(self.setting_row(Setting::Theme, cx))
                     .child(self.setting_row(Setting::Zoom, cx))
                     .child(self.setting_row(Setting::Language, cx))
+                    .child(self.setting_row(Setting::Native, cx))
+                    .child(self.setting_row(Setting::PreferredTarget, cx))
                     .child(self.preference_toggle("settings-hide-on-blur", self.config.hide_on_blur, |config, value| config.hide_on_blur = value, cx))
                     .child(
                     v_flex()
@@ -3789,8 +3805,6 @@ impl Peek {
                                         )),
                                 ),
                         )
-                        .child(self.setting_row(Setting::Target, cx))
-                        .child(self.setting_row(Setting::ChineseTarget, cx))
                         .child(self.setting_row(Setting::Style, cx))
                         .child(self.setting_row(Setting::Confidence, cx))
                         .child(self.setting_row(Setting::Timeout, cx))

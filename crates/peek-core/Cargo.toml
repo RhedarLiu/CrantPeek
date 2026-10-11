@@ -9,3 +9,4 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 url = "2"
+whatlang = "0.18"

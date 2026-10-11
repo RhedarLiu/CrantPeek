@@ -375,12 +375,12 @@ mod tests {
         let path = directory.path().join("config.json");
         let credentials = FakeCredentials::default();
         let mut config = keyed_config();
-        config.target_language = "Japanese".into();
+        config.native_language = "Japanese".into();
         save_with_credentials(&config, &path, &credentials).unwrap();
         std::fs::write(&path, b"{broken configuration").unwrap();
         let loaded = load_from(&path, &credentials);
         assert!(loaded.warning.is_some());
-        assert_eq!(loaded.config.target_language, "Japanese");
+        assert_eq!(loaded.config.native_language, "Japanese");
         assert_eq!(loaded.config.channels[0].api_key, "sample-test-secret");
         assert_eq!(std::fs::read(&path).unwrap(), b"{broken configuration");
         assert!(
@@ -399,11 +399,11 @@ mod tests {
         let path = directory.path().join("nested/config.json");
         let mut config = Config::default();
         save_to(&config, &path).unwrap();
-        config.target_language = "Japanese".into();
+        config.native_language = "Japanese".into();
         save_to(&config, &path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let loaded: Config = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(loaded.target_language, "Japanese");
+        assert_eq!(loaded.native_language, "Japanese");
         assert!(
             !String::from_utf8(bytes.clone())
                 .unwrap()
