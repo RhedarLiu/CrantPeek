@@ -34,7 +34,7 @@ use gpui_kit::base::Disableable as _;
 use gpui_kit::base::{IndexPath, Root, StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
@@ -1412,20 +1412,57 @@ impl Peek {
 
     fn quick_channel_list(&self, cx: &Context<Self>) -> AnyElement {
         let ids = self.config.quick_channels.as_deref().unwrap_or_default();
-        let choices = self
+        let choices: Vec<(String, String)> = self
             .config
             .quick_candidates()
             .filter(|c| !ids.contains(&c.id))
             .map(|c| (c.id.clone(), c.name.clone()))
             .collect();
+        let entity = cx.entity();
+        let can_add = !choices.is_empty();
         v_flex()
             .w_full()
             .gap(ui_px(8.))
-            .child(self.section_label(
-                i18n::tr("channels-quick"),
-                self.set,
-                cx.theme().muted_foreground,
-            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .child(div().flex_1().child(self.section_label(
+                        i18n::tr("channels-quick"),
+                        self.set,
+                        cx.theme().muted_foreground,
+                    )))
+                    .child(
+                        Button::new("quick-add")
+                            .ghost()
+                            .icon(IconName::Plus)
+                            .tooltip(i18n::tr("channels-add-quick"))
+                            .accessibility_label(i18n::tr("channels-add-quick"))
+                            .disabled(!can_add)
+                            .dropdown_menu_with_anchor(
+                                Anchor::TopRight,
+                                move |mut menu, _window, _cx| {
+                                    for (id, name) in &choices {
+                                        let target = entity.clone();
+                                        let chosen = id.clone();
+                                        menu =
+                                            menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                                move |_event, _window, cx| {
+                                                    target.update(cx, |peek, cx| {
+                                                        peek.assign_channel(
+                                                            ChannelSlot::QuickAdd,
+                                                            chosen.clone(),
+                                                            cx,
+                                                        );
+                                                    });
+                                                },
+                                            ));
+                                    }
+                                    menu
+                                },
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .text_size(ui_px(11.))
@@ -1498,17 +1535,6 @@ impl Peek {
                         )
                     })),
             )
-            .child(self.picker_row(
-                i18n::tr("channels-add-quick"),
-                self.channel_picker(
-                    "quick-add",
-                    choices,
-                    String::new(),
-                    ChannelSlot::QuickAdd,
-                    cx,
-                ),
-                self.set,
-            ))
             .into_any_element()
     }
 
@@ -3741,8 +3767,7 @@ impl Peek {
                             i18n::tr("settings-shortcut-selection"),
                             self.shortcut_box(2, cx),
                             set,
-                        ))
-                        .child(div().text_color(muted).child(i18n::tr("settings-shortcuts-hint"))),
+                        )),
                 )
             })
             // Which channel serves which place, plus the copy behaviour.
@@ -3780,7 +3805,6 @@ impl Peek {
                         .child(self.setting_row(Setting::Confidence, cx))
                         .child(self.setting_row(Setting::Timeout, cx))
                         .child(self.preference_toggle("settings-ocr-auto", self.config.ocr_auto_query, |config, value| config.ocr_auto_query = value, cx))
-                        .child(self.section_label(i18n::tr("channels-usage"), set, muted))
                         .child(self.quick_channel_list(cx))
                         .child(self.picker_row(
                             i18n::tr("channels-followup"),
