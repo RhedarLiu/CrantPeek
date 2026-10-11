@@ -1,11 +1,12 @@
 //! Offline dictionary: compact sorted binary index built from ECDICT (MIT) CSV.
 //!
-//! PKD2: magic | count | index byte length | delta-varint offsets | entry data.
-//! Entries contain five varint-length-prefixed UTF-8 fields. Offsets are expanded
-//! once at open, preserving constant-time random access and binary search.
-//! PKD1 dictionaries remain readable. Every read is bounds-checked.
+//! PKD3 stores the five fields in separate length-prefixed UTF-8 columns, improving
+//! compression without changing any entry. Empty columns take no space. Column
+//! offsets are indexed once at open for constant-time access and binary search.
+//! PKD1 and PKD2 dictionaries remain readable. Every read is bounds-checked.
 
-const MAGIC: &[u8; 4] = b"PKD2";
+const MAGIC: &[u8; 4] = b"PKD3";
+const COMPACT_MAGIC: &[u8; 4] = b"PKD2";
 const LEGACY_MAGIC: &[u8; 4] = b"PKD1";
 
 fn write_varint(mut value: u32, out: &mut Vec<u8>) {
@@ -92,27 +93,39 @@ pub fn build(mut entries: Vec<Entry>) -> Vec<u8> {
     entries.retain(|e| !key(&e.word).is_empty());
     entries.sort_by_cached_key(|e| key(&e.word));
     entries.dedup_by(|a, b| key(&a.word) == key(&b.word));
-    let mut index = Vec::new();
-    let mut data = Vec::new();
-    let mut previous = 0;
+    let mut columns: [Vec<u8>; 5] = Default::default();
+    let mut nonempty = [false; 5];
     for e in &entries {
-        let offset = u32::try_from(data.len()).expect("dictionary exceeds 4GiB");
-        write_varint(offset - previous, &mut index);
-        previous = offset;
-        for field in [&e.word, &e.phonetic, &e.translation, &e.pos, &e.exchange] {
+        for (i, field) in [&e.word, &e.phonetic, &e.translation, &e.pos, &e.exchange]
+            .into_iter()
+            .enumerate()
+        {
+            nonempty[i] |= !field.is_empty();
             write_varint(
                 u32::try_from(field.len()).expect("field exceeds 4GiB"),
-                &mut data,
+                &mut columns[i],
             );
-            data.extend_from_slice(field.as_bytes());
+            columns[i].extend_from_slice(field.as_bytes());
         }
     }
-    let mut out = Vec::with_capacity(12 + index.len() + data.len());
+    for (column, present) in columns.iter_mut().zip(nonempty) {
+        if !present {
+            column.clear();
+        }
+    }
+    let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    out.extend_from_slice(&(index.len() as u32).to_le_bytes());
-    out.extend_from_slice(&index);
-    out.extend_from_slice(&data);
+    for column in &columns {
+        out.extend_from_slice(
+            &u32::try_from(column.len())
+                .expect("column exceeds 4GiB")
+                .to_le_bytes(),
+        );
+    }
+    for column in columns {
+        out.extend_from_slice(&column);
+    }
     out
 }
 
@@ -181,6 +194,7 @@ pub struct Dict {
     count: usize,
     data_start: usize,
     compact_offsets: Option<Vec<u32>>,
+    columns: Option<([usize; 5], [Vec<u32>; 5])>,
 }
 
 impl Dict {
@@ -205,9 +219,55 @@ impl Dict {
                 count,
                 data_start,
                 compact_offsets: None,
+                columns: None,
             });
         }
-        if &bytes[..4] != MAGIC {
+        if &bytes[..4] == MAGIC {
+            let header = bytes.get(8..28).ok_or(Error::Corrupt)?;
+            let mut starts = [0; 5];
+            let mut offsets: [Vec<u32>; 5] = Default::default();
+            let mut start = 28usize;
+            for i in 0..5 {
+                let length =
+                    u32::from_le_bytes(header[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+                let end = start.checked_add(length).ok_or(Error::Corrupt)?;
+                let column = bytes.get(start..end).ok_or(Error::Corrupt)?;
+                starts[i] = start;
+                if i == 0 && count != 0 && length == 0 {
+                    return Err(Error::Corrupt);
+                }
+                if length != 0 {
+                    if count > length {
+                        return Err(Error::Corrupt);
+                    }
+                    offsets[i].reserve(count);
+                    let mut position = 0;
+                    for _ in 0..count {
+                        offsets[i].push(u32::try_from(position).map_err(|_| Error::Corrupt)?);
+                        let n = read_varint(column, &mut position).ok_or(Error::Corrupt)? as usize;
+                        position = position
+                            .checked_add(n)
+                            .filter(|&p| p <= length)
+                            .ok_or(Error::Corrupt)?;
+                    }
+                    if position != length {
+                        return Err(Error::Corrupt);
+                    }
+                }
+                start = end;
+            }
+            if start != bytes.len() {
+                return Err(Error::Corrupt);
+            }
+            return Ok(Self {
+                bytes,
+                count,
+                data_start: 28,
+                compact_offsets: None,
+                columns: Some((starts, offsets)),
+            });
+        }
+        if &bytes[..4] != COMPACT_MAGIC {
             return Err(Error::BadFormat);
         }
         let index_len =
@@ -240,6 +300,7 @@ impl Dict {
             count,
             data_start,
             compact_offsets: Some(offsets),
+            columns: None,
         })
     }
 
@@ -297,15 +358,46 @@ impl Dict {
         };
         self.bytes.get(start..end)
     }
+    fn column_field(&self, field: usize, index: usize) -> Option<&str> {
+        if index >= self.count {
+            return None;
+        }
+        let (starts, offsets) = self.columns.as_ref()?;
+        if offsets[field].is_empty() {
+            return Some("");
+        }
+        let start = starts[field].checked_add(*offsets[field].get(index)? as usize)?;
+        let end = if index + 1 < self.count {
+            starts[field].checked_add(*offsets[field].get(index + 1)? as usize)?
+        } else if field + 1 < 5 {
+            starts[field + 1]
+        } else {
+            self.bytes.len()
+        };
+        let record = self.bytes.get(start..end)?;
+        let mut position = 0;
+        let n = read_varint(record, &mut position)? as usize;
+        std::str::from_utf8(record.get(position..position.checked_add(n)?)?).ok()
+    }
     fn word_at(&self, index: usize) -> Option<&str> {
-        self.field_at(self.record_at(index)?, &mut 0)
+        if self.columns.is_some() {
+            self.column_field(0, index)
+        } else {
+            self.field_at(self.record_at(index)?, &mut 0)
+        }
     }
     fn entry_at(&self, index: usize) -> Option<Entry> {
-        let record = self.record_at(index)?;
-        let mut position = 0;
         let mut fields: [String; 5] = Default::default();
-        for field in &mut fields {
-            *field = self.field_at(record, &mut position)?.to_owned();
+        if self.columns.is_some() {
+            for (i, field) in fields.iter_mut().enumerate() {
+                *field = self.column_field(i, index)?.to_owned();
+            }
+        } else {
+            let record = self.record_at(index)?;
+            let mut position = 0;
+            for field in &mut fields {
+                *field = self.field_at(record, &mut position)?.to_owned();
+            }
         }
         let [word, phonetic, translation, pos, exchange] = fields;
         Some(Entry {
@@ -403,6 +495,57 @@ mod tests {
         bytes
     }
 
+    fn compact_bytes(entries: &[Entry]) -> Vec<u8> {
+        let mut index = Vec::new();
+        let mut data = Vec::new();
+        let mut previous = 0;
+        for entry in entries {
+            let offset = data.len() as u32;
+            write_varint(offset - previous, &mut index);
+            previous = offset;
+            for field in [
+                &entry.word,
+                &entry.phonetic,
+                &entry.translation,
+                &entry.pos,
+                &entry.exchange,
+            ] {
+                write_varint(field.len() as u32, &mut data);
+                data.extend_from_slice(field.as_bytes());
+            }
+        }
+        let mut bytes = b"PKD2".to_vec();
+        bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(index.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&index);
+        bytes.extend_from_slice(&data);
+        bytes
+    }
+
+    #[test]
+    fn malformed_columns_are_rejected() {
+        let valid = build(vec![Entry {
+            word: "a".into(),
+            translation: "一".into(),
+            ..Default::default()
+        }]);
+        for length in 0..valid.len() {
+            assert!(Dict::from_bytes(valid[..length].to_vec()).is_err());
+        }
+        let mut bad = valid.clone();
+        bad[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(Dict::from_bytes(bad).is_err());
+        let mut bad = valid.clone();
+        bad[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Dict::from_bytes(bad).is_err());
+        let mut bad = valid.clone();
+        bad[28] = 127;
+        assert!(Dict::from_bytes(bad).is_err());
+        let mut bad = valid;
+        bad.push(0);
+        assert!(Dict::from_bytes(bad).is_err());
+    }
+
     #[test]
     fn compact_and_legacy_preserve_all_fields_and_search_results() {
         let entries = vec![
@@ -422,14 +565,17 @@ mod tests {
         let legacy = legacy_bytes(&entries);
         let compact = build(entries.clone());
         assert!(compact.len() < legacy.len());
+        let pkd2 = Dict::from_bytes(compact_bytes(&entries)).unwrap();
         let old = Dict::from_bytes(legacy).unwrap();
         let new = Dict::from_bytes(compact).unwrap();
         for (i, expected) in entries.iter().enumerate() {
             assert_eq!(old.entry_at(i).as_ref(), Some(expected));
             assert_eq!(new.entry_at(i).as_ref(), Some(expected));
+            assert_eq!(pkd2.entry_at(i).as_ref(), Some(expected));
         }
         for word in ["APPLE", "zebra", "apples", "missing"] {
             assert_eq!(old.lookup(word), new.lookup(word));
+            assert_eq!(pkd2.lookup(word), new.lookup(word));
         }
     }
 
@@ -553,10 +699,15 @@ mod tests {
         let Ok(file) = std::fs::File::open(path) else {
             return;
         };
-        let dict = Dict::from_bytes(build(
-            entries_from_csv(std::io::BufReader::new(file)).unwrap(),
-        ))
-        .unwrap();
+        let mut entries = entries_from_csv(std::io::BufReader::new(file)).unwrap();
+        let dict = Dict::from_bytes(build(entries.clone())).unwrap();
+        entries.retain(|entry| !key(&entry.word).is_empty());
+        entries.sort_by_cached_key(|entry| key(&entry.word));
+        entries.dedup_by(|a, b| key(&a.word) == key(&b.word));
+        assert_eq!(dict.len(), entries.len());
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(dict.entry_at(i).as_ref(), Some(entry));
+        }
         assert!(dict.len() > 100_000);
         let stream = dict.lookup("stream").expect("stream");
         assert!(stream.translation.contains('流'));

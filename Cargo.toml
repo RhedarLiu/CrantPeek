@@ -17,8 +17,8 @@ serde_json = "1"
 thiserror = "2"
 
 [profile.release]
-# Size-focused release; validated against the normal optimized build.
-opt-level = "s"
+# Prefer the smallest generated code; keep unwinding, preview support and all features.
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
