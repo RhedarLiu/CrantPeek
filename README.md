@@ -8,7 +8,7 @@
 
 macOS · Windows · 原生浮窗 · MIT 开源
 
-[使用方法](#开始使用) · [渠道配置](#选择适合你的渠道) · [源码与打包](#从源码运行与打包)
+[项目官网](https://crantpeek.eno.ink) · [下载测试版本](https://github.com/RhedarLiu/CrantPeek/releases/tag/test-b6ca7f1) · [使用方法](#开始使用) · [源码与打包](#从源码运行与打包)
 
 </div>
 
@@ -70,6 +70,8 @@ macOS · Windows · 原生浮窗 · MIT 开源
 词典数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)，采用 MIT 许可。Crant Peek 同样以 [MIT 许可](LICENSE)开源。
 
 ## 从源码运行与打包
+
+项目官网可以使用 nginx 托管，静态文件和部署指引见 [website/部署说明.md](website/部署说明.md)。
 
 <details>
 <summary>展开运行、词库与打包指引</summary>

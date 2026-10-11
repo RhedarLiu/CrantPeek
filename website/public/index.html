@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Crant Peek：快捷查询，即用即走。选中文字，在原生浮窗里查词、翻译、解释代码和报错，并继续追问。支持 macOS 与 Windows，MIT 开源。">
+  <meta name="theme-color" content="#fafaf9">
+  <meta property="og:title" content="Crant Peek · 快捷查询，即用即走。">
+  <meta property="og:description" content="选中、查询、继续阅读。支持 macOS 与 Windows 的原生阅读辅助工具。">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://crantpeek.eno.ink/">
+  <link rel="canonical" href="https://crantpeek.eno.ink/">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <title>Crant Peek · 快捷查询，即用即走。</title>
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m11 5 2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6Z"/><path d="m19 3 .5 1.5L21 5l-1.5.5L19 7l-.5-1.5L17 5l1.5-.5L19 3Z"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 5v16M12 5C9 3 5 3 2 4v15c3-1 7-1 10 2 3-3 7-3 10-2V4c-3-1-7-1-10 1Z"/></symbol>
+    <symbol id="i-language" viewBox="0 0 24 24"><path d="M3 5h12M9 3v2m-3 3c1 4 4 6 8 8M12 5c0 6-4 10-9 12m11 4 5-12 5 12m-8-4h6"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 5-7 7 7 7m8-14 7 7-7 7m-2-16-4 18"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M7 8h10M7 12h10M7 16h7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-windows" viewBox="0 0 24 24"><path d="m3 5 8-1v7H3V5Zm10-1 8-1v8h-8V4ZM3 13h8v7l-8-1v-6Zm10 0h8v8l-8-1v-7Z"/></symbol>
+    <symbol id="i-apple" viewBox="0 0 24 24"><path d="M16 2c0 2-1 4-3 4 0-2 1-4 3-4Zm-4 6c-2-2-5-2-7 1-2 4 0 9 3 12 1 1 3-1 4-1s3 2 4 1c2-2 3-4 4-6-4-1-5-5-2-7-2-2-4-1-6 0Z"/></symbol>
+  </svg>
+  <a class="skip-link" href="#main">跳到正文</a>
+  <header class="site-header">
+    <a class="brand" href="#" aria-label="Crant Peek 首页"><span class="brand-mark"><svg><use href="#i-sparkles"/></svg></span>Crant Peek</a>
+    <nav aria-label="主导航"><a href="#features">功能</a><a href="#start">使用指南</a><a class="repo-link" href="https://github.com/RhedarLiu/CrantPeek" target="_blank" rel="noopener">GitHub <svg><use href="#i-arrow"/></svg></a></nav>
+  </header>
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="status-dot"></span>macOS & Windows · MIT 开源</div>
+        <h1 id="hero-title">快捷查询，<br>即用即走<span class="period">。</span></h1>
+        <p class="hero-description">选中文字，让答案出现在眼前。<br>查词、翻译、读懂代码，接着回到你的阅读。</p>
+        <div class="download-actions" id="downloads">
+          <a class="button button-primary" href="https://github.com/RhedarLiu/CrantPeek/releases/download/test-b6ca7f1/Crant-Peek-macOS-b6ca7f1.zip"><svg><use href="#i-apple"/></svg>下载 macOS 版<svg class="download-icon"><use href="#i-download"/></svg></a>
+          <div class="windows-download">
+            <a class="button button-secondary" href="https://github.com/RhedarLiu/CrantPeek/releases/download/test-b6ca7f1/Crant-Peek-Windows.zip"><svg><use href="#i-windows"/></svg>下载 Windows 版</a>
+            <details class="download-menu">
+              <summary aria-label="选择 Windows 下载版本" title="选择 Windows 下载版本"><svg><use href="#i-chevron"/></svg></summary>
+              <div class="menu-panel">
+                <a href="https://github.com/RhedarLiu/CrantPeek/releases/download/test-b6ca7f1/Crant-Peek-Windows.zip"><span><strong>便携版</strong><small>解压即可运行 · 默认推荐</small></span><svg><use href="#i-check"/></svg></a>
+                <a href="https://github.com/RhedarLiu/CrantPeek/releases/download/test-b6ca7f1/Crant-Peek-Windows-Setup.exe"><span><strong>安装包 <em>未测试</em></strong><small>安装到系统，从开始菜单打开</small></span><svg><use href="#i-download"/></svg></a>
+              </div>
+            </details>
+          </div>
+        </div>
+        <p class="download-meta">macOS：Apple Silicon · Windows：x64（64 位）<br>当前为测试版本 · <a href="#notes">下载前请阅读注意事项</a></p>
+      </div>
+      <div class="hero-demo">
+        <div class="demo-caption"><span class="status-dot"></span>看它如何融入阅读 <span>39 秒演示 · 含声音</span></div>
+        <div class="video-frame"><video controls playsinline preload="none" poster="assets/demo-poster.jpg" aria-label="Crant Peek 使用演示"><source src="assets/demo.mp4" type="video/mp4">你的浏览器无法播放视频，<a href="assets/demo.mp4">下载演示视频</a>。</video></div>
+        <div class="demo-footnote"><span>无需来回切换窗口</span><span>选中 → 查询 → 继续阅读</span></div>
+      </div>
+    </section>
+    <section class="features section" id="features" aria-labelledby="features-title">
+      <div class="section-heading"><span class="section-kicker">顺着你的思路</span><h2 id="features-title">一段内容，多种读法。</h2><p>自动选择合适的任务，也可以由你决定。</p></div>
+      <div class="feature-grid">
+        <article><svg><use href="#i-book"/></svg><h3>查一个词</h3><p>先查本地离线词典，音标、释义、词形一眼可见。想了解用法，就继续追问。</p><span class="feature-tag">离线词典</span></article>
+        <article><svg><use href="#i-language"/></svg><h3>译一段话</h3><p>母语词句译为首选目标语言，外语译为母语。渠道按你的排序使用，失败时依次回退。</p><span class="feature-tag">基础翻译 + LLM</span></article>
+        <article><svg><use href="#i-code"/></svg><h3>读懂代码与报错</h3><p>解释代码的逻辑与用途，梳理报错的可能原因。自动判断结果可以悬停查看详情。</p><span class="feature-tag">自动任务判断</span></article>
+        <article><svg><use href="#i-scan"/></svg><h3>看无法选中的文字</h3><p>框选截图，调用系统本地 OCR 提取文字。截图不会作为图片上传，随后查询识别出的文字。</p><span class="feature-tag">本地 OCR</span></article>
+      </div>
+    </section>
+    <section class="workflow section" id="start" aria-labelledby="start-title">
+      <div class="section-heading"><span class="section-kicker">开始使用</span><h2 id="start-title">选中，按一下，答案就在旁边。</h2></div>
+      <div class="workflow-grid">
+        <ol class="steps">
+          <li><span class="step-number">01</span><div><h3>打开应用，完成引导</h3><p>macOS 按引导授权辅助功能、输入监控及屏幕录制；Windows 便携版解压后打开 CrantPeek.exe。</p></div></li>
+          <li><span class="step-number">02</span><div><h3>选择你使用的渠道</h3><p>添加翻译或 AI 服务，排列「快速翻译」的顺序，为「追问」选择一个 LLM。Google 翻译无需 API key，网络须能连接 Google。</p></div></li>
+          <li><span class="step-number">03</span><div><h3>继续阅读，随时查询</h3><p>选中文字后按快捷键。读取不到选区时，也可以直接输入或粘贴。Enter 提交，Shift + Enter 换行。</p></div></li>
+        </ol>
+        <div class="shortcut-card"><h3>你的阅读快捷键</h3><p>可在设置中重新录制</p><table><caption class="sr-only">各平台默认快捷键</caption><thead><tr><th scope="col">操作</th><th scope="col">macOS</th><th scope="col">Windows</th></tr></thead><tbody><tr><th scope="row">查询选中文字</th><td><kbd>⌘ E</kbd></td><td><kbd>Alt E</kbd></td></tr><tr><th scope="row">空白输入浮窗</th><td><kbd>⌘ ⇧ A</kbd></td><td><kbd>Alt ⇧ A</kbd></td></tr><tr><th scope="row">截图框选</th><td><kbd>⌘ ⇧ D</kbd></td><td><kbd>Alt ⇧ D</kbd></td></tr></tbody></table></div>
+      </div>
+    </section>
+    <section class="privacy section" aria-labelledby="privacy-title"><div><span class="section-kicker">本地优先</span><h2 id="privacy-title">离线词典在本机，在线渠道由你选择。</h2></div><p>词典和系统 OCR 在本机运行；使用在线服务时，查询文字会发送到你配置的渠道。API key 保存在本机配置目录的独立凭据文件中，未加密，请妥善保护。支持 Google、DeepLX、OpenAI 兼容协议、Anthropic 和 DeepSeek。</p></section>
+    <section class="notes section" id="notes" aria-labelledby="notes-title">
+      <div class="section-heading"><span class="section-kicker">下载之前</span><h2 id="notes-title">目前适合测试与体验。</h2><p>这是一个仍在完善的开源项目，请留意这些使用限制。</p></div>
+      <div class="notes-grid">
+        <article><h3>平台与测试情况</h3><p>macOS 已有较完整的测试。Windows 部分功能仍需实机验证，可能存在缺失或不完善；安装包尚未测试，建议先用便携版。</p><p>当前 macOS 包为 Apple Silicon，Windows 包为 x64。未提供原生 Windows ARM64 包，ARM 设备上的兼容性未验证。</p></article>
+        <article><h3>签名与首次打开</h3><p>macOS 使用开发签名，尚未经过发行公证，系统可能阻止首次打开。请核对下载来源，再按系统提示允许打开并授权。</p><p>Windows 未配置发行代码签名，可能出现安全提示。当前版本适合测试、演示和继续开发。</p></article>
+        <article><h3>文字读取与截图</h3><p>选区读取受来源应用和系统权限影响。Windows OCR 依赖系统语言包，识别效果可能不佳；读取管理员运行的应用也可能受权限限制。</p><p>截图目前仅用于提取文字，规划中的图片理解功能尚未开发。</p></article>
+        <article><h3>版本与反馈</h3><p>当前下载对应 <a href="https://github.com/RhedarLiu/CrantPeek/commit/b6ca7f1">b6ca7f1</a> 测试构建。在线翻译与 AI 功能需要你自行配置服务和网络。</p><p>遇到问题，可以在 <a href="https://github.com/RhedarLiu/CrantPeek/issues" target="_blank" rel="noopener">GitHub Issues</a> 反馈，并注明系统版本、来源应用和复现步骤。</p></article>
+      </div>
+    </section>
+    <section class="closing"><span class="brand-mark"><svg><use href="#i-sparkles"/></svg></span><h2>好奇一下，继续向前。</h2><p>快捷查询，即用即走。</p><a class="button button-primary" href="#downloads">选择你的版本 <svg><use href="#i-download"/></svg></a></section>
+  </main>
+  <footer><span>Crant Peek · Rhedar Liu</span><div><a href="https://github.com/RhedarLiu/CrantPeek" target="_blank" rel="noopener">MIT 开源</a><span>词典来自 <a href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noopener">ECDICT</a></span></div></footer>
+</body>
+</html>
