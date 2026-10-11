@@ -132,7 +132,7 @@ error-config-decision-threshold = 决策阈值无效
 settings-decision = 决策模型
 settings-decision-enabled = 启用（自动判断类型，判断不了就用本地规则）
 settings-tab-shortcuts = 快捷键
-settings-shortcuts-hint = 格式如 Super+Shift+A（Mac 上 Super 即 Command）；点击应用后立即生效，冲突时保留原快捷键。
+settings-shortcuts-hint = 点击输入框后直接按下新的组合键，立即生效；按 Esc 取消。被其他应用占用时保留原快捷键。
 settings-tab-appearance = 外观
 settings-tab-translation = 翻译
 settings-tab-channels = 渠道
@@ -354,10 +354,9 @@ decision-detail-unavailable = 决策服务不可用，已采用本地规则判�
 
 decision-detail-code-guard = 检测到源码结构，已改用代码解释（模型判断为翻译）
 
-settings-shortcuts-apply = 应用快捷键
 status-hotkey-invalid = 快捷键格式无效：{ $key }
 status-hotkey-manager = 无法更新全局快捷键，请检查系统权限后重试
-status-hotkey-conflict = 快捷键被其他应用占用，已保留原来的快捷键
+status-hotkey-conflict = 以下快捷键已被其他应用占用：{ $shortcuts }。请在设置中换一个组合。
 status-hotkey-applied = 快捷键已生效
 status-config-recovered = 配置文件损坏，已保留原文件并尝试从备份恢复；请检查设置
 status-key-migration-failed = API key 迁移到系统安全存储失败；原配置已保留，请解锁系统凭据存储后重试
@@ -384,3 +383,6 @@ status-update-invalid = 更新服务返回了无法识别的版本信息
 status-update-open-failed = 无法打开更新下载页面
 
 settings-decision-wait = 决策等待时间
+settings-shortcut-recording = 请按下组合键…
+settings-shortcut-none = 未设置
+status-hotkey-needs-modifier = 快捷键需包含 Ctrl、Alt 或 Command/Win

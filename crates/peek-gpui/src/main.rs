@@ -29,7 +29,7 @@ use std::time::Duration;
 use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Disableable as _;
-use gpui_kit::base::{IndexPath, Root, StyledExt as _};
+use gpui_kit::base::{IndexPath, Root, StyledExt as _, TestSupportExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -107,6 +107,37 @@ fn tray_image() -> TrayIconImage {
     }
     TrayIconImage::from_rgba(rgba, 16, 16).expect("valid tray bitmap")
 }
+/// Names the shortcuts another application holds, for the error notice.
+fn conflict_message(values: &[String; 3], failed: &[usize]) -> String {
+    const NAMES: [&str; 3] = [
+        "settings-shortcut-blank",
+        "settings-shortcut-screenshot",
+        "settings-shortcut-selection",
+    ];
+    let list = failed
+        .iter()
+        .map(|&index| {
+            format!(
+                "{} ({})",
+                i18n::tr(NAMES[index]),
+                shortcuts::display(&values[index])
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    i18n::format("status-hotkey-conflict", &[("shortcuts", &list)])
+}
+
+/// Registers the configured shortcuts and reports any that are unavailable.
+fn register_shortcuts(values: &[String; 3]) -> Result<(), String> {
+    let failed = parse_shortcuts(values).and_then(shortcuts::apply)?;
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(conflict_message(values, &failed))
+    }
+}
+
 fn parse_shortcuts(values: &[String; 3]) -> Result<Vec<HotKey>, String> {
     let mut parsed = Vec::new();
     for value in values {
@@ -474,10 +505,11 @@ struct Peek {
 
     action_tx: std::sync::mpsc::Sender<Action>,
     checking_update: bool,
-    /// Editable global hotkeys, applied after validation.
-    blank_hotkey: Entity<InputState>,
-    screenshot_hotkey: Entity<InputState>,
-    selection_hotkey: Entity<InputState>,
+    /// One focus target per global shortcut, in `shortcut_values` order.
+    /// Clicking a box records the next key combination pressed in it.
+    shortcut_focus: [FocusHandle; 3],
+    /// Index of the shortcut box being recorded, if any.
+    recording_shortcut: Option<usize>,
     /// Channel being edited, or `None` when the dialog is adding one.
     editing_channel: Option<String>,
     /// Draft fields for the channel dialog.
@@ -570,9 +602,14 @@ impl Peek {
             },
         )
         .detach();
-        let blank_hotkey = cx.new(|cx| InputState::new(window, cx));
-        let screenshot_hotkey = cx.new(|cx| InputState::new(window, cx));
-        let selection_hotkey = cx.new(|cx| InputState::new(window, cx));
+        let shortcut_focus = [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()];
+        // Leaving a box mid-recording restores the shortcuts it suspended.
+        for handle in &shortcut_focus {
+            cx.on_blur(handle, window, |this: &mut Self, _window, cx| {
+                this.stop_recording(cx);
+            })
+            .detach();
+        }
         // Draft fields for adding a channel. One set is enough: the fields a
         // kind needs are shown or hidden as the type changes.
         let channel_name = cx.new(|cx| InputState::new(window, cx));
@@ -647,14 +684,6 @@ impl Peek {
         let config = loaded.config;
         apply_appearance(&config, Some(window), cx);
         i18n::set_language(&config.ui_language);
-        for (input, value) in [
-            (&blank_hotkey, &config.blank_hotkey),
-            (&screenshot_hotkey, &config.screenshot_hotkey),
-            (&selection_hotkey, &config.selection_hotkey),
-        ] {
-            let value = value.clone();
-            input.update(cx, |state, cx| state.set_value(&value, window, cx));
-        }
         let items: Vec<SharedString> = TASK_KEYS.iter().map(|key| i18n::tr(key).into()).collect();
         // The configuration's `smart_mode` now only decides where the picker
         // starts: automatic, or a fixed task. Either way the user can change it.
@@ -695,9 +724,8 @@ impl Peek {
             turn_id: 0,
             action_tx: action_tx.clone(),
             checking_update: false,
-            blank_hotkey,
-            screenshot_hotkey,
-            selection_hotkey,
+            shortcut_focus,
+            recording_shortcut: None,
             editing_channel: None,
             channel_name,
             channel_endpoint,
@@ -1948,6 +1976,10 @@ impl Peek {
     }
 
     fn persist_config(&mut self) -> bool {
+        // A preview works on an in-memory copy and must never overwrite the user's file.
+        if std::env::var("PEEK_RENDER").is_ok() {
+            return true;
+        }
         if let Err(err) = store::save(&self.config) {
             self.notify_error(i18n::format("status-config-save-error", &[("error", &err)]));
             return false;
@@ -3268,43 +3300,162 @@ impl Peek {
         )
     }
 
-    fn apply_shortcuts(&mut self, cx: &mut Context<Self>) {
-        let values = [
-            &self.blank_hotkey,
-            &self.screenshot_hotkey,
-            &self.selection_hotkey,
+    fn shortcut_values(&self) -> [String; 3] {
+        [
+            self.config.blank_hotkey.clone(),
+            self.config.screenshot_hotkey.clone(),
+            self.config.selection_hotkey.clone(),
         ]
-        .map(|input| input.read(cx).value().trim().to_owned());
-        match parse_shortcuts(&values) {
-            Err(error) => self.notify_error(error),
-            Ok(_) => {
-                let previous = self.config.clone();
-                self.config.blank_hotkey = values[0].clone();
-                self.config.screenshot_hotkey = values[1].clone();
-                self.config.selection_hotkey = values[2].clone();
-                match shortcuts::apply(parse_shortcuts(&values).unwrap()) {
-                    Err(error) => {
-                        self.config = previous;
-                        self.notify_error(error);
-                    }
-                    Ok(()) => {
-                        if self.persist_config() {
-                            self.notify_success(i18n::tr("status-hotkey-applied"));
-                        } else {
-                            self.config = previous;
-                            if let Ok(old) = parse_shortcuts(&[
-                                self.config.blank_hotkey.clone(),
-                                self.config.screenshot_hotkey.clone(),
-                                self.config.selection_hotkey.clone(),
-                            ]) {
-                                let _ = shortcuts::apply(old);
-                            }
-                        }
-                    }
-                }
+    }
+
+    /// Re-registers the saved shortcuts after a recording ends without a change.
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording_shortcut.take().is_some() {
+            if let Err(error) = register_shortcuts(&self.shortcut_values()) {
+                self.notify_error(error);
             }
+            cx.notify();
+        }
+    }
+
+    /// Records the keystroke pressed in shortcut box `index` and applies it.
+    fn record_shortcut(
+        &mut self,
+        index: usize,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.recording_shortcut != Some(index) {
+            return;
+        }
+        cx.stop_propagation();
+        let keystroke = &event.keystroke;
+        if keystroke.key == "escape" && !keystroke.modifiers.modified() {
+            window.blur(cx);
+            self.stop_recording(cx);
+            return;
+        }
+        let modifiers = keystroke.modifiers;
+        let value = match shortcuts::from_keystroke(
+            modifiers.control,
+            modifiers.alt,
+            modifiers.shift,
+            modifiers.platform,
+            &keystroke.key,
+        ) {
+            Ok(value) => value,
+            // Wait for the full combination; a lone modifier never reaches here.
+            Err(shortcuts::RecordError::NeedsModifier) => {
+                self.notify_error(i18n::tr("status-hotkey-needs-modifier"));
+                cx.notify();
+                return;
+            }
+            Err(shortcuts::RecordError::Unsupported) => {
+                self.notify_error(i18n::format(
+                    "status-hotkey-invalid",
+                    &[("key", &keystroke.key)],
+                ));
+                cx.notify();
+                return;
+            }
+        };
+        let mut values = self.shortcut_values();
+        values[index] = value;
+        self.recording_shortcut = None;
+        window.blur(cx);
+        self.apply_shortcuts(values, cx);
+    }
+
+    fn apply_shortcuts(&mut self, values: [String; 3], cx: &mut Context<Self>) {
+        let restore = |this: &mut Self| {
+            let _ = register_shortcuts(&this.shortcut_values());
+        };
+        let changed: Vec<usize> = (0..3)
+            .filter(|&index| values[index] != self.shortcut_values()[index])
+            .collect();
+        let failed = match parse_shortcuts(&values).and_then(shortcuts::apply) {
+            Ok(failed) => failed,
+            Err(error) => {
+                restore(self);
+                self.notify_error(error);
+                cx.notify();
+                return;
+            }
+        };
+        // A new combination that is taken keeps the previous one. A slot that
+        // was already unavailable and did not change is not a reason to refuse.
+        let refused: Vec<usize> = failed
+            .iter()
+            .copied()
+            .filter(|index| changed.contains(index))
+            .collect();
+        if !refused.is_empty() {
+            restore(self);
+            self.notify_error(conflict_message(&values, &refused));
+            cx.notify();
+            return;
+        }
+        let previous = self.config.clone();
+        let [blank, screenshot, selection] = values;
+        self.config.blank_hotkey = blank;
+        self.config.screenshot_hotkey = screenshot;
+        self.config.selection_hotkey = selection;
+        if self.persist_config() {
+            self.notify_success(i18n::tr("status-hotkey-applied"));
+        } else {
+            self.config = previous;
+            restore(self);
         }
         cx.notify();
+    }
+
+    /// A box showing one shortcut. Clicking it records the next combination.
+    fn shortcut_box(&self, index: usize, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let recording = self.recording_shortcut == Some(index);
+        let value = &self.shortcut_values()[index];
+        let (text, color) = if recording {
+            (
+                i18n::tr("settings-shortcut-recording"),
+                theme.muted_foreground,
+            )
+        } else if value.is_empty() {
+            (i18n::tr("settings-shortcut-none"), theme.muted_foreground)
+        } else {
+            (shortcuts::display(value), theme.foreground)
+        };
+        let focus = self.shortcut_focus[index].clone();
+        // Observed so the shortcut self-test can click it by id.
+        div()
+            .id(("shortcut-box", index))
+            .test_support()
+            .track_focus(&focus)
+            .w_full()
+            .h(ui_px(32.))
+            .px(ui_px(10.))
+            .flex()
+            .items_center()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(if recording { theme.ring } else { theme.input })
+            .bg(theme.background)
+            .text_color(color)
+            .text_size(ui_px(13.))
+            .cursor_pointer()
+            .child(text)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // Every shortcut is released while recording, or the system
+                // would run the old action instead of delivering the keys here.
+                shortcuts::suspend();
+                this.recording_shortcut = Some(index);
+                this.shortcut_focus[index].focus(window, cx);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                this.record_shortcut(index, event, window, cx);
+            }))
+            .into_any_element()
     }
 
     fn settings_page(&self, cx: &Context<Self>) -> AnyElement {
@@ -3591,21 +3742,19 @@ impl Peek {
                         )
                         .child(self.picker_row(
                             i18n::tr("settings-shortcut-blank"),
-                            Input::new(&self.blank_hotkey).into_any_element(),
+                            self.shortcut_box(0, cx),
                             set,
                         ))
                         .child(self.picker_row(
                             i18n::tr("settings-shortcut-screenshot"),
-                            Input::new(&self.screenshot_hotkey).into_any_element(),
+                            self.shortcut_box(1, cx),
                             set,
                         ))
                         .child(self.picker_row(
                             i18n::tr("settings-shortcut-selection"),
-                            Input::new(&self.selection_hotkey).into_any_element(),
+                            self.shortcut_box(2, cx),
                             set,
                         ))
-                        .child(Button::new("apply-shortcuts").label(i18n::tr("settings-shortcuts-apply"))
-                            .on_click(cx.listener(|this, _, _, cx| this.apply_shortcuts(cx))))
                         .child(div().text_color(muted).child(i18n::tr("settings-shortcuts-hint"))),
                 )
             })
@@ -4014,6 +4163,70 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         }
         println!("[input-selftest] main and follow-up accept Chinese text after clicking");
     }
+    // Shortcut boxes record keys: plain typing is refused, Esc cancels, and a
+    // combination replaces the stored value.
+    if std::env::var("PEEK_SHORTCUT_SELFTEST").is_ok()
+        && let Some(view) = published.borrow().clone()
+    {
+        use gpui_kit::test::TestWindowExt as _;
+        let combo = if cfg!(target_os = "macos") {
+            "cmd-shift-k"
+        } else {
+            "alt-shift-k"
+        };
+        let expected = if cfg!(target_os = "macos") {
+            "Shift+Super+K"
+        } else {
+            "Alt+Shift+K"
+        };
+        cx.update_window(window.into(), |_, window, cx| {
+            let before = view.read(cx).config.blank_hotkey.clone();
+            window.render_frame(cx);
+            window.click_at(
+                ElementId::from(("shortcut-box", 0usize)),
+                point(ui_px(20.), ui_px(10.)),
+                cx,
+            );
+            assert_eq!(
+                view.read(cx).recording_shortcut,
+                Some(0),
+                "click starts recording"
+            );
+            window.press("x", cx);
+            assert_eq!(
+                view.read(cx).config.blank_hotkey,
+                before,
+                "plain typing ignored"
+            );
+            assert_eq!(view.read(cx).recording_shortcut, Some(0), "still recording");
+            window.press("escape", cx);
+            assert_eq!(view.read(cx).recording_shortcut, None, "Esc cancels");
+            assert_eq!(view.read(cx).config.blank_hotkey, before);
+            window.click_at(
+                ElementId::from(("shortcut-box", 0usize)),
+                point(ui_px(20.), ui_px(10.)),
+                cx,
+            );
+            window.press(combo, cx);
+            assert_eq!(
+                view.read(cx).recording_shortcut,
+                None,
+                "combination ends recording"
+            );
+            assert_eq!(view.read(cx).config.blank_hotkey, expected);
+            println!(
+                "[shortcut-selftest] recorded {expected}; plain typing and Esc left it unchanged"
+            );
+            // Leave the second box recording so the capture shows that state.
+            window.click_at(
+                ElementId::from(("shortcut-box", 1usize)),
+                point(ui_px(20.), ui_px(10.)),
+                cx,
+            );
+            window.render_frame(cx);
+        })?;
+        cx.run_until_parked();
+    }
     // The channel dialog is opened by a click, so a preview opens it directly.
     // It has to wait for the first frame: the component layer registers the
     // per-window state dialogs look up while painting.
@@ -4311,7 +4524,8 @@ fn main() -> anyhow::Result<()> {
             hotkey_config.screenshot_hotkey,
             hotkey_config.selection_hotkey,
         ];
-        if let Err(error) = parse_shortcuts(&keys).and_then(shortcuts::apply) {
+        if let Err(error) = register_shortcuts(&keys) {
+            eprintln!("shortcuts: {error}");
             let _ = action_tx.send(Action::Error(error));
         }
         if !hotkey_config.onboarding_complete && !selftest {

@@ -111,7 +111,7 @@ error-config-decision-threshold = Invalid decision confidence threshold.
 settings-decision = Decision model
 settings-decision-enabled = Enabled (classify content; fall back to local rules)
 settings-tab-shortcuts = Shortcuts
-settings-shortcuts-hint = Use Super+Shift+A (Super is Command on macOS). Apply to activate immediately; conflicts keep previous shortcuts.
+settings-shortcuts-hint = Click a box, then press the new combination. It applies immediately; Esc cancels. A combination in use elsewhere keeps the previous shortcut.
 settings-tab-appearance = Appearance
 settings-tab-translation = Translation
 settings-tab-channels = Channels
@@ -329,10 +329,9 @@ decision-detail-unavailable = Decision service unavailable; using local rules
 
 decision-detail-code-guard = Source code detected; using code explanation (model chose translation)
 
-settings-shortcuts-apply = Apply shortcuts
 status-hotkey-invalid = Invalid shortcut: { $key }
 status-hotkey-manager = Unable to update global shortcuts; check system permissions and retry
-status-hotkey-conflict = A shortcut is in use by another application; previous shortcuts remain active
+status-hotkey-conflict = In use by another application: { $shortcuts }. Choose another combination in Settings.
 status-hotkey-applied = Shortcuts applied
 status-config-recovered = Damaged configuration preserved; attempted recovery from backup. Please review settings.
 status-key-migration-failed = Could not migrate API keys to secure system storage. Original configuration retained; unlock credential storage and retry.
@@ -359,3 +358,6 @@ status-update-invalid = The update service returned an invalid version
 status-update-open-failed = Unable to open the update downloads page
 
 settings-decision-wait = Decision wait time
+settings-shortcut-recording = Press a key combination…
+settings-shortcut-none = Not set
+status-hotkey-needs-modifier = Include Ctrl, Alt or Command/Win in the shortcut
