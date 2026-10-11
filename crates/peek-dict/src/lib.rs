@@ -1,11 +1,36 @@
 //! Offline dictionary: compact sorted binary index built from ECDICT (MIT) CSV.
 //!
-//! Layout: b"PKD1" | u32 count | count * u32 entry offsets (relative to data start) | data.
-//! Entry: 5 length-prefixed (u32 LE) UTF-8 fields: word, phonetic, translation, pos, exchange.
-//! Entries are sorted by lowercase word, so lookup is a binary search. Every read is
-//! bounds-checked: a truncated or corrupted file yields errors/None, never a panic.
+//! PKD2: magic | count | index byte length | delta-varint offsets | entry data.
+//! Entries contain five varint-length-prefixed UTF-8 fields. Offsets are expanded
+//! once at open, preserving constant-time random access and binary search.
+//! PKD1 dictionaries remain readable. Every read is bounds-checked.
 
-const MAGIC: &[u8; 4] = b"PKD1";
+const MAGIC: &[u8; 4] = b"PKD2";
+const LEGACY_MAGIC: &[u8; 4] = b"PKD1";
+
+fn write_varint(mut value: u32, out: &mut Vec<u8>) {
+    while value >= 128 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_varint(bytes: &[u8], position: &mut usize) -> Option<u32> {
+    let mut value = 0u32;
+    for shift in (0..35).step_by(7) {
+        let byte = *bytes.get(*position)?;
+        *position += 1;
+        if shift == 28 && byte > 15 {
+            return None;
+        }
+        value |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -67,21 +92,26 @@ pub fn build(mut entries: Vec<Entry>) -> Vec<u8> {
     entries.retain(|e| !key(&e.word).is_empty());
     entries.sort_by_cached_key(|e| key(&e.word));
     entries.dedup_by(|a, b| key(&a.word) == key(&b.word));
-    let mut offsets = Vec::with_capacity(entries.len());
+    let mut index = Vec::new();
     let mut data = Vec::new();
+    let mut previous = 0;
     for e in &entries {
-        offsets.push(data.len() as u32);
+        let offset = u32::try_from(data.len()).expect("dictionary exceeds 4GiB");
+        write_varint(offset - previous, &mut index);
+        previous = offset;
         for field in [&e.word, &e.phonetic, &e.translation, &e.pos, &e.exchange] {
-            data.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            write_varint(
+                u32::try_from(field.len()).expect("field exceeds 4GiB"),
+                &mut data,
+            );
             data.extend_from_slice(field.as_bytes());
         }
     }
-    let mut out = Vec::with_capacity(8 + offsets.len() * 4 + data.len());
+    let mut out = Vec::with_capacity(12 + index.len() + data.len());
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    for o in offsets {
-        out.extend_from_slice(&o.to_le_bytes());
-    }
+    out.extend_from_slice(&(index.len() as u32).to_le_bytes());
+    out.extend_from_slice(&index);
     out.extend_from_slice(&data);
     out
 }
@@ -149,6 +179,8 @@ impl std::ops::Deref for Storage {
 pub struct Dict {
     bytes: Storage,
     count: usize,
+    data_start: usize,
+    compact_offsets: Option<Vec<u32>>,
 }
 
 impl Dict {
@@ -156,18 +188,59 @@ impl Dict {
         Self::from_storage(Storage::Owned(bytes))
     }
     fn from_storage(bytes: Storage) -> Result<Self, Error> {
-        if bytes.len() < 8 || &bytes[..4] != MAGIC {
-            return Err(Error::BadFormat);
-        }
-        let count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
-        let table_end = count
-            .checked_mul(4)
-            .and_then(|n| n.checked_add(8))
-            .ok_or(Error::Corrupt)?;
-        if bytes.len() < table_end {
+        if bytes.len() < 8 {
             return Err(Error::Corrupt);
         }
-        Ok(Self { bytes, count })
+        let count = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        if &bytes[..4] == LEGACY_MAGIC {
+            let data_start = count
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(8))
+                .ok_or(Error::Corrupt)?;
+            if bytes.len() < data_start {
+                return Err(Error::Corrupt);
+            }
+            return Ok(Self {
+                bytes,
+                count,
+                data_start,
+                compact_offsets: None,
+            });
+        }
+        if &bytes[..4] != MAGIC {
+            return Err(Error::BadFormat);
+        }
+        let index_len =
+            u32::from_le_bytes(bytes.get(8..12).ok_or(Error::Corrupt)?.try_into().unwrap())
+                as usize;
+        let data_start = 12usize.checked_add(index_len).ok_or(Error::Corrupt)?;
+        let index = bytes.get(12..data_start).ok_or(Error::Corrupt)?;
+        if count > index_len {
+            return Err(Error::Corrupt);
+        }
+        let mut offsets = Vec::with_capacity(count);
+        let mut position = 0;
+        let mut offset = 0u32;
+        for i in 0..count {
+            let delta = read_varint(index, &mut position).ok_or(Error::Corrupt)?;
+            if (i == 0 && delta != 0) || (i != 0 && delta == 0) {
+                return Err(Error::Corrupt);
+            }
+            offset = offset.checked_add(delta).ok_or(Error::Corrupt)?;
+            if offset as usize >= bytes.len() - data_start {
+                return Err(Error::Corrupt);
+            }
+            offsets.push(offset);
+        }
+        if position != index.len() {
+            return Err(Error::Corrupt);
+        }
+        Ok(Self {
+            bytes,
+            count,
+            data_start,
+            compact_offsets: Some(offsets),
+        })
     }
 
     pub fn open(path: &std::path::Path) -> Result<Self, Error> {
@@ -186,36 +259,60 @@ impl Dict {
         self.count == 0
     }
 
+    fn offset_at(&self, index: usize) -> Option<usize> {
+        if index >= self.count {
+            return None;
+        }
+        if let Some(offsets) = &self.compact_offsets {
+            Some(*offsets.get(index)? as usize)
+        } else {
+            let table = 8 + index.checked_mul(4)?;
+            Some(u32::from_le_bytes(self.bytes.get(table..table + 4)?.try_into().ok()?) as usize)
+        }
+    }
+    fn field_at<'a>(&self, record: &'a [u8], position: &mut usize) -> Option<&'a str> {
+        let len = if self.compact_offsets.is_some() {
+            read_varint(record, position)? as usize
+        } else {
+            let len = u32::from_le_bytes(
+                record
+                    .get(*position..position.checked_add(4)?)?
+                    .try_into()
+                    .ok()?,
+            ) as usize;
+            *position += 4;
+            len
+        };
+        let end = position.checked_add(len)?;
+        let text = std::str::from_utf8(record.get(*position..end)?).ok()?;
+        *position = end;
+        Some(text)
+    }
+    fn record_at(&self, index: usize) -> Option<&[u8]> {
+        let start = self.data_start.checked_add(self.offset_at(index)?)?;
+        let end = if index + 1 < self.count {
+            self.data_start.checked_add(self.offset_at(index + 1)?)?
+        } else {
+            self.bytes.len()
+        };
+        self.bytes.get(start..end)
+    }
     fn word_at(&self, index: usize) -> Option<&str> {
-        let table = 8 + index.checked_mul(4)?;
-        let offset =
-            u32::from_le_bytes(self.bytes.get(table..table + 4)?.try_into().ok()?) as usize;
-        let start = (8 + self.count * 4).checked_add(offset)?;
-        let len = u32::from_le_bytes(self.bytes.get(start..start + 4)?.try_into().ok()?) as usize;
-        std::str::from_utf8(self.bytes.get(start + 4..(start + 4).checked_add(len)?)?).ok()
+        self.field_at(self.record_at(index)?, &mut 0)
     }
     fn entry_at(&self, index: usize) -> Option<Entry> {
-        let table = 8 + index.checked_mul(4)?;
-        let offset =
-            u32::from_le_bytes(self.bytes.get(table..table + 4)?.try_into().ok()?) as usize;
-        let data_start = 8 + self.count * 4;
-        let mut pos = data_start.checked_add(offset)?;
+        let record = self.record_at(index)?;
+        let mut position = 0;
         let mut fields: [String; 5] = Default::default();
         for field in &mut fields {
-            let len = u32::from_le_bytes(self.bytes.get(pos..pos + 4)?.try_into().ok()?) as usize;
-            pos += 4;
-            let end = pos.checked_add(len)?;
-            *field = std::str::from_utf8(self.bytes.get(pos..end)?)
-                .ok()?
-                .to_owned();
-            pos = end;
+            *field = self.field_at(record, &mut position)?.to_owned();
         }
-        let [word, phonetic, translation, pos_tag, exchange] = fields;
+        let [word, phonetic, translation, pos, exchange] = fields;
         Some(Entry {
             word,
             phonetic,
             translation,
-            pos: pos_tag,
+            pos,
             exchange,
         })
     }
@@ -279,6 +376,81 @@ mod tests {
             e("APPLE", "重复", ""),
         ]))
         .unwrap()
+    }
+
+    fn legacy_bytes(entries: &[Entry]) -> Vec<u8> {
+        let mut offsets = Vec::new();
+        let mut data = Vec::new();
+        for entry in entries {
+            offsets.push(data.len() as u32);
+            for field in [
+                &entry.word,
+                &entry.phonetic,
+                &entry.translation,
+                &entry.pos,
+                &entry.exchange,
+            ] {
+                data.extend_from_slice(&(field.len() as u32).to_le_bytes());
+                data.extend_from_slice(field.as_bytes());
+            }
+        }
+        let mut bytes = b"PKD1".to_vec();
+        bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for offset in offsets {
+            bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        bytes.extend_from_slice(&data);
+        bytes
+    }
+
+    #[test]
+    fn compact_and_legacy_preserve_all_fields_and_search_results() {
+        let entries = vec![
+            Entry {
+                word: "apple".into(),
+                phonetic: "æpəl".into(),
+                translation: "苹果\n".repeat(128),
+                pos: "n:100".into(),
+                exchange: "s:apples".into(),
+            },
+            Entry {
+                word: "zebra".into(),
+                translation: "斑马".into(),
+                ..Default::default()
+            },
+        ];
+        let legacy = legacy_bytes(&entries);
+        let compact = build(entries.clone());
+        assert!(compact.len() < legacy.len());
+        let old = Dict::from_bytes(legacy).unwrap();
+        let new = Dict::from_bytes(compact).unwrap();
+        for (i, expected) in entries.iter().enumerate() {
+            assert_eq!(old.entry_at(i).as_ref(), Some(expected));
+            assert_eq!(new.entry_at(i).as_ref(), Some(expected));
+        }
+        for word in ["APPLE", "zebra", "apples", "missing"] {
+            assert_eq!(old.lookup(word), new.lookup(word));
+        }
+    }
+
+    #[test]
+    fn corrupt_compact_indexes_are_rejected() {
+        for index in [
+            vec![0x80; 5],
+            vec![0xff, 0xff, 0xff, 0xff, 0x10],
+            vec![1],
+            vec![0, 0],
+        ] {
+            let mut bytes = b"PKD2".to_vec();
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(&(index.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&index);
+            bytes.extend_from_slice(&[0; 5]);
+            assert!(Dict::from_bytes(bytes).is_err());
+        }
+        let empty = Dict::from_bytes(build(vec![])).unwrap();
+        assert!(empty.is_empty());
+        assert!(empty.lookup("a").is_none());
     }
 
     #[test]

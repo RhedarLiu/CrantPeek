@@ -17,7 +17,9 @@ serde_json = "1"
 thiserror = "2"
 
 [profile.release]
-lto = "thin"
+# Size-focused release; validated against the normal optimized build.
+opt-level = "s"
+lto = "fat"
 codegen-units = 1
 strip = true
 
