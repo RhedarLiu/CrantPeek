@@ -31,14 +31,75 @@ trait Credentials {
     fn get(&self, id: &str) -> Result<String, String>;
     fn set(&self, id: &str, value: &str) -> Result<(), String>;
 }
-struct SystemCredentials;
-impl Credentials for SystemCredentials {
+/// Keys stay separate from ordinary settings. No OS credential API is used
+/// during normal loads or saves.
+struct LocalCredentials(PathBuf);
+impl LocalCredentials {
+    fn read(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
+        match std::fs::read(&self.0) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+impl Credentials for LocalCredentials {
     fn get(&self, id: &str) -> Result<String, String> {
-        secret(id)
+        self.read()?
+            .remove(id)
+            .ok_or_else(|| crate::i18n::tr("error-key-missing"))
     }
     fn set(&self, id: &str, value: &str) -> Result<(), String> {
-        save_secret(id, value)
+        let mut values = self.read()?;
+        values.insert(id.to_owned(), value.to_owned());
+        write_private(
+            &serde_json::to_vec_pretty(&values).map_err(|e| e.to_string())?,
+            &self.0,
+        )
     }
+}
+fn local_credentials(path: &std::path::Path) -> LocalCredentials {
+    LocalCredentials(path.with_file_name("credentials.json"))
+}
+/// Import old OS credentials once. Refusing access never causes repeated
+/// password prompts on subsequent launches; the user can re-enter the key.
+fn load_local(
+    path: &std::path::Path,
+    legacy: impl Fn(&str) -> Result<String, String>,
+) -> LoadedConfig {
+    let credentials = local_credentials(path);
+    let mut loaded = load_from(path, &credentials);
+    let missing = loaded
+        .config
+        .channels
+        .iter()
+        .any(|channel| channel.api_key.is_empty() && !channel.credential_id.is_empty());
+    let marker = path.with_file_name("legacy-credentials-imported");
+    if missing && !marker.exists() {
+        // Mark before reading: even a denied or interrupted import is attempted
+        // only once, and leaves all existing system credentials untouched.
+        if write_private(b"1", &marker).is_ok() {
+            for channel in &mut loaded.config.channels {
+                if channel.api_key.is_empty()
+                    && !channel.credential_id.is_empty()
+                    && let Ok(value) = legacy(&channel.credential_id)
+                    && credentials.set(&channel.credential_id, &value).is_ok()
+                {
+                    channel.api_key = value;
+                }
+            }
+            if loaded
+                .config
+                .channels
+                .iter()
+                .all(|channel| channel.credential_id.is_empty() || !channel.api_key.is_empty())
+                && loaded.warning.as_deref() == Some(&crate::i18n::tr("status-key-read-failed"))
+            {
+                loaded.warning = None;
+            }
+        }
+    }
+    loaded
 }
 fn decode(path: &std::path::Path) -> Result<Config, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -62,7 +123,7 @@ pub fn load_preview() -> LoadedConfig {
 }
 pub fn load_report() -> LoadedConfig {
     match config_path() {
-        Ok(path) => load_from(&path, &SystemCredentials),
+        Ok(path) => load_local(&path, legacy_secret),
         Err(error) => LoadedConfig {
             config: Config::default(),
             warning: Some(error),
@@ -124,7 +185,8 @@ fn load_from(path: &std::path::Path, credentials: &impl Credentials) -> LoadedCo
     LoadedConfig { config, warning }
 }
 pub fn save(config: &Config) -> Result<(), String> {
-    save_with_credentials(config, &config_path()?, &SystemCredentials)
+    let path = config_path()?;
+    save_with_credentials(config, &path, &local_credentials(&path))
 }
 fn save_with_credentials(
     config: &Config,
@@ -151,29 +213,35 @@ fn save_with_credentials(
 }
 fn save_to(config: &Config, path: &std::path::Path) -> Result<(), String> {
     config.validate().map_err(crate::i18n::tr)?;
+    write_private(
+        &serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?,
+        path,
+    )
+}
+fn write_private(bytes: &[u8], path: &std::path::Path) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| crate::i18n::tr("error-config-directory"))?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
     use std::io::Write;
-    file.write_all(&serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    file.write_all(bytes).map_err(|e| e.to_string())?;
     file.as_file().sync_all().map_err(|e| e.to_string())?;
     file.persist(path).map_err(|e| e.to_string())?;
     Ok(())
 }
-pub fn secret(id: &str) -> Result<String, String> {
+fn legacy_secret(id: &str) -> Result<String, String> {
     keyring::Entry::new("CrantPeek", id)
         .map_err(|_| crate::i18n::tr("error-keychain-open"))?
         .get_password()
         .map_err(|_| crate::i18n::tr("error-key-missing"))
-}
-pub fn save_secret(id: &str, value: &str) -> Result<(), String> {
-    keyring::Entry::new("CrantPeek", id)
-        .map_err(|_| crate::i18n::tr("error-keychain-open"))?
-        .set_password(value)
-        .map_err(|_| crate::i18n::tr("error-keychain-save"))
 }
 #[cfg(test)]
 mod tests {
@@ -209,6 +277,59 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+    #[test]
+    fn local_keys_persist_without_accessing_legacy_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        save_with_credentials(&keyed_config(), &path, &local_credentials(&path)).unwrap();
+        let loaded = load_local(&path, |_| panic!("must not access OS credentials"));
+        assert_eq!(loaded.config.channels[0].api_key, "sample-test-secret");
+        assert!(loaded.warning.is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path.with_file_name("credentials.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+    #[test]
+    fn successful_legacy_import_is_only_read_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        save_with_credentials(&keyed_config(), &path, &FakeCredentials::default()).unwrap();
+        let loaded = load_local(&path, |_| Ok("imported-test-secret".into()));
+        assert!(loaded.warning.is_none());
+        assert_eq!(loaded.config.channels[0].api_key, "imported-test-secret");
+        assert_eq!(
+            load_local(&path, |_| panic!("must not reread legacy store"))
+                .config
+                .channels[0]
+                .api_key,
+            "imported-test-secret"
+        );
+    }
+    #[test]
+    fn denied_legacy_import_does_not_prompt_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        save_with_credentials(&keyed_config(), &path, &FakeCredentials::default()).unwrap();
+        assert!(
+            load_local(&path, |_| Err("denied".into()))
+                .warning
+                .is_some()
+        );
+        assert!(
+            load_local(&path, |_| panic!("must not retry denied import"))
+                .warning
+                .is_some()
+        );
     }
     #[test]
     fn legacy_credentials_migrate_without_plaintext_in_either_copy() {

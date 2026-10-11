@@ -65,7 +65,7 @@ macOS · Windows · 原生浮窗 · MIT 开源
 
 离线词典和截图 OCR 在本机运行，截图不会作为图片上传。使用在线服务时，查询文字会发送到你选择的渠道。
 
-渠道设置保存在本机；API key 使用 macOS 钥匙串 / Windows 凭据管理器保存。已有配置会自动迁移，安全存储不可用时会保留原配置并提示。
+渠道设置保存在本机；API key 保存在用户配置目录独立的本地凭据文件中，未加密；macOS 文件仅当前用户可读写。旧系统凭据仅尝试导入一次，拒绝导入后可在渠道设置重新填写。
 
 词典数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)，采用 MIT 许可。Crant Peek 同样以 [MIT 许可](LICENSE)开源。
 
