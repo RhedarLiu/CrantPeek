@@ -7,3 +7,6 @@
 /preview*/
 /local-assets/
 /spikes/
+
+# Local delivery bundle (includes a nested source clone and executables).
+/CrantPeek/

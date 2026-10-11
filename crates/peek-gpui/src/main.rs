@@ -558,7 +558,22 @@ impl Peek {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
         native_window::hide_window_buttons(window);
-        let activation = cx.observe_window_activation(window, |this, window, _cx| {
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            // Reopening a panel may retain GPUI focus and emit no new focus
+            // event. Start AppKit text input again for the active editor.
+            if window.is_window_active() {
+                for editor in [&this.input, &this.follow_up] {
+                    let focus = editor.read(cx).focus_handle(cx);
+                    if focus.is_focused(window) {
+                        window.on_next_frame(move |window, cx| {
+                            if focus.is_focused(window) {
+                                native_window::activate_text_input(window, cx);
+                            }
+                        });
+                        break;
+                    }
+                }
+            }
             // A pinned window behaves like a normal window and stays put.
             if this.config.hide_on_blur
                 && !this.pinned
@@ -581,25 +596,25 @@ impl Peek {
                 .submit_on_enter(true)
                 .placeholder(i18n::tr("query-followup-placeholder"))
         });
-        // The quick panel is nonactivating. ASCII key events still reach it,
-        // but macOS can leave the input-source switcher attached to the prior
-        // app. Start a native text session when the user focuses follow-up.
-        cx.on_focus(
-            &follow_up.read(cx).focus_handle(cx),
-            window,
-            |this, window, cx| {
+        // Both editors must activate the native text session. Otherwise the
+        // input-source switcher stays attached to the previous app until the
+        // follow-up editor happens to initialize it.
+        for editor in [&input, &follow_up] {
+            let focus = editor.read(cx).focus_handle(cx);
+            let watched = focus.clone();
+            cx.on_focus(&watched, window, move |_this: &mut Self, window, cx| {
                 cx.activate(true);
                 SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
                 native_window::show(window);
-                let focus = this.follow_up.read(cx).focus_handle(cx);
+                let focus = focus.clone();
                 window.on_next_frame(move |window, cx| {
                     if focus.is_focused(window) {
                         native_window::activate_text_input(window, cx);
                     }
                 });
-            },
-        )
-        .detach();
+            })
+            .detach();
+        }
         let shortcut_focus = [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()];
         // Leaving a box mid-recording restores the shortcuts it suspended.
         for handle in &shortcut_focus {
