@@ -492,6 +492,8 @@ struct Peek {
     settings_tab: usize,
     /// Laid-out height of the settings page, measured from its children.
     settings_measured: f32,
+    /// Laid-out height of the welcome page, so its buttons never fall off.
+    welcome_measured: f32,
     /// Actual input card height, including wrapped text and corner controls.
     input_measured: f32,
     answer_measured: f32,
@@ -681,6 +683,7 @@ impl Peek {
             follow_up,
             settings_tab: 0,
             settings_measured: 0.,
+            welcome_measured: 0.,
             pending_toast: loaded.warning.map(|message| (true, message)),
             bubbles: Vec::new(),
             testing_channel: None,
@@ -2376,7 +2379,11 @@ impl Render for Peek {
         // something to show, while the settings page is always tall; sizing it
         // only from the query page left settings clipped to a compact window.
         let mut height = if self.onboarding {
-            scaled(420.)
+            if self.welcome_measured > 1. {
+                self.welcome_measured
+            } else {
+                scaled(480.)
+            }
         } else if self.settings {
             self.settings_height()
         } else if self.has_result() {
@@ -3103,6 +3110,32 @@ impl Peek {
     /// an offscreen render.
     fn welcome_page(&self, cx: &Context<Self>) -> AnyElement {
         v_flex()
+            // The text wraps differently per language and font size, so the
+            // window adopts the laid-out height of the children.
+            .on_children_prepainted({
+                let measure = cx.entity();
+                move |bounds, _window, cx| {
+                    if bounds.is_empty() {
+                        return;
+                    }
+                    let stacked = bounds
+                        .iter()
+                        .map(|bound| bound.size.height.as_f32())
+                        .sum::<f32>();
+                    let gaps = scaled(16.) * (bounds.len() - 1) as f32;
+                    // 24 of padding on top and bottom.
+                    let needed = (stacked + gaps + scaled(48.)).clamp(scaled(220.), scaled(900.));
+                    let measure = measure.clone();
+                    cx.defer(move |cx| {
+                        measure.update(cx, |this, cx| {
+                            if (this.welcome_measured - needed).abs() > 1.5 {
+                                this.welcome_measured = needed;
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            })
             .size_full()
             .p(ui_px(24.))
             .gap(ui_px(16.))
@@ -3884,6 +3917,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
                         peek.settings_tab = index;
                     }
                 }
+                "welcome" => peek.onboarding = true,
                 // The default state: only the input box, nothing else.
                 "compact" => {
                     if std::env::var("PEEK_CHROME").is_ok() {
