@@ -12,6 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: xcodebuild -version
+      - name: Verify basic Icon Composer input
+        shell: bash
+        run: |
+          mkdir -p /tmp/Probe.icon/Assets /tmp/probe-output
+          python3 - <<'PY'
+          import json, pathlib
+          root = pathlib.Path('/tmp/Probe.icon')
+          (root / 'Assets/Glyph.svg').write_text('<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><circle cx="512" cy="512" r="256" fill="#18181b"/></svg>')
+          (root / 'icon.json').write_text(json.dumps({
+              'fill': {'automatic-gradient': 'srgb:0.96078,0.96078,0.97647,1.00000'},
+              'groups': [{'layers': [{'image-name': 'Glyph.svg', 'name': 'Glyph'}], 'shadow': {'kind': 'neutral', 'opacity': 0.5}, 'translucency': {'enabled': True, 'value': 0.5}}],
+              'supported-platforms': {'circles': ['watchOS'], 'squares': 'shared'},
+          }))
+          PY
+          DEVELOPER_DIR=/Applications/Xcode_26.4.1.app/Contents/Developer xcrun actool /tmp/Probe.icon --compile /tmp/probe-output --platform macosx --app-icon Probe --output-partial-info-plist /tmp/probe-info.plist --minimum-deployment-target 26.0 --target-device mac
       - run: bash tools/compile-macos-icon.sh
       - uses: actions/upload-artifact@v4
         with:
