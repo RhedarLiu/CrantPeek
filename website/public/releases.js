@@ -8,6 +8,10 @@
     windows: "Crant-Peek-Windows.zip",
     installer: "Crant-Peek-Windows-Setup.exe",
   };
+  function latestDownloadUrl(platform) {
+    if (!Object.prototype.hasOwnProperty.call(filenames, platform)) throw new Error("Unknown download platform");
+    return `https://api.gitcode.com/api/v5/repos/CrantAI/CrantPeek/releases/latest/attach_files/${encodeURIComponent(filenames[platform])}/download`;
+  }
   function downloadUrl(raw) {
     const url = new URL(raw);
     const domains = ["gitcode.com", "gitcode.net", "atomgit.com", "myhuaweicloud.com"];
@@ -28,14 +32,19 @@
       const asset = body.assets.find(asset => asset.name === name);
       // Do not confuse source archives with executable packages.
       if (asset?.browser_download_url) {
-        try { downloads[platform] = downloadUrl(asset.browser_download_url); }
+        try {
+          downloadUrl(asset.browser_download_url);
+          // Resolve at download time, including when a bookmarked link or an
+          // already-open page outlives the current version's signed URL.
+          downloads[platform] = latestDownloadUrl(platform);
+        }
         catch { /* Leave this platform unavailable until it has a verified download URL. */ }
       }
     }
     if (!Object.keys(downloads).length) throw new Error("Release packages have not been mirrored yet");
     return { version: body.tag_name, downloads };
   }
-  const api = { latestUrl, filenames, resolveRelease };
+  const api = { latestUrl, filenames, latestDownloadUrl, resolveRelease };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else globalThis.CrantReleases = api;
 })();

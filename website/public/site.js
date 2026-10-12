@@ -30,8 +30,8 @@ menu.addEventListener("focusout", () => {
   }, 0);
 });
 
-// Fetch fresh metadata on every visit. Signed download URLs must not be cached
-// in localStorage or pinned into the HTML. No account token is sent to visitors.
+// Metadata only supplies the version and package availability. Download links
+// stay on latest even across future releases, without a frontend account token.
 async function refreshDownloads() {
   const state = document.getElementById("release-state");
   const detail = document.getElementById("release-detail");
@@ -54,8 +54,8 @@ async function refreshDownloads() {
     detail.textContent = `当前下载：${release.version}。`;
   } catch {
     // Never send users to source-code archives when executable files are unavailable.
-    state.textContent = "暂未取得最新下载链接，下载文件可能仍在同步中";
-    detail.textContent = "最新正式版及附件可能仍在同步中，请稍后再试。";
+    state.textContent = "暂未取得版本信息，下载按钮仍指向最新正式版";
+    detail.textContent = "下载链接自动获取最新正式版，当前版本信息暂不可用。";
   } finally {
     clearTimeout(timeout);
   }
