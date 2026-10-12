@@ -4,8 +4,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 spec = importlib.util.spec_from_file_location("sync_downloads", Path(__file__).with_name("sync-downloads.py"))
 sync = importlib.util.module_from_spec(spec)
@@ -13,6 +14,23 @@ spec.loader.exec_module(sync)
 
 
 class SyncTests(unittest.TestCase):
+    def test_signed_storage_headers_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "test.zip"
+            path.write_bytes(b"archive")
+            metadata = {"url": "https://storage.myhuaweicloud.com/upload?signed=example",
+                        "headers": {"Content-Type": "application/zip", "x-obs-date": "example",
+                                    "Authorization": "OBS storage-signature"}}
+            opener = MagicMock()
+            with patch.object(sync.urllib.request, "build_opener", return_value=opener):
+                sync.upload(path, metadata)
+            request = opener.open.call_args.args[0]
+            headers = {key.lower(): value for key, value in request.header_items()}
+            self.assertEqual(headers["authorization"], "OBS storage-signature")
+            self.assertEqual(headers["x-obs-date"], "example")
+            self.assertEqual(request.data, b"archive")
+            self.assertEqual(request.method, "PUT")
+
     def test_private_and_foreign_urls_are_rejected(self):
         for url in ("http://gitcode.com/a", "https://gitcode.com.evil.test/a",
                     "https://user:password@gitcode.com/a", "https://gitcode.com/a?access_token=secret"):
