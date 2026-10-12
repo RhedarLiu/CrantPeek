@@ -2443,12 +2443,23 @@ impl Peek {
             ActivationPolicy::Accessory
         });
         if self.pinned {
-            native_window::set_application_icon();
             // A regular window keeps the title row. Hover is only for a peek.
             set_chrome_locked(true);
             set_chrome_visible(true);
             // A regular app's menu bar only appears once it is activated.
             cx.activate(true);
+            native_window::set_application_icon();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let _ = this.update(cx, |this, _| {
+                    if this.pinned {
+                        native_window::set_application_icon();
+                    }
+                });
+            })
+            .detach();
         } else {
             set_chrome_locked(false);
             set_chrome_visible(false);

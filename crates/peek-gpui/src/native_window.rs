@@ -23,7 +23,7 @@ pub fn set_application_icon() {
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-        use objc2_foundation::{NSData, NSString};
+        use objc2_foundation::NSData;
 
         let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let bundle = std::env::current_exe().ok().and_then(|path| {
@@ -32,21 +32,16 @@ pub fn set_application_icon() {
                 .and_then(std::path::Path::parent)
                 .map(std::path::Path::to_path_buf)
         });
-        if let Some(bundle) = bundle.filter(|path| path.join("Contents/Info.plist").is_file()) {
-            // Resetting applicationIconImage to nil can restore AppKit's generic
-            // placeholder when an accessory app becomes a regular Dock app.
-            // Ask Icon Services for the bundle icon so native layered assets are
-            // resolved by macOS rather than replaced with our embedded PNG.
-            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let path = NSString::from_str(&bundle.to_string_lossy());
-            let image: *mut AnyObject = msg_send![workspace, iconForFile: &*path];
-            if !image.is_null() {
-                let _: () = msg_send![application, setApplicationIconImage: image];
-                println!("Dock application icon loaded from bundle");
-                return;
-            }
-        }
-        let data = NSData::with_bytes(include_bytes!("../../../assets/app-icon.png"));
+        // NSWorkspace can return a lazy Icon Services image that draws correctly
+        // in Finder but becomes a placeholder in this app's Dock tile. Decode
+        // the compiled native ICNS into a concrete NSImage instead.
+        let bundled_icon = bundle
+            .and_then(|path| std::fs::read(path.join("Contents/Resources/CrantPeek.icns")).ok());
+        let data = NSData::with_bytes(
+            bundled_icon
+                .as_deref()
+                .unwrap_or(include_bytes!("../../../assets/app-icon.png")),
+        );
         let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
         let image: *mut AnyObject = msg_send![image, initWithData: &*data];
         let Some(image) = Retained::from_raw(image) else {
@@ -54,7 +49,9 @@ pub fn set_application_icon() {
             return;
         };
         let _: () = msg_send![application, setApplicationIconImage: &*image];
-        println!("Dock application icon set");
+        let tile: *mut AnyObject = msg_send![application, dockTile];
+        let _: () = msg_send![tile, display];
+        println!("Dock application icon decoded and refreshed");
     }
 }
 
