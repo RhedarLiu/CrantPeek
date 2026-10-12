@@ -4,6 +4,7 @@ Contracts: docs.gitcode.com/docs/apis/{post-api-v-5-repos-owner-repo-releases,
 get-api-v-5-repos-owner-repo-releases-tag-upload-url}/
 """
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -97,7 +98,7 @@ def upload(path, metadata):
     with tempfile.TemporaryDirectory() as directory:
         result = subprocess.run([
             "curl", "--config", "-", "--silent", "--ipv4", "--globoff", "--proto", "=https",
-            "--connect-timeout", "20", "--max-time", "45" if path.stat().st_size < 1024 else "240", "--request", "PUT",
+            "--connect-timeout", "20", "--max-time", "45" if path.stat().st_size < 1024 else "1200", "--request", "PUT",
             "--header", "Expect:", "--upload-file", str(path), "--output", str(Path(directory) / "response"),
             "--write-out", "%{http_code}|%{size_upload}|%{time_connect}",
         ], input=config, capture_output=True, text=True)
@@ -157,7 +158,7 @@ def synchronize():
         metadata = api(path, token)
         # Verify the small checksum attachment first to distinguish a broken
         # signed-upload route from slow transfer of executable packages.
-        for name in (NAMES[-1], *NAMES[:-1]):
+        def sync_asset(name):
             attached = next((a for a in metadata.get("assets", []) if a.get("name") == name), None)
             if attached:
                 if digest_url(attached["browser_download_url"]) != hashes[name]:
@@ -165,6 +166,12 @@ def synchronize():
             else:
                 upload(root / name, api(f"/releases/{tag}/upload_url", token, file_name=name))
             print("Verified existing or uploaded:", name)
+        sync_asset(NAMES[-1])
+        # Distinct storage objects can upload independently. Publish metadata
+        # only after all futures and every public checksum verification pass.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            for future in [pool.submit(sync_asset, name) for name in NAMES[:-1]]:
+                future.result()
         # Wait for storage callbacks and verify every actual public file before
         # exposing the new release as latest to website visitors.
         for attempt in range(12):
