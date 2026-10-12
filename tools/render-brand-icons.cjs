@@ -50,6 +50,40 @@ async function main() {
     fs.writeFile(path.join(root, "assets/app-icon.ico"), ico),
     fs.writeFile(path.join(root, "assets/app-icon.icns"), Buffer.concat([icnsHeader, ...chunks])),
   ]);
+  // Native macOS icon: let the system supply the enclosure/material rather
+  // than baking a rounded square and glass highlights into a single bitmap.
+  const iconDir = path.join(root, "assets/CrantPeek.icon");
+  await fs.mkdir(path.join(iconDir, "Assets"), {recursive: true});
+  const paths = [...inner.matchAll(/<path\b[^>]*\/>/g)].map(match => match[0]);
+  if (paths.length !== 4) throw new Error("Expected the lens, handle, text and sparkle paths");
+  const artwork = [paths.slice(0, 2).join(''), paths[2], paths[3]];
+  const names = ['Lens', 'Text', 'Sparkle'];
+  await Promise.all(names.map((name, index) => {
+    const layer = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" color="#18181b"><g transform="translate(205 205) scale(25.6)" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${artwork[index]}</g></svg>`;
+    return png(layer, 1024).toFile(path.join(iconDir, "Assets", `${name}.png`));
+  }));
+  const fillVariants = [
+    {value: {solid: "srgb:0.09412,0.09412,0.10588,1.00000"}},
+    {appearance: "dark", value: {solid: "srgb:0.95686,0.95686,0.96863,1.00000"}},
+    {appearance: "tinted", value: {solid: "srgb:1.00000,1.00000,1.00000,1.00000"}},
+  ];
+  await fs.writeFile(path.join(iconDir, "icon.json"), JSON.stringify({
+    "color-space-for-untagged-svg-colors": "srgb",
+    "fill-specializations": [
+      {value: {"automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"}},
+      {appearance: "dark", value: "system-dark"},
+    ],
+    groups: names.map((name, index) => ({
+      name,
+      layers: [{name, "image-name": `${name}.png`, "fill-specializations": fillVariants, glass: index !== 1}],
+      lighting: "individual",
+      "blur-material": 0,
+      shadow: {kind: index === 1 ? "none" : "neutral", opacity: index === 1 ? 0 : 0.18},
+      specular: index !== 1,
+      translucency: {enabled: index !== 1, value: index === 2 ? 0.15 : 0.08},
+    })),
+    "supported-platforms": {squares: ["macOS"]},
+  }, null, 2) + '\n');
   // Large website glyphs and actual-size tray glyphs on light/dark surfaces.
   const layers = await Promise.all([source, white, source, white].map((svg, i) => png(svg, i < 2 ? 64 : 18).toBuffer()));
   const background = Buffer.from('<svg width="320" height="150"><path fill="#f4f4f5" d="M0 0h160v150H0z"/><path fill="#28282b" d="M160 0h160v150H160z"/></svg>');

@@ -1,0 +1,19 @@
+name: Native macOS icon
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'assets/CrantPeek.icon/**'
+      - 'tools/compile-macos-icon.sh'
+      - '.github/workflows/macos-icon.yml'
+jobs:
+  icon:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: xcodebuild -version
+      - run: bash tools/compile-macos-icon.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Crant-Peek-native-macOS-icon
+          path: dist/macos-icon/

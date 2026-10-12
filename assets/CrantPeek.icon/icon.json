@@ -1,0 +1,141 @@
+{
+  "color-space-for-untagged-svg-colors": "srgb",
+  "fill-specializations": [
+    {
+      "value": {
+        "automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": "system-dark"
+    }
+  ],
+  "groups": [
+    {
+      "name": "Lens",
+      "layers": [
+        {
+          "name": "Lens",
+          "image-name": "Lens.png",
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.09412,0.09412,0.10588,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": true
+        }
+      ],
+      "lighting": "individual",
+      "blur-material": 0,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.18
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.08
+      }
+    },
+    {
+      "name": "Text",
+      "layers": [
+        {
+          "name": "Text",
+          "image-name": "Text.png",
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.09412,0.09412,0.10588,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": false
+        }
+      ],
+      "lighting": "individual",
+      "blur-material": 0,
+      "shadow": {
+        "kind": "none",
+        "opacity": 0
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0.08
+      }
+    },
+    {
+      "name": "Sparkle",
+      "layers": [
+        {
+          "name": "Sparkle",
+          "image-name": "Sparkle.png",
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.09412,0.09412,0.10588,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass": true
+        }
+      ],
+      "lighting": "individual",
+      "blur-material": 0,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.18
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.15
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

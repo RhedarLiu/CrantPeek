@@ -25,6 +25,23 @@ pub fn set_application_icon() {
         use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
         use objc2_foundation::NSData;
 
+        let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let native_icon = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.parent()
+                    .and_then(std::path::Path::parent)
+                    .map(|contents| contents.join("Resources/Assets.car"))
+            })
+            .is_some_and(|path| path.is_file());
+        if native_icon {
+            // A custom PNG overrides the system's native layered icon, including
+            // its dark/tinted appearances. Nil restores the bundle icon instead.
+            let _: () =
+                msg_send![application, setApplicationIconImage: std::ptr::null::<AnyObject>()];
+            println!("Dock uses the native layered application icon");
+            return;
+        }
         let data = NSData::with_bytes(include_bytes!("../../../assets/app-icon.png"));
         let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
         let image: *mut AnyObject = msg_send![image, initWithData: &*data];
@@ -32,7 +49,6 @@ pub fn set_application_icon() {
             eprintln!("Could not decode the application icon");
             return;
         };
-        let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let _: () = msg_send![application, setApplicationIconImage: &*image];
         println!("Dock application icon set");
     }

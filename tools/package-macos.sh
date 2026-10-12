@@ -54,6 +54,16 @@ fi
 
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
 cp "$ROOT/assets/app-icon.icns" "$APP/Contents/Resources/CrantPeek.icns"
+bash "$ROOT/tools/compile-macos-icon.sh"
+if [[ -f "$ROOT/dist/macos-icon/Assets.car" ]]; then
+  cp "$ROOT/dist/macos-icon/Assets.car" "$APP/Contents/Resources/Assets.car"
+  if [[ -f "$ROOT/dist/macos-icon/CrantPeek.icns" ]]; then
+    cp "$ROOT/dist/macos-icon/CrantPeek.icns" "$APP/Contents/Resources/CrantPeek.icns"
+  fi
+  /usr/bin/plutil -replace CFBundleIconName -string CrantPeek "$APP/Contents/Info.plist"
+else
+  rm -f "$APP/Contents/Resources/Assets.car"
+fi
 if [[ "$BUNDLE_ID" != "dev.crant.peek" || "$EXEC_NAME" != "CrantPeek" ]]; then
   /usr/bin/plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$APP/Contents/Info.plist"
   /usr/bin/plutil -replace CFBundleExecutable -string "$EXEC_NAME" "$APP/Contents/Info.plist"
