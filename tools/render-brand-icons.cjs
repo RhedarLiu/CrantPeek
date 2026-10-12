@@ -69,6 +69,7 @@ async function main() {
   ];
   await fs.writeFile(path.join(iconDir, "icon.json"), JSON.stringify({
     "color-space-for-untagged-svg-colors": "srgb",
+    fill: {"automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"},
     "fill-specializations": [
       {value: {"automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"}},
       {appearance: "dark", value: "system-dark"},
@@ -78,11 +79,11 @@ async function main() {
       layers: [{name, "image-name": `${name}.png`, "fill-specializations": fillVariants, glass: index !== 1}],
       lighting: "individual",
       "blur-material": 0,
-      shadow: {kind: index === 1 ? "none" : "neutral", opacity: index === 1 ? 0 : 0.18},
+      shadow: {kind: "neutral", opacity: index === 1 ? 0 : 0.18},
       specular: index !== 1,
       translucency: {enabled: index !== 1, value: index === 2 ? 0.15 : 0.08},
     })),
-    "supported-platforms": {squares: ["macOS"]},
+    "supported-platforms": {circles: ["watchOS"], squares: "shared"},
   }, null, 2) + '\n');
   // Large website glyphs and actual-size tray glyphs on light/dark surfaces.
   const layers = await Promise.all([source, white, source, white].map((svg, i) => png(svg, i < 2 ? 64 : 18).toBuffer()));

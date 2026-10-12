@@ -1,5 +1,8 @@
 {
   "color-space-for-untagged-svg-colors": "srgb",
+  "fill": {
+    "automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"
+  },
   "fill-specializations": [
     {
       "value": {
@@ -83,7 +86,7 @@
       "lighting": "individual",
       "blur-material": 0,
       "shadow": {
-        "kind": "none",
+        "kind": "neutral",
         "opacity": 0
       },
       "specular": false,
@@ -134,8 +137,9 @@
     }
   ],
   "supported-platforms": {
-    "squares": [
-      "macOS"
-    ]
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
   }
 }
