@@ -69,7 +69,10 @@ fn ui_px(value: f32) -> Pixels {
     px(scaled(value))
 }
 fn choice_label(label: &str) -> String {
-    if matches!(label.split('-').next(), Some("settings" | "language")) {
+    if matches!(
+        label.split('-').next(),
+        Some("settings" | "language" | "task")
+    ) {
         i18n::tr(label)
     } else {
         label.into()
