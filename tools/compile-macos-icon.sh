@@ -1,5 +1,10 @@
 #!/bin/bash
 set -euo pipefail
+# Xcode 26.5/26.6 actool can crash while selecting any Icon Composer input.
+# Keep the choice local to icon compilation; never change system xcode-select.
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode_26.4.1.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode_26.4.1.app/Contents/Developer
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUT="${1:-$ROOT/dist/macos-icon}"
 SOURCE="$ROOT/assets/CrantPeek.icon"
@@ -17,6 +22,7 @@ PY
 )"
 mkdir -p "$OUTPUT"
 if xcrun --find actool >/dev/null 2>&1; then
+  xcrun xcodebuild -version
   xcrun actool "$SOURCE" --compile "$OUTPUT" \
     --output-format human-readable-text --notices --warnings --errors \
     --output-partial-info-plist "$OUTPUT/icon-info.plist" \
