@@ -1,0 +1,40 @@
+name: Sync download source
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing formal release tag (for example v0.1.0)'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      GITCODE_TOKEN:
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: download-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.event_name != 'release' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Synchronize formal release and verify attachments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 tools/sync-downloads.py

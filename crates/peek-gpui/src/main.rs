@@ -3600,12 +3600,14 @@ impl Peek {
                         // The default filled-tab strip reads as a different design
                         // language; an underline row matches a flat settings page.
                         .underline()
+                        .menu(true)
                         .children([
                             Tab::new().label(i18n::tr("settings-tab-appearance")),
                             Tab::new().label(i18n::tr("settings-tab-shortcuts")),
                             Tab::new().label(i18n::tr("settings-tab-channels")),
                             Tab::new().label(i18n::tr("settings-tab-translation")),
                             Tab::new().label(i18n::tr("settings-tab-permissions")),
+                            Tab::new().label(i18n::tr("settings-tab-about")),
                         ])
                         .selected_index(self.settings_tab)
                         .on_click(cx.listener(|this, index: &usize, _window, cx| {
@@ -3626,8 +3628,10 @@ impl Peek {
                     .child(self.preference_toggle("settings-hide-on-blur", self.config.hide_on_blur, |config, value| config.hide_on_blur = value, cx))
 
             })
-            .when(self.settings_tab == 0, |this| {
-                this.child(div().text_color(muted).child(format!("Crant Peek {}", env!("CARGO_PKG_VERSION"))))
+            .when(self.settings_tab == 5, |this| {
+                this.child(div().font_family(set.latin).text_size(ui_px(18.)).font_semibold().child(format!("Crant Peek {}", env!("CARGO_PKG_VERSION"))))
+                    .child(div().text_color(muted).child(i18n::tr("settings-about-description")))
+                    .child(div().text_size(ui_px(12.)).text_color(muted).child("Rhedar Liu · MIT"))
                     .child(h_flex().gap(ui_px(8.))
                         .child(Button::new("check-version").label(i18n::tr("settings-check-updates"))
                             .loading(self.checking_update).on_click(cx.listener(|this, _, _, cx| {
@@ -3646,6 +3650,16 @@ impl Peek {
                                 if let Err(error) = peek_runtime::updates::open_releases() { this.notify_error(error); }
                                 cx.notify();
                             }))))
+                    .child(h_flex().gap(ui_px(8.)).children([
+                        ("about-website", "settings-about-website", peek_runtime::updates::ProjectLink::Website),
+                        ("about-github", "settings-about-github", peek_runtime::updates::ProjectLink::GitHub),
+                    ].into_iter().map(|(id, label, target)| {
+                        Button::new(id).label(i18n::tr(label)).icon(IconName::ExternalLink)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Err(error) = peek_runtime::updates::open_project_link(target) { this.notify_error(error); }
+                                cx.notify();
+                            }))
+                    })))
             })
             .when(self.settings_tab == 2, |this| {
                 this.child(

@@ -386,3 +386,8 @@ settings-decision-wait = 决策等待时间
 settings-shortcut-recording = 请按下组合键…
 settings-shortcut-none = 未设置
 status-hotkey-needs-modifier = 快捷键需包含 Ctrl、Alt 或 Command/Win
+
+settings-tab-about = 关于
+settings-about-description = 快捷查询，即用即走。
+settings-about-website = 官网
+settings-about-github = GitHub

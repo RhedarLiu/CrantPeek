@@ -45,6 +45,13 @@ APP="$ROOT/dist/$APP_NAME"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/target/release/$BIN" "$APP/Contents/MacOS/$EXEC_NAME"
 cp "$ROOT/assets/Info.plist" "$APP/Contents/Info.plist"
+APP_VERSION="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
+if [[ -z "$APP_VERSION" ]]; then
+  echo "Cannot determine the application version from Cargo.toml" >&2
+  exit 1
+fi
+/usr/bin/plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$APP/Contents/Info.plist"
+
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
 if [[ "$BUNDLE_ID" != "dev.crant.peek" || "$EXEC_NAME" != "CrantPeek" ]]; then
   /usr/bin/plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$APP/Contents/Info.plist"

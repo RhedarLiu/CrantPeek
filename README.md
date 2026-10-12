@@ -8,7 +8,7 @@
 
 macOS · Windows · 原生浮窗 · MIT 开源
 
-[项目官网](https://crantpeek.eno.ink) · [下载测试版本](https://github.com/RhedarLiu/CrantPeek/releases/tag/test-b6ca7f1) · [使用方法](#开始使用) · [源码与打包](#从源码运行与打包)
+[项目官网](https://crantpeek.eno.ink) · [下载最新版](https://crantpeek.eno.ink/#downloads) · [使用方法](#开始使用) · [源码与打包](#从源码运行与打包)
 
 </div>
 

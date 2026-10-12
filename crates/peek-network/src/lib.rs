@@ -272,24 +272,32 @@ impl Default for Client {
     }
 }
 impl Client {
-    /// Only contacts this project's public releases API; sends no query or credentials.
+    /// Read official release metadata; downloading opens the project website.
     pub async fn latest_version(&self, current: &str) -> Result<Option<String>, Error> {
+        self.release_version(
+            "https://api.github.com/repos/RhedarLiu/CrantPeek/releases/latest",
+            current,
+        )
+        .await
+    }
+
+    async fn release_version(
+        &self,
+        endpoint: &str,
+        current: &str,
+    ) -> Result<Option<String>, Error> {
         let response = self
             .http
-            .get("https://api.github.com/repos/RhedarLiu/CrantPeek/releases/latest")
-            .timeout(std::time::Duration::from_secs(15))
+            .get(endpoint)
+            .timeout(std::time::Duration::from_secs(8))
             .header("User-Agent", "CrantPeek")
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", "application/json")
             .send()
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let response = response.error_for_status()?;
+            .await?
+            .error_for_status()?;
         let body: Value = response.json().await?;
-        let tag = body["tag_name"]
-            .as_str()
-            .ok_or(Error::Invalid("status-update-invalid".into()))?;
+        let tag = stable_release_tag(&body)
+            .ok_or_else(|| Error::Invalid("status-update-invalid".into()))?;
         newer_release(current, tag).map_err(|_| Error::Invalid("status-update-invalid".into()))
     }
 
@@ -1328,6 +1336,15 @@ mod endpoint_url_tests {
     }
 }
 
+fn stable_release_tag(body: &Value) -> Option<&str> {
+    if body["draft"].as_bool() == Some(true) || body["prerelease"].as_bool() == Some(true) {
+        return None;
+    }
+    let tag = body["tag_name"].as_str()?;
+    let version = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
+    version.pre.is_empty().then_some(tag)
+}
+
 fn newer_release(current: &str, tag: &str) -> Result<Option<String>, semver::Error> {
     let latest = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag))?;
     let current = semver::Version::parse(current)?;
@@ -1335,6 +1352,24 @@ fn newer_release(current: &str, tag: &str) -> Result<Option<String>, semver::Err
 }
 #[cfg(test)]
 mod update_tests {
+    #[test]
+    fn rejects_missing_preview_and_draft_release_metadata() {
+        use serde_json::json;
+        assert_eq!(
+            super::stable_release_tag(&json!({"tag_name":"v0.1.1","prerelease":false})),
+            Some("v0.1.1")
+        );
+        for invalid in [
+            json!({}),
+            json!({"error_message":"No latest release found"}),
+            json!({"tag_name":"v0.1.1","prerelease":true}),
+            json!({"tag_name":"v0.1.1","draft":true}),
+            json!({"tag_name":"v0.1.2-beta.1"}),
+            json!({"tag_name":"test-b6ca7f1"}),
+        ] {
+            assert!(super::stable_release_tag(&invalid).is_none());
+        }
+    }
     #[test]
     fn releases_compare_numeric_versions_and_exclude_previews() {
         assert_eq!(

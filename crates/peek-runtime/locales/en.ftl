@@ -361,3 +361,8 @@ settings-decision-wait = Decision wait time
 settings-shortcut-recording = Press a key combination…
 settings-shortcut-none = Not set
 status-hotkey-needs-modifier = Include Ctrl, Alt or Command/Win in the shortcut
+
+settings-tab-about = About
+settings-about-description = Instant lookup, then back to your reading.
+settings-about-website = Website
+settings-about-github = GitHub

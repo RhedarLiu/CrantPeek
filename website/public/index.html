@@ -13,6 +13,7 @@
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
   <title>Crant Peek · 快捷查询，即用即走。</title>
+  <script src="releases.js" defer></script>
   <script src="site.js" defer></script>
 </head>
 <body>
@@ -41,19 +42,19 @@
         <h1 id="hero-title">快捷查询，<br>即用即走<span class="period">。</span></h1>
         <p class="hero-description">选中文字，让答案出现在眼前。<br>查词、翻译、读懂代码，接着回到你的阅读。</p>
         <div class="download-actions" id="downloads">
-          <a class="button button-primary" href="downloads/Crant-Peek-macOS.zip" download><svg><use href="#i-apple"/></svg>下载 macOS 版<svg class="download-icon"><use href="#i-download"/></svg></a>
+          <a class="button button-primary" href="#downloads" aria-disabled="true" data-release-asset="macos"><svg><use href="#i-apple"/></svg>下载 macOS 版<svg class="download-icon"><use href="#i-download"/></svg></a>
           <div class="windows-download">
-            <a class="button button-secondary" href="downloads/Crant-Peek-Windows.zip" download><svg><use href="#i-windows"/></svg>下载 Windows 版</a>
+            <a class="button button-secondary" href="#downloads" aria-disabled="true" data-release-asset="windows"><svg><use href="#i-windows"/></svg>下载 Windows 版</a>
             <details class="download-menu">
               <summary aria-label="选择 Windows 下载版本" title="选择 Windows 下载版本"><svg><use href="#i-chevron"/></svg></summary>
               <div class="menu-panel">
-                <a href="downloads/Crant-Peek-Windows.zip" download><span><strong>便携版</strong><small>解压即可运行 · 默认推荐</small></span><svg><use href="#i-check"/></svg></a>
-                <a href="downloads/Crant-Peek-Windows-Setup.exe" download><span><strong>安装包 <em>未测试</em></strong><small>安装到系统，从开始菜单打开</small></span><svg><use href="#i-download"/></svg></a>
+                <a href="#downloads" aria-disabled="true" data-release-asset="windows"><span><strong>便携版</strong><small>解压即可运行 · 默认推荐</small></span><svg><use href="#i-check"/></svg></a>
+                <a href="#downloads" aria-disabled="true" data-release-asset="installer"><span><strong>安装包 <em>未测试</em></strong><small>安装到系统，从开始菜单打开</small></span><svg><use href="#i-download"/></svg></a>
               </div>
             </details>
           </div>
         </div>
-        <p class="download-meta">macOS：Apple Silicon · Windows：x64（64 位）<br>当前为测试版本 · <a href="#notes">下载前请阅读注意事项</a></p>
+        <p class="download-meta">macOS：Apple Silicon · Windows：x64（64 位）<br><span id="release-state" role="status">正在获取最新正式版…</span><br><a href="#notes">下载前请阅读注意事项</a></p>
       </div>
       <div class="hero-demo">
         <div class="demo-caption"><span class="status-dot"></span>看它如何融入阅读 <span>39 秒演示 · 含声音</span></div>
@@ -83,12 +84,12 @@
     </section>
     <section class="privacy section" aria-labelledby="privacy-title"><div><span class="section-kicker">本地优先</span><h2 id="privacy-title">离线词典在本机，在线渠道由你选择。</h2></div><p>词典和系统 OCR 在本机运行；使用在线服务时，查询文字会发送到你配置的渠道。API key 保存在本机配置目录的独立凭据文件中，未加密，请妥善保护。支持 Google、DeepLX、OpenAI 兼容协议、Anthropic 和 DeepSeek。</p></section>
     <section class="notes section" id="notes" aria-labelledby="notes-title">
-      <div class="section-heading"><span class="section-kicker">下载之前</span><h2 id="notes-title">目前适合测试与体验。</h2><p>这是一个仍在完善的开源项目，请留意这些使用限制。</p></div>
+      <div class="section-heading"><span class="section-kicker">下载之前</span><h2 id="notes-title">下载前，了解这些细节。</h2><p>正式版本仍在持续完善，请留意平台支持与首次打开方式。</p></div>
       <div class="notes-grid">
         <article><h3>平台与测试情况</h3><p>macOS 已有较完整的测试。Windows 部分功能仍需实机验证，可能存在缺失或不完善；安装包尚未测试，建议先用便携版。</p><p>当前 macOS 包为 Apple Silicon，Windows 包为 x64。未提供原生 Windows ARM64 包，ARM 设备上的兼容性未验证。</p></article>
-        <article><h3>签名与首次打开</h3><p>macOS 使用开发签名，尚未经过发行公证，系统可能阻止首次打开。请核对下载来源，再按系统提示允许打开并授权。</p><p>Windows 未配置发行代码签名，可能出现安全提示。当前版本适合测试、演示和继续开发。</p></article>
+        <article><h3>签名与首次打开</h3><p>macOS 使用开发签名，尚未经过发行公证，系统可能阻止首次打开。请核对下载来源，再按系统提示允许打开并授权。</p><p>Windows 未配置发行代码签名，可能出现安全提示。请核对下载来源，再按系统提示运行。</p></article>
         <article><h3>文字读取与截图</h3><p>选区读取受来源应用和系统权限影响。Windows OCR 依赖系统语言包，识别效果可能不佳；读取管理员运行的应用也可能受权限限制。</p><p>截图目前仅用于提取文字，规划中的图片理解功能尚未开发。</p></article>
-        <article><h3>版本与反馈</h3><p>当前下载对应 <a href="https://github.com/RhedarLiu/CrantPeek/commit/b6ca7f1">b6ca7f1</a> 测试构建。在线翻译与 AI 功能需要你自行配置服务和网络。</p><p>遇到问题，可以在 <a href="https://github.com/RhedarLiu/CrantPeek/issues" target="_blank" rel="noopener">GitHub Issues</a> 反馈，并注明系统版本、来源应用和复现步骤。</p></article>
+        <article><h3>版本与反馈</h3><p><span id="release-detail">下载链接会自动获取最新正式版，无需手动选择版本。</span>在线翻译与 AI 功能需要你自行配置服务和网络。</p><p>遇到问题，可以在 <a href="https://github.com/RhedarLiu/CrantPeek/issues" target="_blank" rel="noopener">GitHub Issues</a> 反馈，并注明系统版本、来源应用和复现步骤。</p></article>
       </div>
     </section>
     <section class="closing"><span class="brand-mark"><svg><use href="#i-sparkles"/></svg></span><h2>好奇一下，继续向前。</h2><p>快捷查询，即用即走。</p><a class="button button-primary" href="#downloads">选择你的版本 <svg><use href="#i-download"/></svg></a></section>

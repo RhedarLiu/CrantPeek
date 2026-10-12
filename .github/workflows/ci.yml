@@ -21,6 +21,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # Include GUI geometry tests as well as runtime/network tests.
       - run: cargo test --workspace
+      - name: Check download synchronization safeguards
+        run: python tools/test-sync-downloads.py
       - name: Prepare offline dictionary
         uses: actions/checkout@v4
         with:
@@ -66,3 +68,53 @@ jobs:
         with:
           name: Crant-Peek-macOS-test
           path: dist/Crant-Peek-macOS.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Crant-Peek-*-test
+          merge-multiple: true
+          path: release-files
+      - name: Verify version and all release packages
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, pathlib, zipfile, plistlib, hashlib
+          root = pathlib.Path('release-files')
+          version = re.search(r'^version\s*=\s*"([^"]+)"', pathlib.Path('Cargo.toml').read_text(), re.M).group(1)
+          assert os.environ['RELEASE_TAG'] == 'v' + version, 'Tag and application version differ'
+          names = ['Crant-Peek-macOS.zip', 'Crant-Peek-Windows.zip', 'Crant-Peek-Windows-Setup.exe']
+          for name in names:
+              assert (root / name).is_file(), 'Missing package: ' + name
+          for name in names[:2]:
+              with zipfile.ZipFile(root / name) as archive:
+                  assert archive.testzip() is None, 'Corrupt package: ' + name
+                  if name == names[0]:
+                      info = next(n for n in archive.namelist() if n.endswith('/Contents/Info.plist') and not n.startswith('__MACOSX/'))
+                      assert plistlib.loads(archive.read(info))['CFBundleShortVersionString'] == version
+          assert (root / names[2]).read_bytes()[:2] == b'MZ'
+          (root / 'SHA256SUMS.txt').write_text('\n'.join(hashlib.sha256((root / n).read_bytes()).hexdigest() + '  ' + n for n in names) + '\n')
+          PY
+      - name: Publish formal release with all assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" release-files/Crant-Peek-macOS.zip release-files/Crant-Peek-Windows.zip release-files/Crant-Peek-Windows-Setup.exe release-files/SHA256SUMS.txt --verify-tag --latest --title "Crant Peek $RELEASE_TAG" --notes-file tools/release-notes.md
+
+  sync-downloads:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    uses: ./.github/workflows/sync-downloads.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
