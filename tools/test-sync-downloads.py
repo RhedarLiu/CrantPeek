@@ -21,7 +21,7 @@ class SyncTests(unittest.TestCase):
             metadata = {"url": "https://storage.myhuaweicloud.com/upload?signed=example",
                         "headers": {"Content-Type": "application/zip", "x-obs-date": "example",
                                     "Authorization": "OBS storage-signature"}}
-            result = MagicMock(returncode=0, stdout="200")
+            result = MagicMock(returncode=0, stdout="200|7|0.02")
             with patch.object(sync.subprocess, "run", return_value=result) as run:
                 sync.upload(path, metadata)
             args = run.call_args.args[0]

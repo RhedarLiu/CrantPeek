@@ -8,11 +8,19 @@ on:
         description: 'Existing formal release tag (for example v0.1.0)'
         required: true
         type: string
+      runner:
+        description: 'Upload network environment'
+        type: choice
+        default: ubuntu-latest
+        options: [ubuntu-latest, macos-latest]
   workflow_call:
     inputs:
       tag:
         required: true
         type: string
+      runner:
+        type: string
+        default: ubuntu-latest
     secrets:
       GITCODE_TOKEN:
         required: false
@@ -24,7 +32,7 @@ concurrency:
 jobs:
   sync:
     if: github.event_name != 'release' || !github.event.release.prerelease
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

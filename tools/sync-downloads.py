@@ -99,11 +99,13 @@ def upload(path, metadata):
             "curl", "--config", "-", "--silent", "--ipv4", "--globoff", "--proto", "=https",
             "--connect-timeout", "20", "--max-time", "240", "--request", "PUT",
             "--header", "Expect:", "--upload-file", str(path), "--output", str(Path(directory) / "response"),
-            "--write-out", "%{http_code}",
+            "--write-out", "%{http_code}|%{size_upload}|%{time_connect}",
         ], input=config, capture_output=True, text=True)
-    code = result.stdout.strip()
+    parts = result.stdout.strip().split("|")
+    code = parts[0]
     if result.returncode or not re.fullmatch(r"2\d\d", code):
-        raise SyncError(f"Upload failed for {path.name}: curl exit {result.returncode}, HTTP {code if code.isdigit() else 'unknown'}")
+        metrics = f", bytes sent {parts[1]}, connect seconds {parts[2]}" if len(parts) == 3 and all(re.fullmatch(r"[0-9.]+", p) for p in parts) else ""
+        raise SyncError(f"Upload failed for {path.name}: curl exit {result.returncode}, HTTP {code if code.isdigit() else 'unknown'}{metrics}")
 
 
 def gh(*args):
