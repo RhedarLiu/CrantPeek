@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# Xcode 26.5/26.6 actool can crash while selecting any Icon Composer input.
+# Prefer the compiler verified by the native icon workflow when available.
 # Keep the choice local to icon compilation; never change system xcode-select.
 if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode_26.4.1.app/Contents/Developer ]]; then
   export DEVELOPER_DIR=/Applications/Xcode_26.4.1.app/Contents/Developer

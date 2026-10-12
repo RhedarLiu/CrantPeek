@@ -106,6 +106,8 @@ open "dist/Crant Peek.app"
 
 签名初始化会创建并导入本地开发证书。之后通常只需执行打包和打开应用两步；也可通过 `SIGN_IDENTITY` 指定自己的签名身份。本地开发签名不等同于发行签名。已有 Developer ID 与 notarytool 凭据配置时，可运行 `SIGN_IDENTITY="Developer ID Application: …" NOTARY_PROFILE="…" bash tools/package-release-macos.sh` 生成经过签名、公证的 DMG；没有发行凭据时使用本地测试包。
 
+新版 macOS 的分层图标使用 `assets/CrantPeek.icon`，打包时由完整 Xcode 的 `actool` 编译。只有 Command Line Tools 时，可将 GitHub Actions「Native macOS icon」的产物解压到 `local-assets/macos-icon`；脚本会核对资源与源码是否一致。没有匹配资源时使用兼容的普通图标。
+
 ### Windows
 
 在 Windows PowerShell 中执行：
