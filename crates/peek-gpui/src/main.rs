@@ -90,22 +90,15 @@ fn apply_appearance(config: &Config, window: Option<&mut Window>, cx: &mut App) 
     fonts::apply(cx, fonts::initial());
 }
 fn tray_image() -> TrayIconImage {
-    let mut rgba = vec![0; 16 * 16 * 4];
-    for y in 1..15 {
-        for x in 1..15 {
-            let index = (y * 16 + x) * 4;
-            let stem = (4..=5).contains(&x) && (4..=12).contains(&y);
-            let bowl = ((4..=10).contains(&x) && (y == 4 || y == 8))
-                || ((9..=10).contains(&x) && (4..=8).contains(&y));
-            let color = if stem || bowl {
-                [255, 255, 255, 255]
-            } else {
-                [40, 40, 44, 255]
-            };
-            rgba[index..index + 4].copy_from_slice(&color);
-        }
-    }
-    TrayIconImage::from_rgba(rgba, 16, 16).expect("valid tray bitmap")
+    #[cfg(windows)]
+    let bytes = include_bytes!("../../../assets/tray-query-windows.png").as_slice();
+    #[cfg(not(windows))]
+    let bytes = include_bytes!("../../../assets/tray-query.png").as_slice();
+    let image = image::load_from_memory(bytes)
+        .expect("embedded tray icon")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    TrayIconImage::from_rgba(image.into_raw(), width, height).expect("valid tray bitmap")
 }
 /// Names the shortcuts another application holds, for the error notice.
 fn conflict_message(values: &[String; 3], failed: &[usize]) -> String {
@@ -380,18 +373,22 @@ impl AutoDecision {
         local_task: Task,
         channel: &Channel,
     ) -> Self {
+        let result = result.and_then(|answer| {
+            answer.validate()?;
+            Ok(answer)
+        });
         let (task, confidence, fallback) = match result {
             Ok(answer) if answer.task == Task::Translate && local_task == Task::ExplainCode => (
                 Task::ExplainCode,
-                Some(answer.confidence),
+                answer.task_probability(),
                 Some("decision-detail-code-guard"),
             ),
-            Ok(answer) if answer.confidence >= threshold => {
-                (answer.task, Some(answer.confidence), None)
+            Ok(answer) if answer.task_probability().is_some_and(|p| p >= threshold) => {
+                (answer.task, answer.task_probability(), None)
             }
             Ok(answer) => (
                 local_task,
-                Some(answer.confidence),
+                answer.task_probability(),
                 Some("decision-detail-low-confidence"),
             ),
             Err(_) => (local_task, None, Some("decision-detail-unavailable")),
@@ -4557,12 +4554,14 @@ fn main() -> anyhow::Result<()> {
         let _ = menu.append(&pause_item);
         let _ = menu.append(&guide_item);
         let _ = menu.append(&quit_item);
-        match TrayIconBuilder::new()
+        let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip(i18n::tr("tray-tooltip"))
-            .with_icon(tray_image())
-            .build()
-        {
+            .with_tooltip(i18n::tr("tray-tooltip"));
+        #[cfg(target_os = "macos")]
+        let tray = tray.with_icon_templated(tray_image());
+        #[cfg(not(target_os = "macos"))]
+        let tray = tray.with_icon(tray_image());
+        match tray.build() {
             Ok(tray) => {
                 println!("tray icon created");
                 // Kept alive for the process lifetime; dropping it removes the icon.
@@ -4774,8 +4773,42 @@ mod automatic_decision_tests {
         Ok(peek_network::Decision {
             task: Task::ExplainCode,
             confidence,
-            probabilities: Default::default(),
+            probabilities: [
+                ("explain_code".into(), confidence),
+                ("translate".into(), (1. - confidence) / 4.),
+                ("define".into(), (1. - confidence) / 4.),
+                ("explain_error".into(), (1. - confidence) / 4.),
+                ("explain".into(), (1. - confidence) / 4.),
+            ]
+            .into(),
         })
+    }
+
+    #[test]
+    fn adoption_uses_task_probability_not_distribution_confidence() {
+        let response = peek_network::Decision {
+            task: Task::Define,
+            confidence: 0.409,
+            probabilities: [
+                ("define".into(), 0.6953),
+                ("explain".into(), 0.1896),
+                ("explain_code".into(), 0.0232),
+                ("explain_error".into(), 0.0041),
+                ("translate".into(), 0.0878),
+            ]
+            .into(),
+        };
+        let decision =
+            AutoDecision::resolved(Ok(response), 0.65, Task::Translate, &Channel::default());
+        assert_eq!(decision.task, Task::Define);
+        assert_eq!(decision.confidence, Some(0.6953));
+        assert!(decision.fallback.is_none());
+        let mut response = self::decision(0.4).unwrap();
+        response.confidence = 0.99;
+        let decision =
+            AutoDecision::resolved(Ok(response), 0.65, Task::Translate, &Channel::default());
+        assert_eq!(decision.task, Task::Translate);
+        assert_eq!(decision.fallback, Some("decision-detail-low-confidence"));
     }
 
     #[test]
@@ -4809,6 +4842,7 @@ mod automatic_decision_tests {
         let channel = Channel::default();
         let mut response = decision(0.99).unwrap();
         response.task = Task::Translate;
+        response.probabilities = [("translate".into(), 0.99), ("explain_code".into(), 0.01)].into();
         let details = AutoDecision::resolved(Ok(response), 0.6, Task::ExplainCode, &channel);
         assert_eq!(details.task, Task::ExplainCode);
         assert_eq!(details.fallback, Some("decision-detail-code-guard"));
