@@ -21,7 +21,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 xcap = "0.9.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.23.2"
+core-graphics = { version = "0.23.2", features = ["elcapitan"] }
 core-foundation = "0.9.4"
 objc2 = "0.6"
 objc2-foundation = "0.3"
