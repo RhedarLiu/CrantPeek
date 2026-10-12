@@ -63,11 +63,17 @@ async function main() {
     return png(layer, 1024).toFile(path.join(iconDir, "Assets", `${name}.png`));
   }));
   await fs.writeFile(path.join(iconDir, "icon.json"), JSON.stringify({
-    "color-space-for-untagged-svg-colors": "srgb",
     fill: {"automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"},
+    "fill-specializations": [{appearance: "dark", value: "system-dark"}],
     groups: names.map((name, index) => ({
       name,
-      layers: [{name, "image-name": `${name}.png`, glass: index !== 1}],
+      layers: [{name, "image-name": `${name}.png`, glass: index !== 1,
+        fill: "automatic",
+        "fill-specializations": [
+          {appearance: "dark", value: {solid: "srgb:0.95686,0.95686,0.96863,1.00000"}},
+          {appearance: "tinted", value: {solid: "srgb:1.00000,1.00000,1.00000,1.00000"}},
+        ],
+      }],
       lighting: "individual",
       shadow: {kind: "neutral", opacity: index === 1 ? 0 : 0.18},
       specular: index !== 1,

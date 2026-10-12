@@ -1,8 +1,13 @@
 {
-  "color-space-for-untagged-svg-colors": "srgb",
   "fill": {
     "automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"
   },
+  "fill-specializations": [
+    {
+      "appearance": "dark",
+      "value": "system-dark"
+    }
+  ],
   "groups": [
     {
       "name": "Lens",
@@ -10,7 +15,22 @@
         {
           "name": "Lens",
           "image-name": "Lens.png",
-          "glass": true
+          "glass": true,
+          "fill": "automatic",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
         }
       ],
       "lighting": "individual",
@@ -30,7 +50,22 @@
         {
           "name": "Text",
           "image-name": "Text.png",
-          "glass": false
+          "glass": false,
+          "fill": "automatic",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
         }
       ],
       "lighting": "individual",
@@ -50,7 +85,22 @@
         {
           "name": "Sparkle",
           "image-name": "Sparkle.png",
-          "glass": true
+          "glass": true,
+          "fill": "automatic",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
         }
       ],
       "lighting": "individual",
