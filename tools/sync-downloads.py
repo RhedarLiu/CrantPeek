@@ -78,15 +78,24 @@ def digest_url(url):
 
 def upload(path, metadata):
     url = public_url(metadata["url"])
-    # Only the official signed-upload headers are forwarded, never the API token.
-    allowed = {"content-type", "x-obs-meta-project-id", "x-obs-acl", "x-obs-callback"}
-    headers = {k: v for k, v in metadata["headers"].items() if k.lower() in allowed}
+    # The storage signature may require headers beyond the documentation's
+    # examples. Forward the returned upload headers, never our API credential.
+    headers = metadata["headers"]
+    if any(k.lower() in {"host", "cookie", "proxy-authorization"} for k in headers):
+        raise SyncError("Unexpected storage upload header")
+    print("Uploading:", path.name, "bytes:", path.stat().st_size,
+          "host:", urllib.parse.urlsplit(url).hostname,
+          "header names:", ",".join(sorted(headers)), flush=True)
     try:
         request = urllib.request.Request(url, data=path.read_bytes(), headers=headers, method="PUT")
         with urllib.request.build_opener(NoRedirect).open(request, timeout=180) as response:
             response.read()
-    except (urllib.error.URLError, ValueError):
-        raise SyncError(f"Upload failed for {path.name}; rerun to request a fresh upload URL") from None
+    except urllib.error.HTTPError as error:
+        raise SyncError(f"Upload failed for {path.name}: HTTP {error.code}") from None
+    except urllib.error.URLError as error:
+        raise SyncError(f"Upload failed for {path.name}: {type(error.reason).__name__}; storage connection failed") from None
+    except (TimeoutError, ValueError):
+        raise SyncError(f"Upload failed for {path.name}: storage transfer timeout or invalid headers") from None
 
 
 def gh(*args):
