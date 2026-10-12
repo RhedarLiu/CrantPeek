@@ -17,6 +17,27 @@
 
 use gpui_kit::{AppContext as _, Window};
 
+/// Accessory apps can acquire a Dock tile before Launch Services refreshes
+/// their bundle icon. Set the image explicitly when starting or pinning.
+pub fn set_application_icon() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+        use objc2_foundation::NSData;
+
+        let data = NSData::with_bytes(include_bytes!("../../../assets/app-icon.png"));
+        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let image: *mut AnyObject = msg_send![image, initWithData: &*data];
+        let Some(image) = Retained::from_raw(image) else {
+            eprintln!("Could not decode the application icon");
+            return;
+        };
+        let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![application, setApplicationIconImage: &*image];
+        println!("Dock application icon set");
+    }
+}
+
 /// Shows and focuses the peek window.
 pub fn show(window: &mut Window) {
     #[cfg(windows)]

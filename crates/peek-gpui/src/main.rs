@@ -2379,6 +2379,7 @@ impl Peek {
             ActivationPolicy::Accessory
         });
         if self.pinned {
+            native_window::set_application_icon();
             // A regular window keeps the title row. Hover is only for a peek.
             set_chrome_locked(true);
             set_chrome_visible(true);
@@ -4507,6 +4508,7 @@ fn main() -> anyhow::Result<()> {
     });
     application.run(move |cx| {
         gpui_kit::init(cx);
+        native_window::set_application_icon();
 
         if let Err(err) = fonts::register(cx) {
             eprintln!("font registration failed: {err}");
