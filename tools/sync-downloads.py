@@ -97,7 +97,7 @@ def upload(path, metadata):
     with tempfile.TemporaryDirectory() as directory:
         result = subprocess.run([
             "curl", "--config", "-", "--silent", "--ipv4", "--globoff", "--proto", "=https",
-            "--connect-timeout", "20", "--max-time", "240", "--request", "PUT",
+            "--connect-timeout", "20", "--max-time", "45" if path.stat().st_size < 1024 else "240", "--request", "PUT",
             "--header", "Expect:", "--upload-file", str(path), "--output", str(Path(directory) / "response"),
             "--write-out", "%{http_code}|%{size_upload}|%{time_connect}",
         ], input=config, capture_output=True, text=True)
@@ -155,7 +155,9 @@ def synchronize():
                 "target_commitish": commit, "release_status": "pre",
             })
         metadata = api(path, token)
-        for name in NAMES:
+        # Verify the small checksum attachment first to distinguish a broken
+        # signed-upload route from slow transfer of executable packages.
+        for name in (NAMES[-1], *NAMES[:-1]):
             attached = next((a for a in metadata.get("assets", []) if a.get("name") == name), None)
             if attached:
                 if digest_url(attached["browser_download_url"]) != hashes[name]:
