@@ -310,13 +310,16 @@ channels-reasoning-high = High
 channels-reasoning-max = Max
 channels-reasoning-hint = Off is recommended for quick translation.
 
-channels-quick = Quick translation
+channels-quick = Call order
+channels-quick-help =
+    Translation-only channels are used in Translate mode.
+    Other modes automatically skip these channels.
 channels-quick-hint = Try in order; use the next service on failure. Supports translation services and LLMs.
 channels-followup = Follow-up
 channels-add-quick = Add channel
 channels-up = Move up
 channels-down = Move down
-channels-remove-quick = Remove from quick translation
+channels-remove-quick = Remove from call order
 
 status-config-save-error = Could not save settings: { $error }
 
@@ -342,7 +345,7 @@ language-de = German
 language-es = Spanish
 welcome-title = Welcome to Crant Peek
 welcome-intro = Select text to look up words, translate or explain code. Read, leave, or continue with a follow-up.
-welcome-channels = Add a channel in Settings, order Quick Translation channels, and choose a follow-up LLM. Automatic mode can use a separate decision model.
+welcome-channels = Add a channel in Settings, arrange the channel call order, and choose a follow-up LLM. Automatic mode can use a separate decision model.
 welcome-shortcuts = View or change shortcuts in Settings. Enter submits; Shift + Enter inserts a newline. Use the tray for Settings, screenshots or pausing shortcuts.
 welcome-macos = macOS: grant Accessibility, Input Monitoring and Screen Recording from the Permissions page.
 welcome-windows = Windows: screenshot OCR needs language packs; reading elevated applications may require matching permissions.

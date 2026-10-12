@@ -13,6 +13,7 @@ gpui_kit::assets::icon_assets!(
         BookOpen,
         Bug,
         Cable,
+        CircleQuestionMark,
         Code,
         Copy,
         CornerDownLeft,

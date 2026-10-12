@@ -335,13 +335,16 @@ channels-reasoning-high = 高
 channels-reasoning-max = 最高
 channels-reasoning-hint = 翻译建议关闭思考，以便快速返回。
 
-channels-quick = 快速翻译
+channels-quick = 调用顺序
+channels-quick-help =
+    基础翻译渠道仅在“翻译”模式下调用。
+    其他模式会自动跳过这些渠道。
 channels-quick-hint = 按顺序尝试；请求失败时使用下一个渠道。可添加基础翻译或 LLM。
 channels-followup = 追问
 channels-add-quick = 添加渠道
 channels-up = 上移
 channels-down = 下移
-channels-remove-quick = 从快速翻译移除
+channels-remove-quick = 从调用顺序中移除
 
 status-config-save-error = 配置保存失败：{ $error }
 
@@ -367,7 +370,7 @@ language-de = 德文
 language-es = 西班牙文
 welcome-title = 欢迎使用 Crant Peek
 welcome-intro = 选中文字，用快捷键查词、翻译、解释代码；读完离开，需要时继续追问。
-welcome-channels = 先在设置中添加渠道，再排列快速翻译顺序，并选择追问用的 LLM。自动模式可以另选决策模型。
+welcome-channels = 先在设置中添加渠道，再排列渠道调用顺序，并选择追问用的 LLM。自动模式可以另选决策模型。
 welcome-shortcuts = 快捷键在设置中可查看和修改。Enter 提交，Shift + Enter 换行；托盘菜单可打开设置、截图或暂停快捷入口。
 welcome-macos = macOS：在权限页逐项授予辅助功能、输入监控和屏幕录制权限。
 welcome-windows = Windows：截图 OCR 需要对应语言包，读取管理员应用可能需要相同权限。

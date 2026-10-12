@@ -1424,11 +1424,28 @@ impl Peek {
                 h_flex()
                     .w_full()
                     .items_center()
-                    .child(div().flex_1().child(self.section_label(
-                        i18n::tr("channels-quick"),
-                        self.set,
-                        cx.theme().muted_foreground,
-                    )))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .items_center()
+                            .gap(ui_px(4.))
+                            .child(self.section_label(
+                                i18n::tr("channels-quick"),
+                                self.set,
+                                cx.theme().muted_foreground,
+                            ))
+                            .child(
+                                Button::new("quick-help")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::CircleQuestionMark)
+                                    .w(ui_px(20.))
+                                    .h(ui_px(20.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .tooltip(i18n::tr("channels-quick-help"))
+                                    .accessibility_label(i18n::tr("channels-quick-help")),
+                            ),
+                    )
                     .child(
                         Button::new("quick-add")
                             .ghost()
