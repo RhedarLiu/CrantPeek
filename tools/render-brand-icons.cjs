@@ -62,23 +62,13 @@ async function main() {
     const layer = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" color="#18181b"><g transform="translate(205 205) scale(25.6)" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${artwork[index]}</g></svg>`;
     return png(layer, 1024).toFile(path.join(iconDir, "Assets", `${name}.png`));
   }));
-  const fillVariants = [
-    {value: {solid: "srgb:0.09412,0.09412,0.10588,1.00000"}},
-    {appearance: "dark", value: {solid: "srgb:0.95686,0.95686,0.96863,1.00000"}},
-    {appearance: "tinted", value: {solid: "srgb:1.00000,1.00000,1.00000,1.00000"}},
-  ];
   await fs.writeFile(path.join(iconDir, "icon.json"), JSON.stringify({
     "color-space-for-untagged-svg-colors": "srgb",
     fill: {"automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"},
-    "fill-specializations": [
-      {value: {"automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"}},
-      {appearance: "dark", value: "system-dark"},
-    ],
     groups: names.map((name, index) => ({
       name,
-      layers: [{name, "image-name": `${name}.png`, "fill-specializations": fillVariants, glass: index !== 1}],
+      layers: [{name, "image-name": `${name}.png`, glass: index !== 1}],
       lighting: "individual",
-      "blur-material": 0,
       shadow: {kind: "neutral", opacity: index === 1 ? 0 : 0.18},
       specular: index !== 1,
       translucency: {enabled: index !== 1, value: index === 2 ? 0.15 : 0.08},

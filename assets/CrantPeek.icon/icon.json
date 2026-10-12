@@ -3,17 +3,6 @@
   "fill": {
     "automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"
   },
-  "fill-specializations": [
-    {
-      "value": {
-        "automatic-gradient": "srgb:0.96078,0.96078,0.97647,1.00000"
-      }
-    },
-    {
-      "appearance": "dark",
-      "value": "system-dark"
-    }
-  ],
   "groups": [
     {
       "name": "Lens",
@@ -21,30 +10,10 @@
         {
           "name": "Lens",
           "image-name": "Lens.png",
-          "fill-specializations": [
-            {
-              "value": {
-                "solid": "srgb:0.09412,0.09412,0.10588,1.00000"
-              }
-            },
-            {
-              "appearance": "dark",
-              "value": {
-                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
-              }
-            },
-            {
-              "appearance": "tinted",
-              "value": {
-                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
           "glass": true
         }
       ],
       "lighting": "individual",
-      "blur-material": 0,
       "shadow": {
         "kind": "neutral",
         "opacity": 0.18
@@ -61,30 +30,10 @@
         {
           "name": "Text",
           "image-name": "Text.png",
-          "fill-specializations": [
-            {
-              "value": {
-                "solid": "srgb:0.09412,0.09412,0.10588,1.00000"
-              }
-            },
-            {
-              "appearance": "dark",
-              "value": {
-                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
-              }
-            },
-            {
-              "appearance": "tinted",
-              "value": {
-                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
           "glass": false
         }
       ],
       "lighting": "individual",
-      "blur-material": 0,
       "shadow": {
         "kind": "neutral",
         "opacity": 0
@@ -101,30 +50,10 @@
         {
           "name": "Sparkle",
           "image-name": "Sparkle.png",
-          "fill-specializations": [
-            {
-              "value": {
-                "solid": "srgb:0.09412,0.09412,0.10588,1.00000"
-              }
-            },
-            {
-              "appearance": "dark",
-              "value": {
-                "solid": "srgb:0.95686,0.95686,0.96863,1.00000"
-              }
-            },
-            {
-              "appearance": "tinted",
-              "value": {
-                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
           "glass": true
         }
       ],
       "lighting": "individual",
-      "blur-material": 0,
       "shadow": {
         "kind": "neutral",
         "opacity": 0.18
