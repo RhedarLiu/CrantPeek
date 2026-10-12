@@ -230,6 +230,7 @@ settings-style-literal = 直译
 settings-style-technical = 技术文档
 settings-smart-mode = 智能判断任务
 settings-ocr-auto = 截图识字后自动查询
+settings-screenshot-mode = 截图查询模式
 settings-ocr-auto-hint = 关闭后只在本地识字，点击查询或图片按钮才调用外部服务。
 settings-hide-on-blur = 失焦时自动隐藏
 settings-snip-close-on-copy = 复制文本后关闭截图窗口
@@ -339,7 +340,6 @@ channels-quick = 调用顺序
 channels-quick-help =
     基础翻译渠道仅在“翻译”模式下调用。
     其他模式会自动跳过这些渠道。
-channels-quick-hint = 按顺序尝试；请求失败时使用下一个渠道。可添加基础翻译或 LLM。
 channels-followup = 追问
 channels-add-quick = 添加渠道
 channels-up = 上移

@@ -209,6 +209,7 @@ settings-style-literal = Literal
 settings-style-technical = Technical documentation
 settings-smart-mode = Automatically choose the task
 settings-ocr-auto = Query automatically after OCR
+settings-screenshot-mode = Screenshot query mode
 settings-ocr-auto-hint = Turn off for local-only OCR. External services run only when you click query or image actions.
 settings-hide-on-blur = Hide when focus is lost
 settings-snip-close-on-copy = Close the screenshot window after copying
@@ -314,7 +315,6 @@ channels-quick = Call order
 channels-quick-help =
     Translation-only channels are used in Translate mode.
     Other modes automatically skip these channels.
-channels-quick-hint = Try in order; use the next service on failure. Supports translation services and LLMs.
 channels-followup = Follow-up
 channels-add-quick = Add channel
 channels-up = Move up

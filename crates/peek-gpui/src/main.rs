@@ -346,6 +346,14 @@ const TASK_KEYS: &[&str] = &[
     "task-auto",
 ];
 
+/// Decision results retain their destination and overlay cancellation scope.
+struct RoutedQuery {
+    epoch: u64,
+    text: String,
+    decision: AutoDecision,
+    overlay_cancel: Option<CancellationToken>,
+}
+
 /// The decision used for the current result, never inferred from the answer.
 #[derive(Clone, Debug)]
 struct AutoDecision {
@@ -492,7 +500,7 @@ struct Peek {
     test_tx: std::sync::mpsc::Sender<(String, bool, String)>,
     /// Sends a decided task back from the decision service: the epoch it belongs
     /// to, the text it was decided for, and the task.
-    route_tx: std::sync::mpsc::Sender<(u64, String, AutoDecision)>,
+    route_tx: std::sync::mpsc::Sender<RoutedQuery>,
     /// Bumped whenever a newer query or a stop should discard an in-flight decision.
     decision_epoch: u64,
     auto_decision: Option<AutoDecision>,
@@ -795,13 +803,18 @@ impl Peek {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
-                while let Ok((epoch, text, decision)) = route_rx.try_recv() {
+                while let Ok(RoutedQuery { epoch, text, decision, overlay_cancel }) = route_rx.try_recv() {
                     this.update(cx, |peek, cx| {
                         // A newer query, a stop, or a timeout already moved on.
-                        if epoch != peek.decision_epoch {
+                        if epoch != peek.decision_epoch || overlay_cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
                             return;
                         }
                         peek.decision_cancel = None;
+                        if let Some(cancel) = overlay_cancel {
+                            let started = peek.start_turn(text, false, Some(decision.task), true, cx);
+                            if started { peek.link_overlay_cancel(cancel); }
+                            return;
+                        }
                         let automatic = peek.selected_task(cx).is_none();
                         let started = peek.begin_turn_as(text, false, Some(decision.task), cx);
                         if automatic && started {
@@ -909,10 +922,7 @@ impl Peek {
                                 .update(cx, |peek, cx| {
                                     peek.stop();
                                     peek.overlay = Some(replies);
-                                    let started = peek.begin_isolated(text, cx);
-                                    if started && let Some(transport) = peek.cancel.clone() {
-                                        peek.runtime.spawn(async move { cancel.cancelled().await; transport.cancel(); });
-                                    }
+                                    let started = peek.submit_screenshot(text, cancel, cx);
                                     if !started {
                                         let status = peek.status.clone();
                                         peek.forward_overlay(OverlayEvent::Status(status));
@@ -1268,6 +1278,47 @@ impl Peek {
             self.begin_turn(text, false, cx);
             return;
         }
+        self.request_decision(text, channel, None, cx);
+    }
+
+    fn submit_screenshot(
+        &mut self,
+        text: String,
+        cancel: CancellationToken,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if text.is_empty() || text.len() > peek_core::MAX_INPUT_BYTES {
+            return self.begin_isolated(text, cx);
+        }
+        if self.config.screenshot_task.is_none()
+            && let Some(channel) = self.config.decision_service().cloned()
+        {
+            self.request_decision(text, channel, Some(cancel), cx);
+            return true;
+        }
+        let started = self.begin_isolated(text, cx);
+        if started {
+            self.link_overlay_cancel(cancel);
+        }
+        started
+    }
+
+    fn link_overlay_cancel(&self, cancel: CancellationToken) {
+        if let Some(transport) = self.cancel.clone() {
+            self.runtime.spawn(async move {
+                cancel.cancelled().await;
+                transport.cancel();
+            });
+        }
+    }
+
+    fn request_decision(
+        &mut self,
+        text: String,
+        channel: Channel,
+        overlay_cancel: Option<CancellationToken>,
+        cx: &mut Context<Self>,
+    ) {
         let min_confidence = self.config.decision.min_confidence;
         let client = self.client.clone();
         let tx = self.route_tx.clone();
@@ -1279,9 +1330,16 @@ impl Peek {
         .task;
         // The previous turn is finished first, and this decision gets the epoch
         // that `stop_transport` just published. A later query bumps it again.
-        self.stop();
+        if overlay_cancel.is_some() {
+            self.stop_transport();
+        } else {
+            self.stop();
+        }
         let epoch = self.decision_epoch;
-        let cancel = CancellationToken::new();
+        let cancel = overlay_cancel
+            .as_ref()
+            .map(CancellationToken::child_token)
+            .unwrap_or_default();
         self.decision_cancel = Some(cancel.clone());
         self.busy = true;
         let timeout = std::time::Duration::from_millis(self.config.decision.timeout_ms.max(4000));
@@ -1294,7 +1352,12 @@ impl Peek {
                 .decide(&endpoint, &key, &model, &text, timeout, cancel)
                 .await;
             let decision = AutoDecision::resolved(result, min_confidence, fallback, &channel);
-            let _ = tx.send((epoch, text, decision));
+            let _ = tx.send(RoutedQuery {
+                epoch,
+                text,
+                decision,
+                overlay_cancel,
+            });
         });
     }
 
@@ -1476,12 +1539,6 @@ impl Peek {
                                 },
                             ),
                     ),
-            )
-            .child(
-                div()
-                    .text_size(ui_px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(i18n::tr("channels-quick-hint")),
             )
             .child(
                 v_flex()
@@ -2144,7 +2201,11 @@ impl Peek {
             &self.config.native_language,
             &self.config.preferred_target_language,
         );
-        let manual = self.selected_task(cx);
+        let manual = if isolated {
+            self.config.screenshot_task
+        } else {
+            self.selected_task(cx)
+        };
         let task = manual
             .or(decided)
             .or_else(|| {
@@ -3283,6 +3344,13 @@ impl Peek {
             .button(
                 Button::new(SharedString::from(format!("{id}-value")))
                     .label(label)
+                    .when(matches!(field, Setting::ScreenshotMode), |button| {
+                        button.icon(
+                            settings::task_mode(&current)
+                                .map(Self::task_icon)
+                                .unwrap_or(IconName::Sparkles),
+                        )
+                    })
                     .flex_1(),
             )
             .dropdown_menu(move |mut menu, _, _| {
@@ -3290,6 +3358,10 @@ impl Peek {
                     let entity = entity.clone();
                     menu = menu.item(
                         PopupMenuItem::new(choice_label(label))
+                            .when(matches!(field, Setting::ScreenshotMode), |item| {
+                                let task = settings::task_mode(value);
+                                item.icon(task.map(Self::task_icon).unwrap_or(IconName::Sparkles))
+                            })
                             .checked(value == current)
                             .on_click(move |_, window, cx| {
                                 entity.update(cx, |this, cx| {
@@ -3833,6 +3905,7 @@ impl Peek {
                         .child(self.setting_row(Setting::Style, cx))
                         .child(self.setting_row(Setting::Confidence, cx))
                         .child(self.setting_row(Setting::Timeout, cx))
+                        .child(self.setting_row(Setting::ScreenshotMode, cx))
                         .child(self.preference_toggle("settings-ocr-auto", self.config.ocr_auto_query, |config, value| config.ocr_auto_query = value, cx))
                         .child(self.quick_channel_list(cx))
                         .child(self.picker_row(

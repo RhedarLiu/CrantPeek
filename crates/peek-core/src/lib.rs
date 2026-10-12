@@ -551,6 +551,8 @@ pub struct Config {
     pub hide_on_blur: bool,
     pub smart_mode: bool,
     pub ocr_auto_query: bool,
+    /// None means screenshot queries use automatic task selection.
+    pub screenshot_task: Option<Task>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -583,6 +585,7 @@ impl Default for Config {
             hide_on_blur: true,
             smart_mode: true,
             ocr_auto_query: true,
+            screenshot_task: None,
         }
     }
 }
@@ -1192,6 +1195,20 @@ pub fn recognize(image: &image::RgbaImage) -> Result<String, String> {
         assert!(!json.contains("api_key"));
         let restored: Config = serde_json::from_str(&json).unwrap();
         restored.validate().unwrap();
+    }
+    #[test]
+    fn legacy_configs_default_screenshots_to_auto_and_preserve_explicit_modes() {
+        let legacy: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.screenshot_task, None);
+        for mode in Task::ALL.into_iter().map(Some).chain([None]) {
+            let config = Config {
+                screenshot_task: mode,
+                ..Config::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            let restored: Config = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.screenshot_task, mode);
+        }
     }
     #[test]
     fn content_is_delimited_and_cannot_close_its_own_delimiter() {

@@ -1,5 +1,14 @@
 //! Editable choices shared by the settings menu and persisted configuration.
-use peek_core::Config;
+use peek_core::{Config, Task};
+
+pub fn task_mode(value: &str) -> Option<Task> {
+    Setting::ScreenshotMode
+        .choices()
+        .iter()
+        .position(|(key, _)| *key == value)
+        .and_then(|index| Task::ALL.get(index))
+        .copied()
+}
 
 #[derive(Clone, Copy)]
 pub enum Setting {
@@ -11,6 +20,7 @@ pub enum Setting {
     Style,
     Confidence,
     Timeout,
+    ScreenshotMode,
 }
 impl Setting {
     pub fn key(self) -> &'static str {
@@ -23,10 +33,19 @@ impl Setting {
             Self::Style => "settings-style",
             Self::Confidence => "settings-decision-threshold",
             Self::Timeout => "settings-decision-wait",
+            Self::ScreenshotMode => "settings-screenshot-mode",
         }
     }
     pub fn choices(self) -> &'static [(&'static str, &'static str)] {
         match self {
+            Self::ScreenshotMode => &[
+                ("translate", "task-translate"),
+                ("define", "task-define"),
+                ("explain_code", "task-explain-code"),
+                ("explain_error", "task-explain-error"),
+                ("explain", "task-explain"),
+                ("auto", "task-auto"),
+            ],
             Self::Theme => &[
                 ("system", "settings-theme-system"),
                 ("light", "settings-theme-light"),
@@ -85,6 +104,15 @@ impl Setting {
             Self::Style => c.translation_style.clone(),
             Self::Confidence => c.decision.min_confidence.to_string(),
             Self::Timeout => c.decision.timeout_ms.to_string(),
+            Self::ScreenshotMode => c
+                .screenshot_task
+                .map(|task| {
+                    Self::ScreenshotMode.choices()
+                        [Task::ALL.iter().position(|t| *t == task).unwrap()]
+                    .0
+                    .to_owned()
+                })
+                .unwrap_or_else(|| "auto".into()),
         }
     }
     pub fn assign(self, c: &mut Config, value: &str) {
@@ -97,6 +125,7 @@ impl Setting {
             Self::Style => c.translation_style = value.into(),
             Self::Confidence => c.decision.min_confidence = value.parse().unwrap_or(0.6),
             Self::Timeout => c.decision.timeout_ms = value.parse().unwrap_or(8000),
+            Self::ScreenshotMode => c.screenshot_task = task_mode(value),
         }
     }
 }
