@@ -24,10 +24,8 @@ mkdir -p "$OUTPUT"
 if xcrun --find actool >/dev/null 2>&1; then
   xcrun xcodebuild -version
   xcrun actool "$SOURCE" --compile "$OUTPUT" \
-    --output-format human-readable-text --notices --warnings --errors \
     --output-partial-info-plist "$OUTPUT/icon-info.plist" \
-    --app-icon CrantPeek --include-all-app-icons --enable-on-demand-resources NO \
-    --development-region en --target-device mac \
+    --app-icon CrantPeek --target-device mac \
     --minimum-deployment-target 26.0 --platform macosx
   test -s "$OUTPUT/Assets.car"
   printf '%s\n' "$DIGEST" > "$OUTPUT/source.sha256"
