@@ -23,24 +23,28 @@ pub fn set_application_icon() {
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
-        use objc2_foundation::NSData;
+        use objc2_foundation::{NSData, NSString};
 
         let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let native_icon = std::env::current_exe()
-            .ok()
-            .and_then(|path| {
-                path.parent()
-                    .and_then(std::path::Path::parent)
-                    .map(|contents| contents.join("Resources/Assets.car"))
-            })
-            .is_some_and(|path| path.is_file());
-        if native_icon {
-            // A custom PNG overrides the system's native layered icon, including
-            // its dark/tinted appearances. Nil restores the bundle icon instead.
-            let _: () =
-                msg_send![application, setApplicationIconImage: std::ptr::null::<AnyObject>()];
-            println!("Dock uses the native layered application icon");
-            return;
+        let bundle = std::env::current_exe().ok().and_then(|path| {
+            path.parent()
+                .and_then(std::path::Path::parent)
+                .and_then(std::path::Path::parent)
+                .map(std::path::Path::to_path_buf)
+        });
+        if let Some(bundle) = bundle.filter(|path| path.join("Contents/Info.plist").is_file()) {
+            // Resetting applicationIconImage to nil can restore AppKit's generic
+            // placeholder when an accessory app becomes a regular Dock app.
+            // Ask Icon Services for the bundle icon so native layered assets are
+            // resolved by macOS rather than replaced with our embedded PNG.
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let path = NSString::from_str(&bundle.to_string_lossy());
+            let image: *mut AnyObject = msg_send![workspace, iconForFile: &*path];
+            if !image.is_null() {
+                let _: () = msg_send![application, setApplicationIconImage: image];
+                println!("Dock application icon loaded from bundle");
+                return;
+            }
         }
         let data = NSData::with_bytes(include_bytes!("../../../assets/app-icon.png"));
         let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
