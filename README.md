@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/app-icon.png" width="96" height="96" alt="Crant Peek">
+
 # Crant Peek
 
 **快捷查询，即用即走。**

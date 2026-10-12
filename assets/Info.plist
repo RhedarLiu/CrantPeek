@@ -6,6 +6,7 @@
 <key>CFBundleIdentifier</key><string>dev.crant.peek</string>
 <key>CFBundleExecutable</key><string>CrantPeek</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>CrantPeek.icns</string>
 <key>CFBundleShortVersionString</key><string>0.1.1</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSUIElement</key><true/>

@@ -17,6 +17,7 @@ OutputBaseFilename=Crant-Peek-Windows-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\app-icon.ico
 UninstallDisplayIcon={app}\CrantPeek.exe
 CloseApplications=yes
 CloseApplicationsFilter=CrantPeek.exe

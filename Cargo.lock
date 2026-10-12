@@ -5716,6 +5716,7 @@ name = "peek-gpui"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "global-hotkey",
  "gpui-kit",
  "image",

@@ -53,6 +53,7 @@ fi
 /usr/bin/plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$APP/Contents/Info.plist"
 
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+cp "$ROOT/assets/app-icon.icns" "$APP/Contents/Resources/CrantPeek.icns"
 if [[ "$BUNDLE_ID" != "dev.crant.peek" || "$EXEC_NAME" != "CrantPeek" ]]; then
   /usr/bin/plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$APP/Contents/Info.plist"
   /usr/bin/plutil -replace CFBundleExecutable -string "$EXEC_NAME" "$APP/Contents/Info.plist"

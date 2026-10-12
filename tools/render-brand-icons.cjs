@@ -1,4 +1,4 @@
-// One SVG defines the website, favicon and both platform tray assets.
+// One SVG defines the website, tray, Dock and Windows application icons.
 // Requires sharp: npm install --no-save sharp, then node tools/render-brand-icons.cjs.
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -13,11 +13,42 @@ async function main() {
   const windows = white.replace(/(<svg[^>]*>)/, '$1<defs><filter id="tray-shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0" stdDeviation=".35" flood-color="#000" flood-opacity=".85"/></filter></defs>')
     .replace('<g transform=', '<g filter="url(#tray-shadow)" transform=');
   const png = (svg, size) => sharp(Buffer.from(svg), {density: 192}).resize(size, size).png({compressionLevel: 9});
+  const application = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" color="#18181b" fill="none"><rect x="88" y="88" width="848" height="848" rx="190" fill="#fafafa" stroke="#dedee3" stroke-width="10"/><g transform="translate(205 205) scale(25.6)">${inner}</g></svg>`;
+  const sizes = [16, 24, 32, 48, 64, 128, 256, 512, 1024];
+  const bitmaps = new Map(await Promise.all(sizes.map(async size => [size, await png(application, size).toBuffer()])));
+  // ICO entries contain PNG images, including 256 px for Explorer's large view.
+  const icoHeader = Buffer.alloc(6 + 16 * 7);
+  icoHeader.writeUInt16LE(1, 2);
+  icoHeader.writeUInt16LE(7, 4);
+  let offset = icoHeader.length;
+  sizes.slice(0, 7).forEach((size, i) => {
+    const entry = 6 + i * 16;
+    icoHeader[entry] = icoHeader[entry + 1] = size === 256 ? 0 : size;
+    icoHeader.writeUInt16LE(1, entry + 4);
+    icoHeader.writeUInt16LE(32, entry + 6);
+    icoHeader.writeUInt32LE(bitmaps.get(size).length, entry + 8);
+    icoHeader.writeUInt32LE(offset, entry + 12);
+    offset += bitmaps.get(size).length;
+  });
+  const ico = Buffer.concat([icoHeader, ...sizes.slice(0, 7).map(size => bitmaps.get(size))]);
+  const chunks = [['icp4', 16], ['icp5', 32], ['icp6', 64], ['ic07', 128], ['ic08', 256], ['ic09', 512], ['ic10', 1024], ['ic11', 32], ['ic12', 64], ['ic13', 256], ['ic14', 512]].map(([type, size]) => {
+    const header = Buffer.alloc(8);
+    header.write(type);
+    header.writeUInt32BE(8 + bitmaps.get(size).length, 4);
+    return Buffer.concat([header, bitmaps.get(size)]);
+  });
+  const icnsHeader = Buffer.alloc(8);
+  icnsHeader.write('icns');
+  icnsHeader.writeUInt32BE(8 + chunks.reduce((sum, chunk) => sum + chunk.length, 0), 4);
   await Promise.all([
     fs.writeFile(path.join(root, "website/public/assets/logo.svg"), source),
     fs.writeFile(path.join(root, "website/public/assets/favicon.svg"), favicon),
     png(source, 48).toFile(path.join(root, "assets/tray-query.png")),
     png(windows, 48).toFile(path.join(root, "assets/tray-query-windows.png")),
+    fs.writeFile(path.join(root, "assets/app-icon.svg"), application + '\n'),
+    fs.writeFile(path.join(root, "assets/app-icon.png"), bitmaps.get(1024)),
+    fs.writeFile(path.join(root, "assets/app-icon.ico"), ico),
+    fs.writeFile(path.join(root, "assets/app-icon.icns"), Buffer.concat([icnsHeader, ...chunks])),
   ]);
   // Large website glyphs and actual-size tray glyphs on light/dark surfaces.
   const layers = await Promise.all([source, white, source, white].map((svg, i) => png(svg, i < 2 ? 64 : 18).toBuffer()));
