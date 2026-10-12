@@ -86,16 +86,24 @@ def upload(path, metadata):
     print("Uploading:", path.name, "bytes:", path.stat().st_size,
           "host:", urllib.parse.urlsplit(url).hostname,
           "header names:", ",".join(sorted(headers)), flush=True)
-    try:
-        request = urllib.request.Request(url, data=path.read_bytes(), headers=headers, method="PUT")
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=180) as response:
-            response.read()
-    except urllib.error.HTTPError as error:
-        raise SyncError(f"Upload failed for {path.name}: HTTP {error.code}") from None
-    except urllib.error.URLError as error:
-        raise SyncError(f"Upload failed for {path.name}: {type(error.reason).__name__}; storage connection failed") from None
-    except (TimeoutError, ValueError):
-        raise SyncError(f"Upload failed for {path.name}: storage transfer timeout or invalid headers") from None
+    def quoted(value):
+        if not isinstance(value, str) or any(c in value for c in "\r\n\0"):
+            raise SyncError("Invalid signed upload configuration")
+        return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    # IPv4 avoids unreachable IPv6 storage routes. Stream the file rather than
+    # buffering it; config arrives via stdin so signatures do not enter argv.
+    config = "url = " + quoted(url) + "\n" + "".join(
+        "header = " + quoted(key + ": " + value) + "\n" for key, value in headers.items())
+    with tempfile.TemporaryDirectory() as directory:
+        result = subprocess.run([
+            "curl", "--config", "-", "--silent", "--ipv4", "--globoff", "--proto", "=https",
+            "--connect-timeout", "20", "--max-time", "240", "--request", "PUT",
+            "--header", "Expect:", "--upload-file", str(path), "--output", str(Path(directory) / "response"),
+            "--write-out", "%{http_code}",
+        ], input=config, capture_output=True, text=True)
+    code = result.stdout.strip()
+    if result.returncode or not re.fullmatch(r"2\d\d", code):
+        raise SyncError(f"Upload failed for {path.name}: curl exit {result.returncode}, HTTP {code if code.isdigit() else 'unknown'}")
 
 
 def gh(*args):

@@ -21,15 +21,16 @@ class SyncTests(unittest.TestCase):
             metadata = {"url": "https://storage.myhuaweicloud.com/upload?signed=example",
                         "headers": {"Content-Type": "application/zip", "x-obs-date": "example",
                                     "Authorization": "OBS storage-signature"}}
-            opener = MagicMock()
-            with patch.object(sync.urllib.request, "build_opener", return_value=opener):
+            result = MagicMock(returncode=0, stdout="200")
+            with patch.object(sync.subprocess, "run", return_value=result) as run:
                 sync.upload(path, metadata)
-            request = opener.open.call_args.args[0]
-            headers = {key.lower(): value for key, value in request.header_items()}
-            self.assertEqual(headers["authorization"], "OBS storage-signature")
-            self.assertEqual(headers["x-obs-date"], "example")
-            self.assertEqual(request.data, b"archive")
-            self.assertEqual(request.method, "PUT")
+            args = run.call_args.args[0]
+            config = run.call_args.kwargs["input"]
+            self.assertIn('header = "Authorization: OBS storage-signature"', config)
+            self.assertIn('header = "x-obs-date: example"', config)
+            self.assertNotIn("OBS storage-signature", " ".join(args))
+            self.assertIn("--ipv4", args)
+            self.assertIn("PUT", args)
 
     def test_private_and_foreign_urls_are_rejected(self):
         for url in ("http://gitcode.com/a", "https://gitcode.com.evil.test/a",

@@ -31,6 +31,8 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+      - name: Check public storage connection
+        run: curl --ipv4 --silent --output /dev/null --write-out 'Storage HTTP %{http_code}\n' --connect-timeout 15 --max-time 20 https://file.gitcode.com/
       - name: Synchronize formal release and verify attachments
         env:
           GH_TOKEN: ${{ github.token }}
