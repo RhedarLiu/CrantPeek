@@ -20,6 +20,7 @@ mod assets;
 mod fonts;
 mod motion;
 mod native_window;
+mod panel_surface;
 mod settings;
 mod shortcuts;
 mod snip;
@@ -322,9 +323,9 @@ fn pointer_in_chrome_zone(position: Point<Pixels>, window: &Window) -> bool {
         0.
     };
     chrome_zone_contains(
-        position.x.as_f32() / scaled(1.),
-        position.y.as_f32() / scaled(1.),
-        width / scaled(1.),
+        position.x.as_f32() / scaled(1.) - panel_surface::INSET,
+        position.y.as_f32() / scaled(1.) - panel_surface::INSET,
+        width / scaled(1.) - 2. * panel_surface::INSET,
         input_top / scaled(1.),
         chrome_visible(),
     )
@@ -2716,6 +2717,8 @@ impl Render for Peek {
                 fallback
             });
         }
+        // The shadow lives outside the content; keep the original content size.
+        height += scaled(2. * panel_surface::INSET);
         // A settings page may be long, especially with increased UI zoom.
         // Keep the native window on its display; the settings stack scrolls.
         if let Some(display) = window.display(cx) {
@@ -2736,7 +2739,7 @@ impl Render for Peek {
             let entity = cx.entity();
             native_window::resize_panel(
                 window,
-                size(ui_px(PANEL_WIDTH), px(height)),
+                size(ui_px(PANEL_WIDTH + 2. * panel_surface::INSET), px(height)),
                 chrome_offset - self.chrome_offset,
                 cx,
                 move |window, cx| {
@@ -2752,13 +2755,14 @@ impl Render for Peek {
         }
         // The pointer zone follows the frame actually painted, not the request.
         set_chrome_in_frame(!self.settings && self.chrome_offset > 0.);
-        if self.onboarding {
-            return self.welcome_page(cx);
-        }
-        if self.settings {
-            return self.settings_page(cx).into_any_element();
-        }
-        self.query_page(cx).into_any_element()
+        let page = if self.onboarding {
+            self.welcome_page(cx)
+        } else if self.settings {
+            self.settings_page(cx)
+        } else {
+            self.query_page(cx)
+        };
+        panel_surface::wrap(page, cx)
     }
 }
 
@@ -3045,7 +3049,16 @@ impl Peek {
                                         .child("Crant Peek"),
                                 ),
                         )
-                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id("panel-drag-space")
+                                .flex_1()
+                                .h_full()
+                                .window_control_area(WindowControlArea::Drag)
+                                .on_mouse_down(MouseButton::Left, |_, window, _| {
+                                    window.start_window_move();
+                                }),
+                        )
                         .child(
                             // Which channel answers a plain translation. Only
                             // channels that can translate are listed, and the same
@@ -4232,6 +4245,11 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     let published: std::rc::Rc<std::cell::RefCell<Option<Entity<Peek>>>> = Default::default();
     let publish_target = published.clone();
     let window = cx.open_window(preview_size, |window, cx| {
+        window.set_background_appearance(if page == "snip" {
+            WindowBackgroundAppearance::Opaque
+        } else {
+            WindowBackgroundAppearance::Transparent
+        });
         if let Err(err) = fonts::register(cx) {
             eprintln!("font registration failed: {err}");
         }
@@ -4356,7 +4374,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             let menu = task_menu::preview(view, window, cx);
             return cx.new(|cx| Root::new(menu, window, cx).bg(transparent_black()));
         }
-        cx.new(|cx| Root::new(view, window, cx))
+        cx.new(|cx| Root::new(view, window, cx).bg(transparent_black()))
     })?;
 
     // A few turns: settings measures its children after the first paint and
@@ -4592,8 +4610,8 @@ fn window_options() -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(ui_px(320.), ui_px(200.)),
             size: size(
-                ui_px(PANEL_WIDTH),
-                ui_px(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.),
+                ui_px(PANEL_WIDTH + 2. * panel_surface::INSET),
+                ui_px(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2. + 2. * panel_surface::INSET),
             ),
         })),
         titlebar: Some(TitlebarOptions {
@@ -4604,6 +4622,7 @@ fn window_options() -> WindowOptions {
         // Documented as "appears above all other windows"; also the branch that
         // sets CanJoinAllSpaces, which a globally summoned popup needs.
         kind: WindowKind::PopUp,
+        window_background: WindowBackgroundAppearance::Transparent,
         // Created hidden: the panel only appears when summoned.
         show: false,
         focus: true,
@@ -4750,7 +4769,7 @@ fn main() -> anyhow::Result<()> {
 
         let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
             let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
-            cx.new(|cx| Root::new(view, window, cx))
+            cx.new(|cx| Root::new(view, window, cx).bg(transparent_black()))
         }) {
             Ok((handle, _)) => handle,
             Err(err) => {

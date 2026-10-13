@@ -73,6 +73,13 @@ pub fn prepare_panel(window: &mut Window) {
             use objc2::{msg_send, runtime::AnyObject};
             let native: *mut AnyObject = msg_send![view as *mut AnyObject, window];
             if !native.is_null() {
+                // Remove the native frame around the transparent shadow inset.
+                // Changing the style mask resigns first responder, so do this
+                // only once at creation, never during later summons.
+                let style: usize = msg_send![native, styleMask];
+                if style != 0 {
+                    let _: () = msg_send![native, setStyleMask: 0usize];
+                }
                 let _: () = msg_send![native, setHasShadow: false];
                 let _: () = msg_send![native, invalidateShadow];
             }
