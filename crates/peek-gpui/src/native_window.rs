@@ -176,6 +176,26 @@ pub fn pointer_position(window: &Window) -> Option<gpui_kit::Point<gpui_kit::Pix
     }
 }
 
+/// Read the real button state even while native title-bar dragging consumes
+/// events or releases the mouse outside the view. No event hook is installed.
+pub fn left_button_down() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::{class, msg_send};
+        let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
+        buttons & 1 != 0
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+        GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        false
+    }
+}
+
 /// Applies a panel size and toolbar offset before publishing the new layout.
 /// The native operation runs outside an App borrow, so synchronous AppKit
 /// resize callbacks can update GPUI's viewport and Metal drawable normally.

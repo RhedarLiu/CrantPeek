@@ -1230,6 +1230,39 @@ impl Peek {
                     })
                     .ok();
                 });
+                cx.background_executor().timer(Duration::from_millis(310)).await;
+                let before_drag = cx.update_window(panel_handle, |_, window, cx| {
+                    this.update(cx, |peek, _| (peek.chrome_offset, window.bounds().size.height))
+                }).ok().and_then(Result::ok);
+                for (x, y) in [(-200., -100.), (900., 800.), (20., -20.)] {
+                    let _ = cx.update_window(panel_handle, |_, window, cx| {
+                        this.update(cx, |peek, cx| {
+                            peek.update_chrome_hover_with_button(
+                                point(ui_px(x), ui_px(y) + px(peek.chrome_offset)), true, window, cx,
+                            );
+                            passed &= chrome_visible();
+                        }).ok();
+                    });
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                }
+                let _ = cx.update_window(panel_handle, |_, window, cx| {
+                    this.update(cx, |peek, cx| {
+                        passed &= before_drag == Some((peek.chrome_offset, window.bounds().size.height));
+                        // Release over the title row: stay open.
+                        peek.update_chrome_hover_with_button(
+                            point(ui_px(20.), ui_px(-20.) + px(peek.chrome_offset)), false, window, cx,
+                        );
+                        passed &= chrome_visible();
+                        // Release outside: dismiss even without another move event.
+                        peek.update_chrome_hover_with_button(
+                            point(ui_px(900.), ui_px(800.) + px(peek.chrome_offset)), false, window, cx,
+                        );
+                        passed &= !chrome_visible();
+                    }).ok();
+                });
+                cx.background_executor().timer(Duration::from_millis(310)).await;
+                passed &= this.update(cx, |peek, _| peek.chrome_offset == 0.).unwrap_or(false);
+                println!("[drag-test] held geometry steady and both release positions checked: passed={passed}");
                 println!("[hover-test] passed={passed}");
                 cx.update(quit_now);
             })
@@ -1247,7 +1280,27 @@ impl Peek {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pinned
+        self.update_chrome_hover_with_button(
+            position,
+            native_window::left_button_down(),
+            window,
+            cx,
+        );
+    }
+
+    fn update_chrome_hover_with_button(
+        &mut self,
+        position: Point<Pixels>,
+        button_down: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Keep the revealed geometry steady throughout native dragging. Also
+        // avoid opening chrome in the middle of selecting text with the mouse.
+        // Leave the pointer history untouched until release so the final sample
+        // is evaluated even if the cursor stops moving outside the window.
+        if button_down
+            || self.pinned
             || self.task_menu_open
             || self.settings
             || self.onboarding
@@ -3110,7 +3163,11 @@ impl Peek {
                 // that while the follow-up is focused resizes the window under
                 // the caret and macOS drops the Chinese input session.
                 let follow_up_focused = this.follow_up.read(cx).focus_handle(cx).is_focused(window);
-                if !this.pinned && chrome_visible() && !follow_up_focused {
+                if !this.pinned
+                    && chrome_visible()
+                    && !follow_up_focused
+                    && !native_window::left_button_down()
+                {
                     if let Some(position) = native_window::pointer_position(window) {
                         this.chrome_pointer =
                             Some(point(position.x, position.y - px(this.chrome_offset)));
