@@ -119,6 +119,63 @@ pub fn is_visible(window: &Window) -> bool {
     window.is_visible()
 }
 
+/// Cursor position in logical content coordinates, including positions just
+/// outside the native window. Reading it requires no global event hook and
+/// does not intercept input belonging to another application.
+pub fn pointer_position(window: &Window) -> Option<gpui_kit::Point<gpui_kit::Pixels>> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::{
+            class, msg_send,
+            runtime::{AnyObject, Bool},
+        };
+        use objc2_foundation::{NSPoint, NSRect};
+        let view = macos_view(window)? as *mut AnyObject;
+        let native: *mut AnyObject = msg_send![view, window];
+        if native.is_null() {
+            return None;
+        }
+        let screen: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        let in_window: NSPoint = msg_send![native, convertPointFromScreen: screen];
+        let in_view: NSPoint =
+            msg_send![view, convertPoint: in_window, fromView: std::ptr::null::<AnyObject>()];
+        let bounds: NSRect = msg_send![view, bounds];
+        let flipped: Bool = msg_send![view, isFlipped];
+        let y = if flipped.as_bool() {
+            in_view.y
+        } else {
+            bounds.size.height - in_view.y
+        };
+        Some(gpui_kit::point(
+            gpui_kit::px(in_view.x as f32),
+            gpui_kit::px(y as f32),
+        ))
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::{
+            Foundation::{HWND, POINT},
+            Graphics::Gdi::ScreenToClient,
+            UI::WindowsAndMessaging::GetCursorPos,
+        };
+        let mut cursor = POINT::default();
+        GetCursorPos(&mut cursor).ok()?;
+        if !ScreenToClient(HWND(hwnd(window)?), &mut cursor).as_bool() {
+            return None;
+        }
+        let scale = window.scale_factor();
+        Some(gpui_kit::point(
+            gpui_kit::px(cursor.x as f32 / scale),
+            gpui_kit::px(cursor.y as f32 / scale),
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = window;
+        None
+    }
+}
+
 /// Applies a panel size and toolbar offset before publishing the new layout.
 /// The native operation runs outside an App borrow, so synchronous AppKit
 /// resize callbacks can update GPUI's viewport and Metal drawable normally.

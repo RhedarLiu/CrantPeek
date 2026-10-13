@@ -226,6 +226,16 @@ thread_local! {
 /// How long a show or hide is allowed to settle before the pointer may flip it.
 const CHROME_SETTLE: Duration = Duration::from_millis(240);
 
+fn track_native_hover() -> bool {
+    [
+        "PEEK_RENDER",
+        "PEEK_CHROME_SELFTEST",
+        "PEEK_CHROME_HOVER_SELFTEST",
+    ]
+    .iter()
+    .all(|name| std::env::var(name).is_err())
+}
+
 /// Whether the title row is showing.
 fn chrome_visible() -> bool {
     CHROME_VISIBLE.with(std::cell::Cell::get)
@@ -284,19 +294,21 @@ fn shown_recently() -> bool {
     })
 }
 
-/// Right half of the top of the input box, in window coordinates.
+/// The input's upper-right corner plus the strip above it where the toolbar
+/// expands, including that strip while it is outside the hidden-toolbar frame.
 ///
 /// `input_top` is where that box starts in the frame that is actually on
 /// screen. `open` widens the box so a pointer sitting on the boundary does not
 /// hide the row and immediately show it again. The panel's height is not an
 /// input: a long result must not grow the corner.
 fn chrome_zone_contains(x: f32, y: f32, width: f32, input_top: f32, open: bool) -> bool {
-    if width <= 1. {
+    if width <= 1. || x < 0. || x >= width {
         return false;
     }
-    // The title row sits above the input once the frame includes it. The whole
-    // row stays live, including the buttons on the left of the corner.
-    if open && input_top > 0. && y <= input_top {
+    // This screen-space strip stays fixed when the frame grows upward. When
+    // closed, its y coordinates are negative: it is just outside the window.
+    let toolbar_top = input_top - PANEL_CHROME_HEIGHT - if open { 6. } else { 0. };
+    if y >= toolbar_top && y < input_top {
         return true;
     }
     let mut left = width * 0.5;
@@ -540,6 +552,9 @@ struct Peek {
     /// Vertical space currently added above the input by the toolbar.
     chrome_offset: f32,
     chrome_reveal: motion::Reveal,
+    /// Last pointer position relative to the stationary input, not the moving
+    /// top edge. Typing can hide the toolbar until the pointer actually moves.
+    chrome_pointer: Option<Point<Pixels>>,
     geometry_pending: bool,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
@@ -771,6 +786,7 @@ impl Peek {
             dialog_measured: 0.,
             chrome_offset: 0.,
             chrome_reveal: motion::Reveal::default(),
+            chrome_pointer: None,
             geometry_pending: false,
             pinned: false,
             overlay: None,
@@ -807,6 +823,17 @@ impl Peek {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
+                if track_native_hover() {
+                    let _ = cx.update_window(panel_handle, |_, window, cx| {
+                        if !window.is_visible() {
+                            let _ = this.update(cx, |peek, _| peek.chrome_pointer = None);
+                        } else if window.is_window_active()
+                            && let Some(position) = native_window::pointer_position(window)
+                        {
+                            let _ = this.update(cx, |peek, cx| peek.update_chrome_hover(position, window, cx));
+                        }
+                    });
+                }
                 while let Ok(RoutedQuery { epoch, text, decision, overlay_cancel }) = route_rx.try_recv() {
                     this.update(cx, |peek, cx| {
                         // A newer query, a stop, or a timeout already moved on.
@@ -1123,7 +1150,121 @@ impl Peek {
             }).detach();
         }
 
+        // Exercise the outside strip using content-space positions in a real
+        // window, without moving the user's cursor or submitting a query.
+        if std::env::var("PEEK_CHROME_HOVER_SELFTEST").is_ok() {
+            cx.spawn(async move |this, cx| {
+                // Startup creates the panel hidden; show it after that finishes.
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                cx.update_window(panel_handle, |_, window, _| {
+                    show_panel(window);
+                    assert!(native_window::pointer_position(window).is_some());
+                })
+                .ok();
+                cx.background_executor()
+                    .timer(Duration::from_millis(310))
+                    .await;
+                let mut passed = cx
+                    .update_window(panel_handle, |_, window, _| {
+                        println!(
+                            "[hover-test] native window visible={} active={}",
+                            window.is_visible(),
+                            window.is_window_active()
+                        );
+                        window.is_visible() && window.is_window_active()
+                    })
+                    .unwrap_or(false);
+                for (label, x, y, expected) in [
+                    ("above-left", 20., -20., true),
+                    ("stationary-above", 20., -20., true),
+                    ("too-far-above", 20., -50., false),
+                    ("above-right", 460., -20., true),
+                    ("outside-right", 490., -20., false),
+                    ("input-corner", 400., 10., true),
+                ] {
+                    let _ = cx.update_window(panel_handle, |_, window, cx| {
+                        this.update(cx, |peek, cx| {
+                            let position = point(ui_px(x), ui_px(y) + px(peek.chrome_offset));
+                            peek.update_chrome_hover(position, window, cx);
+                        })
+                        .ok();
+                    });
+                    cx.background_executor()
+                        .timer(Duration::from_millis(310))
+                        .await;
+                    let actual = chrome_visible();
+                    passed &= actual == expected;
+                    println!("[hover-test] {label}: visible={actual} expected={expected}");
+                }
+                this.update(cx, |_, cx| {
+                    set_chrome_visible(false);
+                    cx.notify();
+                })
+                .ok();
+                cx.background_executor()
+                    .timer(Duration::from_millis(310))
+                    .await;
+                let _ = cx.update_window(panel_handle, |_, window, cx| {
+                    this.update(cx, |peek, cx| {
+                        // The same stationary cursor must not undo a keyboard
+                        // dismissal; only a fresh movement can reopen the row.
+                        println!(
+                            "[hover-test] keyboard hidden={} offset={} last={:?} settling={}",
+                            !chrome_visible(),
+                            peek.chrome_offset,
+                            peek.chrome_pointer,
+                            chrome_settling()
+                        );
+                        peek.update_chrome_hover(point(ui_px(400.), ui_px(10.)), window, cx);
+                        println!("[hover-test] stationary hidden={}", !chrome_visible());
+                        passed &= !chrome_visible();
+                        peek.update_chrome_hover(
+                            point(ui_px(400.), ui_px(13.) + px(peek.chrome_offset)),
+                            window,
+                            cx,
+                        );
+                        println!("[hover-test] moved open={}", chrome_visible());
+                        passed &= chrome_visible();
+                    })
+                    .ok();
+                });
+                println!("[hover-test] passed={passed}");
+                cx.update(quit_now);
+            })
+            .detach();
+        }
+
         this
+    }
+
+    /// Accepts local events and outside-window cursor samples through the same
+    /// bounded hit test. Geometry changes alone cannot reopen a typed-away row.
+    fn update_chrome_hover(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pinned
+            || self.task_menu_open
+            || self.settings
+            || self.onboarding
+            || chrome_settling()
+            || gpui_kit::base::GlobalState::is_in_deferred_context(cx)
+        {
+            return;
+        }
+        let anchored = point(position.x, position.y - px(self.chrome_offset));
+        let moved = self.chrome_pointer.replace(anchored).is_none_or(|last| {
+            (last.x - anchored.x).abs() > px(0.5) || (last.y - anchored.y).abs() > px(0.5)
+        });
+        let want = pointer_in_chrome_zone(position, window);
+        if want != chrome_visible() && (!want || moved) {
+            set_chrome_visible(want);
+            cx.notify();
+        }
     }
 
     /// A follow-up has been sent, so the result is a conversation rather than one answer.
@@ -2939,30 +3080,17 @@ impl Peek {
             // laid over the text. Leaving the window closes the row; a layout
             // change under a still pointer does not.
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if this.pinned
-                    || this.task_menu_open
-                    || std::env::var("PEEK_RENDER").is_ok()
-                    || chrome_settling()
-                {
-                    return;
-                }
-                let want = pointer_in_chrome_zone(event.position, window);
-                if want != chrome_visible() {
-                    set_chrome_visible(want);
-                    cx.notify();
+                if track_native_hover() {
+                    this.update_chrome_hover(event.position, window, cx);
                 }
             }))
-            .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
-                if this.pinned
-                    || this.task_menu_open
-                    || std::env::var("PEEK_RENDER").is_ok()
-                    || chrome_settling()
+            .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, window, cx| {
+                if track_native_hover()
+                    && let Some(position) = native_window::pointer_position(window)
                 {
-                    return;
-                }
-                if chrome_visible() {
-                    set_chrome_visible(false);
-                    cx.notify();
+                    // Leaving through the top can enter the external trigger
+                    // strip; only crossing its bounds should dismiss the row.
+                    this.update_chrome_hover(position, window, cx);
                 }
             }))
             // The sides hug the input box whether or not the title row is
@@ -2983,6 +3111,10 @@ impl Peek {
                 // the caret and macOS drops the Chinese input session.
                 let follow_up_focused = this.follow_up.read(cx).focus_handle(cx).is_focused(window);
                 if !this.pinned && chrome_visible() && !follow_up_focused {
+                    if let Some(position) = native_window::pointer_position(window) {
+                        this.chrome_pointer =
+                            Some(point(position.x, position.y - px(this.chrome_offset)));
+                    }
                     set_chrome_visible(false);
                     cx.notify();
                 }
@@ -5142,6 +5274,46 @@ mod chrome_zone_tests {
             width,
             0.,
             false
+        ));
+    }
+
+    #[test]
+    fn hidden_toolbar_strip_is_a_bounded_external_trigger() {
+        for x in [1., 20., 240., 479.] {
+            assert!(chrome_zone_contains(x, -20., 480., 0., false));
+            assert!(!chrome_zone_contains(x, -41., 480., 0., false));
+            // The same screen position remains live as the frame grows upward.
+            assert!(chrome_zone_contains(
+                x,
+                -20. + PANEL_CHROME_HEIGHT,
+                480.,
+                PANEL_CHROME_HEIGHT,
+                true
+            ));
+        }
+        for x in [-1., 480., 800.] {
+            assert!(!chrome_zone_contains(x, -20., 480., 0., false));
+            assert!(!chrome_zone_contains(
+                x,
+                10.,
+                480.,
+                PANEL_CHROME_HEIGHT,
+                true
+            ));
+        }
+        assert!(!chrome_zone_contains(
+            20.,
+            -7.,
+            480.,
+            PANEL_CHROME_HEIGHT,
+            true
+        ));
+        assert!(chrome_zone_contains(
+            20.,
+            -5.,
+            480.,
+            PANEL_CHROME_HEIGHT,
+            true
         ));
     }
 
