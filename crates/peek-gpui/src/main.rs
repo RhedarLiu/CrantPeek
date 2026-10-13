@@ -212,11 +212,9 @@ thread_local! {
 }
 
 thread_local! {
-    /// Whether the frame currently on screen already includes the title row.
-    ///
-    /// The pointer's window coordinates only shift once that frame is up, so the
-    /// trigger is measured against this rather than against the row we want.
-    static CHROME_IN_FRAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Actual revealed height in the painted frame; pointer coordinates follow
+    /// the animation rather than jumping straight to the final toolbar height.
+    static CHROME_IN_FRAME: std::cell::Cell<f32> = const { std::cell::Cell::new(0.) };
     /// When the row last opened or closed. The frame change reports a pointer
     /// leave; samples in this window must not flip the row back.
     static CHROME_CHANGED_AT: std::cell::Cell<Option<std::time::Instant>> =
@@ -226,7 +224,7 @@ thread_local! {
 }
 
 /// How long a show or hide is allowed to settle before the pointer may flip it.
-const CHROME_SETTLE: Duration = Duration::from_millis(180);
+const CHROME_SETTLE: Duration = Duration::from_millis(240);
 
 /// Whether the title row is showing.
 fn chrome_visible() -> bool {
@@ -268,14 +266,14 @@ fn show_panel(window: &mut Window) {
     // A pinned window keeps its title row. An unpinned one opens bare.
     if !CHROME_LOCKED.with(std::cell::Cell::get) {
         set_chrome_visible(false);
-        CHROME_IN_FRAME.with(|cell| cell.set(false));
+        CHROME_IN_FRAME.with(|cell| cell.set(0.));
     }
     native_window::show(window);
     SHOWN_AT.with(|cell| cell.set(Some(std::time::Instant::now())));
 }
 
-fn set_chrome_in_frame(included: bool) {
-    CHROME_IN_FRAME.with(|cell| cell.set(included));
+fn set_chrome_in_frame(height: f32) {
+    CHROME_IN_FRAME.with(|cell| cell.set(height));
 }
 
 /// Whether the panel was shown recently enough to ignore a focus loss.
@@ -315,11 +313,7 @@ fn chrome_zone_contains(x: f32, y: f32, width: f32, input_top: f32, open: bool) 
 /// Whether the pointer is in the corner that keeps the title row open.
 fn pointer_in_chrome_zone(position: Point<Pixels>, window: &Window) -> bool {
     let width = window.bounds().size.width.as_f32();
-    let input_top = if CHROME_IN_FRAME.with(std::cell::Cell::get) {
-        scaled(PANEL_CHROME_HEIGHT)
-    } else {
-        0.
-    };
+    let input_top = CHROME_IN_FRAME.with(std::cell::Cell::get);
     chrome_zone_contains(
         position.x.as_f32() / scaled(1.),
         position.y.as_f32() / scaled(1.),
@@ -545,6 +539,7 @@ struct Peek {
     dialog_measured: f32,
     /// Vertical space currently added above the input by the toolbar.
     chrome_offset: f32,
+    chrome_reveal: motion::Reveal,
     geometry_pending: bool,
     /// Pinned to a regular window: the app takes a Dock icon and menu bar and
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
@@ -775,6 +770,7 @@ impl Peek {
             follow_height: 38.,
             dialog_measured: 0.,
             chrome_offset: 0.,
+            chrome_reveal: motion::Reveal::default(),
             geometry_pending: false,
             pinned: false,
             overlay: None,
@@ -1090,7 +1086,22 @@ impl Peek {
                         set_chrome_visible(open);
                         cx.notify();
                     }).ok();
-                    cx.background_executor().timer(Duration::from_millis(250)).await;
+                    let mut observed_motion = false;
+                    for _ in 0..20 {
+                        cx.background_executor().timer(Duration::from_millis(16)).await;
+                        let offset = this.update(cx, |peek, _| peek.chrome_offset).unwrap_or_default();
+                        observed_motion |= offset > 0.5 && offset < scaled(PANEL_CHROME_HEIGHT) - 0.5;
+                        if let Ok((y, frame, viewport)) = cx.update_window(panel_handle, |_, window, _| {
+                            (window.bounds().origin.y.as_f32() + offset,
+                             window.bounds().size.height.as_f32(),
+                             window.viewport_size().height.as_f32())
+                        }) {
+                            let baseline = *anchor.get_or_insert(y);
+                            passed &= (y - baseline).abs() < 0.5 && (frame - viewport).abs() < 0.5;
+                        } else {
+                            passed = false;
+                        }
+                    }
                     let offset = this.update(cx, |peek, _| peek.chrome_offset).unwrap_or_default();
                     if let Ok((y, frame_height, viewport_height)) = cx.update_window(panel_handle, |_, window, _| {
                         (window.bounds().origin.y.as_f32() + offset,
@@ -1102,7 +1113,7 @@ impl Peek {
                             && (frame_height - viewport_height).abs() < 0.5
                             && (offset - if open { scaled(PANEL_CHROME_HEIGHT) } else { 0. }).abs() < 0.5;
                         passed &= stable;
-                        println!("[chrome-test] open={open} input_y={y:.1} frame={frame_height:.1} viewport={viewport_height:.1} stable={stable}");
+                        println!("[chrome-test] open={open} input_y={y:.1} frame={frame_height:.1} viewport={viewport_height:.1} stable={stable} intermediate_frames={observed_motion}");
                     } else {
                         passed = false;
                     }
@@ -2671,6 +2682,17 @@ impl Render for Peek {
             self.follow_up
                 .update(cx, |state, cx| state.set_value("", window, cx));
         }
+        let (chrome_fraction, chrome_moving) = self.chrome_reveal.update(
+            !self.settings && !self.onboarding && chrome_visible(),
+            cx.reduce_motion() || self.settings || self.onboarding,
+        );
+        if chrome_moving {
+            window.request_animation_frame();
+        }
+        // Native window bounds are reported in whole points. Fractional frame
+        // deltas accumulate rounding drift after repeated open/close cycles.
+        // Quantizing the reveal also avoids redundant subpixel resize calls.
+        let chrome_offset = (scaled(PANEL_CHROME_HEIGHT) * chrome_fraction).round();
         // Resize before drawing. The query page stays compact until it has
         // something to show, while the settings page is always tall; sizing it
         // only from the query page left settings clipped to a compact window.
@@ -2685,24 +2707,14 @@ impl Render for Peek {
         } else if self.has_result() {
             // Same as the compact panel: the row grows the window upward
             // instead of covering the result.
-            self.result_height()
-                + if chrome_visible() {
-                    scaled(PANEL_CHROME_HEIGHT)
-                } else {
-                    0.
-                }
+            self.result_height() + chrome_offset
         } else {
             // The textarea auto-grows between two and five rows, so the compact
             // panel follows it rather than guessing a single height.
             let rows = self.input.read(cx).value().lines().count().clamp(2, 5) as f32;
-            let chrome = if chrome_visible() {
-                scaled(PANEL_CHROME_HEIGHT)
-            } else {
-                0.
-            };
             (self.input_measured + scaled(8.))
                 .max(scaled(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * rows))
-                + chrome
+                + chrome_offset
         };
         // Dialogs need enough viewport space for their fields and popup menus.
         // Closing the dialog restores the height of the underlying settings tab.
@@ -2723,11 +2735,6 @@ impl Render for Peek {
         if let Some(display) = window.display(cx) {
             height = height.min((display.bounds().size.height.as_f32() - 80.).max(300.));
         }
-        let chrome_offset = if !self.settings && chrome_visible() {
-            scaled(PANEL_CHROME_HEIGHT)
-        } else {
-            0.
-        };
         // Keep the currently painted layout until the native frame has moved
         // and resized. Rendering the new toolbar into the old viewport produces
         // a visible intermediate frame, even with AppKit updates suppressed.
@@ -2753,7 +2760,11 @@ impl Render for Peek {
             );
         }
         // The pointer zone follows the frame actually painted, not the request.
-        set_chrome_in_frame(!self.settings && self.chrome_offset > 0.);
+        set_chrome_in_frame(if self.settings {
+            0.
+        } else {
+            self.chrome_offset
+        });
         if self.onboarding {
             return self.welcome_page(cx);
         }
@@ -2919,46 +2930,6 @@ impl Peek {
         };
 
         v_flex()
-            .on_children_prepainted({
-                let entity = cx.entity();
-                let has_result = self.has_result();
-                let has_answer = self.conversation() || self.plain_answer().is_some();
-                let answer_index = (if self.dictionary_note.is_empty() {
-                    1
-                } else {
-                    2
-                }) + usize::from(self.chrome_offset > 0.);
-                let answer_height = self.answer_measured + 30.;
-                move |bounds, _window, cx| {
-                    if !has_result {
-                        return;
-                    }
-                    let height = bounds
-                        .iter()
-                        .enumerate()
-                        .map(|(index, b)| {
-                            if has_answer && index == answer_index {
-                                answer_height
-                            } else {
-                                b.size.height.as_f32()
-                            }
-                        })
-                        .sum::<f32>()
-                        + 8.
-                        + 5. * bounds.len().saturating_sub(1) as f32;
-                    let entity = entity.clone();
-                    cx.defer(move |cx| {
-                        entity.update(cx, |this, cx| {
-                            // The chrome is tracked separately by the render path.
-                            let height = height - this.chrome_offset;
-                            if (this.query_measured - height).abs() > 0.5 {
-                                this.query_measured = height;
-                                cx.notify();
-                            }
-                        })
-                    });
-                }
-            })
             .id("panel")
             .size_full()
             .bg(bg)
@@ -3000,7 +2971,6 @@ impl Peek {
             .px(ui_px(4.))
             .pt(ui_px(4.))
             .pb(ui_px(4.))
-            .gap(ui_px(5.))
             // Esc hides the panel after a quick lookup. A
             // pinned window is a normal window, so Esc leaves it alone.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -3019,348 +2989,416 @@ impl Peek {
             }))
             .when(self.chrome_offset > 0., |this| {
                 this.child(
-                    h_flex()
-                        .id("chrome-row")
-                        .h(ui_px(PANEL_CHROME_HEIGHT - 5.))
-                        .flex_none()
+                    div()
+                        .id("chrome-slot")
+                        .relative()
                         .w_full()
-                        .items_center()
-                        .gap(ui_px(10.))
-                        // Inset so the title lines up with the text inside the
-                        // input box, whose own padding starts at the same place.
-                        .px(ui_px(14.))
+                        .h(px(self.chrome_offset))
+                        .flex_none()
+                        .overflow_hidden()
                         .child(
                             h_flex()
+                                .id("chrome-row")
+                                .absolute()
+                                .bottom(ui_px(5.))
+                                .opacity(
+                                    (self.chrome_offset / scaled(PANEL_CHROME_HEIGHT))
+                                        .clamp(0., 1.),
+                                )
+                                .h(ui_px(PANEL_CHROME_HEIGHT - 5.))
+                                .flex_none()
+                                .w_full()
                                 .items_center()
-                                .gap(ui_px(7.))
-                                .h(ui_px(28.))
+                                .gap(ui_px(10.))
+                                // Inset so the title lines up with the text inside the
+                                // input box, whose own padding starts at the same place.
+                                .px(ui_px(14.))
                                 .child(
-                                    svg()
-                                        .path("brand/crant-peek.svg")
-                                        .size(ui_px(18.))
-                                        .text_color(fg),
+                                    h_flex()
+                                        .items_center()
+                                        .gap(ui_px(7.))
+                                        .h(ui_px(28.))
+                                        .child(
+                                            svg()
+                                                .path("brand/crant-peek.svg")
+                                                .size(ui_px(18.))
+                                                .text_color(fg),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family(set.latin)
+                                                .text_size(ui_px(12.))
+                                                .font_semibold()
+                                                .child("Crant Peek"),
+                                        ),
                                 )
+                                .child(div().flex_1())
                                 .child(
-                                    div()
-                                        .font_family(set.latin)
-                                        .text_size(ui_px(12.))
-                                        .font_semibold()
-                                        .child("Crant Peek"),
-                                ),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            // Which channel answers a plain translation. Only
-                            // channels that can translate are listed, and the same
-                            // choice can be made in settings. The icon says
-                            // "channel", not "translate": the input box already
-                            // uses the language icon for the task picker.
-                            DropdownButton::new("basic-channel")
-                                .button(
-                                    Button::new("basic-channel-button")
-                                        .ghost()
-                                        .icon(IconName::Cable)
-                                        .tooltip(i18n::tr("channels-basic-pick")),
+                                    // Which channel answers a plain translation. Only
+                                    // channels that can translate are listed, and the same
+                                    // choice can be made in settings. The icon says
+                                    // "channel", not "translate": the input box already
+                                    // uses the language icon for the task picker.
+                                    DropdownButton::new("basic-channel")
+                                        .button(
+                                            Button::new("basic-channel-button")
+                                                .ghost()
+                                                .icon(IconName::Cable)
+                                                .tooltip(i18n::tr("channels-basic-pick")),
+                                        )
+                                        .dropdown_menu(move |mut menu, _window, _cx| {
+                                            if basic_choices.is_empty() {
+                                                return menu.item(
+                                                    PopupMenuItem::new(i18n::tr("channels-none"))
+                                                        .disabled(true),
+                                                );
+                                            }
+                                            for (id, name) in &basic_choices {
+                                                let target = basic_entity.clone();
+                                                let chosen = id.clone();
+                                                let selected = *id == basic_active;
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(name.clone())
+                                                        .checked(selected)
+                                                        .on_click(move |_event, _window, cx| {
+                                                            target.update(cx, |peek, cx| {
+                                                                peek.assign_channel(
+                                                                    ChannelSlot::QuickFirst,
+                                                                    chosen.clone(),
+                                                                    cx,
+                                                                );
+                                                            });
+                                                        }),
+                                                );
+                                            }
+                                            menu
+                                        }),
                                 )
-                                .dropdown_menu(move |mut menu, _window, _cx| {
-                                    if basic_choices.is_empty() {
-                                        return menu.item(
-                                            PopupMenuItem::new(i18n::tr("channels-none"))
-                                                .disabled(true),
-                                        );
-                                    }
-                                    for (id, name) in &basic_choices {
-                                        let target = basic_entity.clone();
-                                        let chosen = id.clone();
-                                        let selected = *id == basic_active;
-                                        menu = menu.item(
-                                            PopupMenuItem::new(name.clone())
-                                                .checked(selected)
-                                                .on_click(move |_event, _window, cx| {
-                                                    target.update(cx, |peek, cx| {
-                                                        peek.assign_channel(
-                                                            ChannelSlot::QuickFirst,
-                                                            chosen.clone(),
-                                                            cx,
-                                                        );
-                                                    });
-                                                }),
-                                        );
-                                    }
-                                    menu
-                                }),
-                        )
-                        .child(self.icon_button(
-                            "pin-window",
-                            if self.pinned {
-                                gpui_kit::assets::IconName::PinOff
-                            } else {
-                                gpui_kit::assets::IconName::Pin
-                            },
-                            if self.pinned {
-                                i18n::tr("action-unpin")
-                            } else {
-                                i18n::tr("action-pin")
-                            },
-                            cx,
-                            |this, window, cx| this.toggle_pinned(window, cx),
-                        ))
-                        .child(self.icon_button(
-                            "open-settings",
-                            gpui_kit::assets::IconName::Settings,
-                            i18n::tr("settings-title"),
-                            cx,
-                            |this, _window, cx| {
-                                this.settings = true;
-                                cx.notify();
-                            },
-                        ))
-                        .child(self.icon_button(
-                            "close-panel",
-                            gpui_kit::assets::IconName::X,
-                            i18n::tr("action-close"),
-                            cx,
-                            |_this, window, _cx| native_window::hide(window),
-                        )),
+                                .child(self.icon_button(
+                                    "pin-window",
+                                    if self.pinned {
+                                        gpui_kit::assets::IconName::PinOff
+                                    } else {
+                                        gpui_kit::assets::IconName::Pin
+                                    },
+                                    if self.pinned {
+                                        i18n::tr("action-unpin")
+                                    } else {
+                                        i18n::tr("action-pin")
+                                    },
+                                    cx,
+                                    |this, window, cx| this.toggle_pinned(window, cx),
+                                ))
+                                .child(self.icon_button(
+                                    "open-settings",
+                                    gpui_kit::assets::IconName::Settings,
+                                    i18n::tr("settings-title"),
+                                    cx,
+                                    |this, _window, cx| {
+                                        this.settings = true;
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(self.icon_button(
+                                    "close-panel",
+                                    gpui_kit::assets::IconName::X,
+                                    i18n::tr("action-close"),
+                                    cx,
+                                    |_this, window, _cx| native_window::hide(window),
+                                )),
+                        ),
                 )
             })
-            // Source input. The controls sit inside its bottom corners, so
-            // the panel is one box and nothing else until there is a result.
             .child(
-                div()
+                v_flex()
                     .on_children_prepainted({
                         let entity = cx.entity();
+                        let has_result = self.has_result();
+                        let has_answer = self.conversation() || self.plain_answer().is_some();
+                        let answer_index = if self.dictionary_note.is_empty() {
+                            1
+                        } else {
+                            2
+                        };
+                        let answer_height = self.answer_measured + 30.;
                         move |bounds, _window, cx| {
-                            let Some(text) = bounds.first() else {
+                            if !has_result {
                                 return;
-                            };
-                            // Card padding (14 per edge) and its border (1 per edge).
-                            let needed = text.size.height.as_f32() + 30.;
+                            }
+                            let height = bounds
+                                .iter()
+                                .enumerate()
+                                .map(|(index, b)| {
+                                    if has_answer && index == answer_index {
+                                        answer_height
+                                    } else {
+                                        b.size.height.as_f32()
+                                    }
+                                })
+                                .sum::<f32>()
+                                + 8.
+                                + 5. * bounds.len().saturating_sub(1) as f32;
                             let entity = entity.clone();
                             cx.defer(move |cx| {
                                 entity.update(cx, |this, cx| {
-                                    if (this.input_measured - needed).abs() > 0.5 {
-                                        this.input_measured = needed;
+                                    if (this.query_measured - height).abs() > 0.5 {
+                                        this.query_measured = height;
                                         cx.notify();
                                     }
-                                });
+                                })
                             });
                         }
                     })
-                    .relative()
-                    .flex_none()
                     .w_full()
-                    .border_1()
-                    .border_color(border)
-                    .rounded(ui_px(16.))
-                    .p(ui_px(14.))
+                    .flex_1()
+                    .min_h_0()
+                    .gap(ui_px(5.))
+                    // Source input. The controls sit inside its bottom corners, so
+                    // the panel is one box and nothing else until there is a result.
                     .child(
-                        // Clip the text, not the task list. The list is a
-                        // sibling of this box and has to paint past it.
                         div()
+                            .on_children_prepainted({
+                                let entity = cx.entity();
+                                move |bounds, _window, cx| {
+                                    let Some(text) = bounds.first() else {
+                                        return;
+                                    };
+                                    // Card padding (14 per edge) and its border (1 per edge).
+                                    let needed = text.size.height.as_f32() + 30.;
+                                    let entity = entity.clone();
+                                    cx.defer(move |cx| {
+                                        entity.update(cx, |this, cx| {
+                                            if (this.input_measured - needed).abs() > 0.5 {
+                                                this.input_measured = needed;
+                                                cx.notify();
+                                            }
+                                        });
+                                    });
+                                }
+                            })
+                            .relative()
+                            .flex_none()
                             .w_full()
-                            .overflow_hidden()
-                            .when(can_clear, |this| this.pr(ui_px(24.)))
+                            .border_1()
+                            .border_color(border)
+                            .rounded(ui_px(16.))
+                            .p(ui_px(14.))
                             .child(
-                                Textarea::new(&self.input)
+                                // Clip the text, not the task list. The list is a
+                                // sibling of this box and has to paint past it.
+                                div()
                                     .w_full()
-                                    .appearance(false)
-                                    .bordered(false)
-                                    // Room for the controls drawn over the corner.
-                                    .pb(ui_px(34.)),
-                            ),
-                    )
-                    .when(can_clear, |this| {
-                        this.child(
-                            div().absolute().top(ui_px(5.)).right(ui_px(5.)).child(
-                                Button::new("clear-query")
-                                    .ghost()
-                                    .w(ui_px(24.))
-                                    .h(ui_px(24.))
-                                    .icon(gpui_kit::assets::IconName::Trash)
-                                    .tooltip(i18n::tr("query-clear"))
-                                    .accessibility_label(i18n::tr("query-clear"))
-                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                        this.clear_query(window, cx)
-                                    })),
-                            ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .left(ui_px(10.))
-                            .right(ui_px(10.))
-                            .bottom(ui_px(8.))
-                            .flex()
-                            .items_center()
-                            .gap(ui_px(6.))
-                            .child(self.task_picker(cx))
-                            .child(div().flex_1())
-                            .when(self.busy && !self.follow_up_turn, |this| {
+                                    .overflow_hidden()
+                                    .when(can_clear, |this| this.pr(ui_px(24.)))
+                                    .child(
+                                        Textarea::new(&self.input)
+                                            .w_full()
+                                            .appearance(false)
+                                            .bordered(false)
+                                            // Room for the controls drawn over the corner.
+                                            .pb(ui_px(34.)),
+                                    ),
+                            )
+                            .when(can_clear, |this| {
                                 this.child(
-                                    Button::new("stop")
-                                        .icon(gpui_kit::assets::IconName::Square)
-                                        .tooltip(i18n::tr("query-stop"))
-                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                            this.stop();
-                                            cx.notify();
-                                        })),
+                                    div().absolute().top(ui_px(5.)).right(ui_px(5.)).child(
+                                        Button::new("clear-query")
+                                            .ghost()
+                                            .w(ui_px(24.))
+                                            .h(ui_px(24.))
+                                            .icon(gpui_kit::assets::IconName::Trash)
+                                            .tooltip(i18n::tr("query-clear"))
+                                            .accessibility_label(i18n::tr("query-clear"))
+                                            .on_click(cx.listener(|this, _event, window, cx| {
+                                                this.clear_query(window, cx)
+                                            })),
+                                    ),
                                 )
                             })
                             .child(
-                                Button::new("look-up")
-                                    .icon(gpui_kit::assets::IconName::Send)
-                                    .tooltip(i18n::tr("query-run"))
-                                    .loading(self.busy && !self.follow_up_turn)
-                                    .on_click(cx.listener(|this, _event, window, cx| {
-                                        this.start_query(window, cx);
-                                    })),
+                                div()
+                                    .absolute()
+                                    .left(ui_px(10.))
+                                    .right(ui_px(10.))
+                                    .bottom(ui_px(8.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(ui_px(6.))
+                                    .child(self.task_picker(cx))
+                                    .child(div().flex_1())
+                                    .when(self.busy && !self.follow_up_turn, |this| {
+                                        this.child(
+                                            Button::new("stop")
+                                                .icon(gpui_kit::assets::IconName::Square)
+                                                .tooltip(i18n::tr("query-stop"))
+                                                .on_click(cx.listener(
+                                                    |this, _event, _window, cx| {
+                                                        this.stop();
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new("look-up")
+                                            .icon(gpui_kit::assets::IconName::Send)
+                                            .tooltip(i18n::tr("query-run"))
+                                            .loading(self.busy && !self.follow_up_turn)
+                                            .on_click(cx.listener(|this, _event, window, cx| {
+                                                this.start_query(window, cx);
+                                            })),
+                                    ),
                             ),
-                    ),
-            )
-            .when(self.has_result(), |this| {
-                let conversation = self.conversation();
-                let plain = self.plain_answer();
-                this
-                    // Offline dictionary result, when the input was a single word.
-                    .when(!self.dictionary_note.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .relative()
-                                .w_full()
-                                .border_1()
-                                .border_color(border)
-                                .rounded(ui_px(14.))
-                                .p(ui_px(14.))
-                                .flex_none()
-                                .font_family(set.sc)
-                                .text_size(ui_px(13.))
-                                .when(
-                                    !conversation
-                                        && plain.is_none()
-                                        && self.auto_decision.is_some()
-                                        && self.selected_task(cx).is_none(),
-                                    |this| this.pr(ui_px(36.)),
+                    )
+                    .when(self.has_result(), |this| {
+                        let conversation = self.conversation();
+                        let plain = self.plain_answer();
+                        this
+                            // Offline dictionary result, when the input was a single word.
+                            .when(!self.dictionary_note.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .relative()
+                                        .w_full()
+                                        .border_1()
+                                        .border_color(border)
+                                        .rounded(ui_px(14.))
+                                        .p(ui_px(14.))
+                                        .flex_none()
+                                        .font_family(set.sc)
+                                        .text_size(ui_px(13.))
+                                        .when(
+                                            !conversation
+                                                && plain.is_none()
+                                                && self.auto_decision.is_some()
+                                                && self.selected_task(cx).is_none(),
+                                            |this| this.pr(ui_px(36.)),
+                                        )
+                                        .child(self.dictionary_note.clone())
+                                        .when(!conversation && plain.is_none(), |this| {
+                                            this.child(
+                                                self.decision_badge("dictionary-decision", cx),
+                                            )
+                                        }),
                                 )
-                                .child(self.dictionary_note.clone())
-                                .when(!conversation && plain.is_none(), |this| {
-                                    this.child(self.decision_badge("dictionary-decision", cx))
-                                }),
-                        )
-                    })
-                    // One answer is a markdown card. A follow-up turns that
-                    // same history into a conversation.
-                    .when(conversation, |this| {
-                        this.child(
-                            v_flex()
-                                .id("answer")
-                                .relative()
-                                .w_full()
-                                .flex_1()
-                                .border_1()
-                                .border_color(border)
-                                .rounded(ui_px(14.))
-                                .p(ui_px(14.))
-                                .overflow_y_scroll()
-                                .child(self.result_body(
-                                    {
-                                        let mut children: Vec<AnyElement> = self
-                                            .bubbles
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(index, (from_user, text))| {
-                                                bubble(index, *from_user, text.clone())
-                                            })
-                                            .collect();
-                                        if !self.answer.is_empty() {
-                                            children.push(bubble(
-                                                self.bubbles.len(),
-                                                false,
-                                                self.answer.clone(),
-                                            ));
-                                        }
-                                        children
-                                    },
-                                    cx,
-                                ))
-                                .child(self.decision_badge("answer-decision", cx)),
-                        )
-                    })
-                    .when(!conversation && plain.is_some(), |this| {
-                        let text = plain.clone().unwrap_or_default();
-                        this.child(
-                            div()
-                                .id("answer")
-                                .relative()
-                                .w_full()
-                                .flex_1()
-                                .overflow_y_scroll()
-                                .border_1()
-                                .border_color(border)
-                                .rounded(ui_px(14.))
-                                .p(ui_px(14.))
-                                .child(self.result_body(
-                                    vec![
+                            })
+                            // One answer is a markdown card. A follow-up turns that
+                            // same history into a conversation.
+                            .when(conversation, |this| {
+                                this.child(
+                                    v_flex()
+                                        .id("answer")
+                                        .relative()
+                                        .w_full()
+                                        .flex_1()
+                                        .border_1()
+                                        .border_color(border)
+                                        .rounded(ui_px(14.))
+                                        .p(ui_px(14.))
+                                        .overflow_y_scroll()
+                                        .child(self.result_body(
+                                            {
+                                                let mut children: Vec<AnyElement> = self
+                                                    .bubbles
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(index, (from_user, text))| {
+                                                        bubble(index, *from_user, text.clone())
+                                                    })
+                                                    .collect();
+                                                if !self.answer.is_empty() {
+                                                    children.push(bubble(
+                                                        self.bubbles.len(),
+                                                        false,
+                                                        self.answer.clone(),
+                                                    ));
+                                                }
+                                                children
+                                            },
+                                            cx,
+                                        ))
+                                        .child(self.decision_badge("answer-decision", cx)),
+                                )
+                            })
+                            .when(!conversation && plain.is_some(), |this| {
+                                let text = plain.clone().unwrap_or_default();
+                                this.child(
+                                    div()
+                                        .id("answer")
+                                        .relative()
+                                        .w_full()
+                                        .flex_1()
+                                        .overflow_y_scroll()
+                                        .border_1()
+                                        .border_color(border)
+                                        .rounded(ui_px(14.))
+                                        .p(ui_px(14.))
+                                        .child(self.result_body(
+                                            vec![
                                             TextView::markdown("plain-answer", text)
                                                 .text_size(ui_px(13.))
                                                 .into_any_element(),
                                         ],
-                                    cx,
-                                ))
-                                .child(self.decision_badge("answer-decision", cx)),
-                        )
-                    })
-                    // Follow-up turn, continuing the same conversation.
-                    .child(
-                        h_flex()
-                            .on_children_prepainted({
-                                let entity = cx.entity();
-                                move |bounds, _window, cx| {
-                                    let Some(input) = bounds.first() else {
-                                        return;
-                                    };
-                                    let height = input.size.height.as_f32();
-                                    let entity = entity.clone();
-                                    cx.defer(move |cx| {
-                                        entity.update(cx, |this, cx| {
-                                            if (this.follow_height - height).abs() > 0.5 {
-                                                this.follow_height = height;
-                                                cx.notify();
-                                            }
-                                        })
-                                    });
-                                }
-                            })
-                            .w_full()
-                            .flex_none()
-                            .items_end()
-                            .gap(ui_px(8.))
-                            .child(Textarea::new(&self.follow_up).flex_1().rounded(ui_px(10.)))
-                            .when(self.busy && self.follow_up_turn, |this| {
-                                this.child(
-                                    Button::new("follow-stop")
-                                        .h(px(self.follow_height))
-                                        .icon(gpui_kit::assets::IconName::Square)
-                                        .tooltip(i18n::tr("query-stop"))
-                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                            this.stop();
-                                            cx.notify();
-                                        })),
+                                            cx,
+                                        ))
+                                        .child(self.decision_badge("answer-decision", cx)),
                                 )
                             })
+                            // Follow-up turn, continuing the same conversation.
                             .child(
-                                Button::new("follow-send")
-                                    .h(px(self.follow_height))
-                                    .icon(gpui_kit::assets::IconName::Send)
-                                    .tooltip(i18n::tr("query-send"))
-                                    .loading(self.busy && self.follow_up_turn)
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.send_follow_up(cx);
-                                    })),
-                            ),
-                    )
-            })
+                                h_flex()
+                                    .on_children_prepainted({
+                                        let entity = cx.entity();
+                                        move |bounds, _window, cx| {
+                                            let Some(input) = bounds.first() else {
+                                                return;
+                                            };
+                                            let height = input.size.height.as_f32();
+                                            let entity = entity.clone();
+                                            cx.defer(move |cx| {
+                                                entity.update(cx, |this, cx| {
+                                                    if (this.follow_height - height).abs() > 0.5 {
+                                                        this.follow_height = height;
+                                                        cx.notify();
+                                                    }
+                                                })
+                                            });
+                                        }
+                                    })
+                                    .w_full()
+                                    .flex_none()
+                                    .items_end()
+                                    .gap(ui_px(8.))
+                                    .child(
+                                        Textarea::new(&self.follow_up).flex_1().rounded(ui_px(10.)),
+                                    )
+                                    .when(self.busy && self.follow_up_turn, |this| {
+                                        this.child(
+                                            Button::new("follow-stop")
+                                                .h(px(self.follow_height))
+                                                .icon(gpui_kit::assets::IconName::Square)
+                                                .tooltip(i18n::tr("query-stop"))
+                                                .on_click(cx.listener(
+                                                    |this, _event, _window, cx| {
+                                                        this.stop();
+                                                        cx.notify();
+                                                    },
+                                                )),
+                                        )
+                                    })
+                                    .child(
+                                        Button::new("follow-send")
+                                            .h(px(self.follow_height))
+                                            .icon(gpui_kit::assets::IconName::Send)
+                                            .tooltip(i18n::tr("query-send"))
+                                            .loading(self.busy && self.follow_up_turn)
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                this.send_follow_up(cx);
+                                            })),
+                                    ),
+                            )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -4377,6 +4415,78 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     // resizes, and the next paint has to fill that new window.
     for _ in 0..8 {
         cx.run_until_parked();
+    }
+    if std::env::var("PEEK_TOOLBAR_SELFTEST").is_ok()
+        && let Some(view) = published.borrow().clone()
+    {
+        use gpui_kit::test::TestWindowExt as _;
+        let render_frame =
+            |cx: &mut gpui_kit::HeadlessAppContext, delay: u64| -> anyhow::Result<()> {
+                std::thread::sleep(Duration::from_millis(delay));
+                cx.advance_clock(Duration::from_millis(delay));
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))?;
+                cx.run_until_parked();
+                Ok(())
+            };
+        render_frame(&mut cx, 220)?;
+        let mut baseline = None;
+        let mut intermediate = false;
+        for (phase, visible, frames) in [
+            ("enter", true, 16),
+            ("exit", false, 16),
+            ("reverse-enter", true, 3),
+            ("reverse-exit", false, 16),
+            ("repeat", true, 16),
+        ] {
+            view.update(&mut cx, |_, cx| {
+                set_chrome_visible(visible);
+                cx.notify();
+            });
+            for frame in 0..frames {
+                render_frame(&mut cx, 16)?;
+                cx.update_window(window.into(), |_, window, cx| {
+                    let offset = view.read(cx).chrome_offset;
+                    let card = window
+                        .find(ElementId::from(("input", view.read(cx).input.entity_id())))
+                        .bounds();
+                    let anchor = card.origin.y.as_f32() - offset;
+                    let expected = *baseline.get_or_insert(anchor);
+                    assert!(
+                        (anchor - expected).abs() < 0.5,
+                        "query position must track the revealed height"
+                    );
+                    assert!(
+                        (window.bounds().size.height - window.viewport_size().height).abs()
+                            < px(0.5)
+                    );
+                    intermediate |= offset > 0.5 && offset < scaled(PANEL_CHROME_HEIGHT) - 0.5;
+                })?;
+                if phase != "repeat" && matches!(frame, 0 | 3 | 15) {
+                    cx.capture_screenshot(window.into())?.save(
+                        std::path::Path::new(path).with_extension(format!("{phase}-{frame}.png")),
+                    )?;
+                }
+            }
+            let offset = view.update(&mut cx, |peek, _| peek.chrome_offset);
+            if frames == 16 {
+                assert!(
+                    (offset
+                        - if visible {
+                            scaled(PANEL_CHROME_HEIGHT)
+                        } else {
+                            0.
+                        })
+                    .abs()
+                        < 0.5
+                );
+            }
+        }
+        assert!(
+            intermediate,
+            "toolbar must render intermediate reveal heights"
+        );
+        println!("[toolbar-selftest] enter, exit, repeat and stable query layout passed");
     }
     // Compare real frames after clicking the persistent tab strip, rather than
     // mounting separate pages (which cannot reveal a lost indicator spring).

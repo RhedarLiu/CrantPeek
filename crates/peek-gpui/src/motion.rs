@@ -1,7 +1,7 @@
 //! Short, one-shot transitions. GPUI adopts the end state when reduced motion
 //! is enabled, and stops requesting animation frames once the transition ends.
 use gpui_kit::Animation;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const MENU_EXIT: Duration = Duration::from_millis(110);
 
@@ -51,4 +51,47 @@ pub fn content_enter() -> Animation {
 
 fn ease_out(t: f32) -> f32 {
     1. - (1. - t).powi(3)
+}
+
+/// A reversible reveal for native-window chrome. Sampling the previous curve
+/// before redirecting it keeps hover/typing reversals continuous.
+#[derive(Default)]
+pub struct Reveal {
+    from: f32,
+    target: f32,
+    started: Option<Instant>,
+}
+
+impl Reveal {
+    fn value(&self, now: Instant) -> f32 {
+        let Some(started) = self.started else {
+            return self.target;
+        };
+        let duration = if self.target > self.from { 0.18 } else { 0.14 };
+        let delta = (now.duration_since(started).as_secs_f32() / duration).min(1.);
+        self.from + (self.target - self.from) * ease_out(delta)
+    }
+
+    /// Returns the revealed fraction and whether another frame is needed.
+    pub fn update(&mut self, visible: bool, reduced: bool) -> (f32, bool) {
+        let now = Instant::now();
+        let target = if visible { 1. } else { 0. };
+        if reduced {
+            self.from = target;
+            self.target = target;
+            self.started = None;
+            return (target, false);
+        }
+        if self.target != target {
+            self.from = self.value(now);
+            self.target = target;
+            self.started = Some(now);
+        }
+        let value = self.value(now);
+        let moving = (value - target).abs() > 0.0001;
+        if !moving {
+            self.started = None;
+        }
+        (if moving { value } else { target }, moving)
+    }
 }
