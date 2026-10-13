@@ -184,9 +184,7 @@ impl Render for TaskMenu {
         } else {
             surface
                 .with_animation("task-menu-enter", motion::menu_enter(), |surface, delta| {
-                    surface
-                        .top(ui_px(-4. * (1. - delta)))
-                        .opacity(0.35 + 0.65 * delta)
+                    surface.top(ui_px(-6. * (1. - delta))).opacity(delta)
                 })
                 .into_any_element()
         };

@@ -531,6 +531,8 @@ struct Peek {
     channel_vision: bool,
     /// Which settings tab is showing.
     settings_tab: usize,
+    /// Restart the content transition without replacing the persistent tab strip.
+    settings_transition: u64,
     /// Laid-out height of the settings page, measured from its children.
     settings_measured: f32,
     /// Laid-out height of the welcome page, so its buttons never fall off.
@@ -739,6 +741,7 @@ impl Peek {
             input,
             follow_up,
             settings_tab: 0,
+            settings_transition: 0,
             settings_measured: 0.,
             welcome_measured: 0.,
             pending_toast: loaded.warning.map(|message| (true, message)),
@@ -3741,7 +3744,7 @@ impl Peek {
                         .iter()
                         .map(|bound| bound.size.height.as_f32())
                         .sum::<f32>();
-                    let gaps = 14. * (bounds.len() - 1) as f32;
+                    let gaps = scaled(14.) * (bounds.len() - 1) as f32;
                     // Vertical padding on this page, top and bottom.
                     // The page padding is 20 on each edge. Inputs paint a little
                     // past the layout box, so the last field needs a few more
@@ -3812,7 +3815,10 @@ impl Peek {
                         ])
                         .selected_index(self.settings_tab)
                         .on_click(cx.listener(|this, index: &usize, _window, cx| {
-                            this.settings_tab = *index;
+                            if this.settings_tab != *index {
+                                this.settings_tab = *index;
+                                this.settings_transition = this.settings_transition.wrapping_add(1);
+                            }
                             if *index == 4 {
                                 this.permissions = peek_runtime::permissions::status();
                             }
@@ -3820,6 +3826,13 @@ impl Peek {
                         })),
                 ),
             )
+            .child(
+                // Keep the header and tab strip outside the changing animation ID.
+                // Their keyed spring state must survive a tab switch.
+                v_flex()
+                    .w_full()
+                    .flex_none()
+                    .gap(ui_px(14.))
             .when(self.settings_tab == 0, |this| {
                 this.child(self.setting_row(Setting::Theme, cx))
                     .child(self.setting_row(Setting::Zoom, cx))
@@ -4143,10 +4156,11 @@ impl Peek {
                         ),
                 )
             })
-            .with_animation(
-                SharedString::from(format!("settings-enter-{}", self.settings_tab)),
-                motion::content_enter(),
-                |page, delta| page.opacity(0.55 + 0.45 * delta),
+                    .with_animation(
+                        ElementId::NamedInteger("settings-content-enter".into(), self.settings_transition),
+                        motion::content_enter(),
+                        |content, delta| content.opacity(delta),
+                    ),
             )
             .into_any_element()
     }
@@ -4363,6 +4377,56 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     // resizes, and the next paint has to fill that new window.
     for _ in 0..8 {
         cx.run_until_parked();
+    }
+    // Compare real frames after clicking the persistent tab strip, rather than
+    // mounting separate pages (which cannot reveal a lost indicator spring).
+    if std::env::var("PEEK_MOTION_SELFTEST").is_ok()
+        && let Some(view) = published.borrow().clone()
+    {
+        use gpui_kit::test::TestWindowExt as _;
+        let render_frame =
+            |cx: &mut gpui_kit::HeadlessAppContext, delay: u64| -> anyhow::Result<()> {
+                std::thread::sleep(Duration::from_millis(delay));
+                cx.advance_clock(Duration::from_millis(delay));
+                cx.run_until_parked();
+                cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))?;
+                Ok(())
+            };
+        render_frame(&mut cx, 250)?;
+        let baseline = cx.capture_screenshot(window.into())?;
+        baseline.save(std::path::Path::new(path).with_extension("before.png"))?;
+        for (round, target) in [3usize, 0, 3].into_iter().enumerate() {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.within("settings_tabs").click(target, cx);
+                assert_eq!(view.read(cx).settings_tab, target);
+            })?;
+            render_frame(&mut cx, 0)?;
+            let first = cx.capture_screenshot(window.into())?;
+            render_frame(&mut cx, 60)?;
+            let middle = cx.capture_screenshot(window.into())?;
+            for _ in 0..20 {
+                render_frame(&mut cx, 16)?;
+            }
+            let settled = cx.capture_screenshot(window.into())?;
+            assert_ne!(
+                first.as_raw(),
+                middle.as_raw(),
+                "tab switch must paint intermediate frames"
+            );
+            assert_ne!(
+                middle.as_raw(),
+                settled.as_raw(),
+                "transition must reach its resting state"
+            );
+            if round == 0 {
+                first.save(std::path::Path::new(path).with_extension("first.png"))?;
+                middle.save(std::path::Path::new(path).with_extension("middle.png"))?;
+                settled.save(std::path::Path::new(path).with_extension("settled.png"))?;
+            }
+        }
+        println!(
+            "[motion-selftest] tab clicks and intermediate frames verified, including repeat switches"
+        );
     }
     // Exercise editor focus transfer without contacting a translation service.
     if std::env::var("PEEK_INPUT_SELFTEST").is_ok()

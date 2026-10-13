@@ -511,7 +511,7 @@ impl Render for Snip {
                 .with_animation(
                     "snip-card-enter",
                     crate::motion::content_enter(),
-                    |card, delta| card.opacity(0.55 + 0.45 * delta),
+                    |card, delta| card.opacity(delta),
                 )
                 .into_any_element()
         });

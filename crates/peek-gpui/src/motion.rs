@@ -3,7 +3,7 @@
 use gpui_kit::Animation;
 use std::time::Duration;
 
-pub const MENU_EXIT: Duration = Duration::from_millis(85);
+pub const MENU_EXIT: Duration = Duration::from_millis(110);
 
 /// Read the OS preference rather than assuming GPUI's default is appropriate.
 pub fn sync_system_preference(cx: &mut gpui_kit::App) {
@@ -38,7 +38,7 @@ pub fn sync_system_preference(cx: &mut gpui_kit::App) {
 }
 
 pub fn menu_enter() -> Animation {
-    Animation::new(Duration::from_millis(145)).with_easing(ease_out)
+    Animation::new(Duration::from_millis(210)).with_easing(ease_out)
 }
 
 pub fn menu_exit() -> Animation {
@@ -46,7 +46,7 @@ pub fn menu_exit() -> Animation {
 }
 
 pub fn content_enter() -> Animation {
-    Animation::new(Duration::from_millis(130)).with_easing(ease_out)
+    Animation::new(Duration::from_millis(180)).with_easing(ease_out)
 }
 
 fn ease_out(t: f32) -> f32 {
