@@ -569,7 +569,7 @@ impl Peek {
     ) -> Self {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
-        native_window::hide_window_buttons(window);
+        native_window::prepare_panel(window);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             // Reopening a panel may retain GPUI focus and emit no new focus
             // event. Start AppKit text input again for the active editor.
