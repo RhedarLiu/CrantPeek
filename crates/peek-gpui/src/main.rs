@@ -18,6 +18,7 @@
 
 mod assets;
 mod fonts;
+mod motion;
 mod native_window;
 mod settings;
 mod shortcuts;
@@ -2648,6 +2649,7 @@ impl Peek {
 
 impl Render for Peek {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        motion::sync_system_preference(cx);
         // A selection arrives off the UI thread, so it is applied here where a
         // `Window` is available.
         if let Some((failed, message)) = self.pending_toast.take() {
@@ -4141,6 +4143,11 @@ impl Peek {
                         ),
                 )
             })
+            .with_animation(
+                SharedString::from(format!("settings-enter-{}", self.settings_tab)),
+                motion::content_enter(),
+                |page, delta| page.opacity(0.55 + 0.45 * delta),
+            )
             .into_any_element()
     }
 }
@@ -4207,6 +4214,8 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     // The overlay preview needs a desktop-sized canvas; the panel is a popup.
     let preview_size = if page == "snip" {
         size(ui_px(1400.), ui_px(900.))
+    } else if page == "task-menu" {
+        size(ui_px(176.), ui_px(210.))
     } else {
         size(ui_px(480.), ui_px(560.))
     };
@@ -4343,6 +4352,10 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             }
             cx.notify();
         });
+        if page == "task-menu" {
+            let menu = task_menu::preview(view, window, cx);
+            return cx.new(|cx| Root::new(menu, window, cx).bg(transparent_black()));
+        }
         cx.new(|cx| Root::new(view, window, cx))
     })?;
 
@@ -4543,6 +4556,22 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             );
         })?;
     }
+    // Capture resting UI by default; an explicit time allows animation frames
+    // to be compared without recording the user's desktop.
+    let elapsed = std::env::var("PEEK_MOTION_TIME_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(200)
+        .min(1000);
+    // One-shot GPUI animations use a wall clock in release builds, whereas
+    // async timers in the headless executor use a simulated clock.
+    std::thread::sleep(Duration::from_millis(elapsed));
+    cx.advance_clock(Duration::from_millis(elapsed));
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        use gpui_kit::test::TestWindowExt as _;
+        window.render_frame(cx);
+    })?;
     let image = cx.capture_screenshot(window.into())?;
     let out = std::path::PathBuf::from(path);
     if let Some(parent) = out.parent() {

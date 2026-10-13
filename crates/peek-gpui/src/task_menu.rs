@@ -4,15 +4,17 @@ use super::*;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::menu::PopupMenu;
 
-struct TaskMenu {
+pub(crate) struct TaskMenu {
     menu: Entity<PopupMenu>,
     parent: Entity<Peek>,
     parent_window: AnyWindowHandle,
     closed: bool,
+    removed: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 pub fn open(parent: Entity<Peek>, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    motion::sync_system_preference(cx);
     let parent_window = window.window_handle();
     let parent_bounds = window.window_bounds().get_bounds();
     let popup_size = size(ui_px(176.), ui_px(210.));
@@ -58,6 +60,12 @@ pub fn open(parent: Entity<Peek>, position: Point<Pixels>, window: &mut Window, 
             });
         }
     });
+}
+
+/// Use the production menu surface in offscreen visual checks.
+pub(crate) fn preview(parent: Entity<Peek>, window: &mut Window, cx: &mut App) -> Entity<TaskMenu> {
+    let handle = window.window_handle();
+    cx.new(|cx| TaskMenu::new(parent, handle, window, cx))
 }
 
 impl TaskMenu {
@@ -109,15 +117,39 @@ impl TaskMenu {
             parent,
             parent_window,
             closed: false,
+            removed: false,
             _subscriptions: vec![dismissed, activation],
         }
     }
 
     fn close(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.closed {
+            // Clicking another app during the exit must never steal focus back.
+            if !restore {
+                self.finish_close(false, window, cx);
+            }
             return;
         }
         self.closed = true;
+        if !restore || cx.reduce_motion() {
+            self.finish_close(restore, window, cx);
+            return;
+        }
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(motion::MENU_EXIT).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_close(true, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_close(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.removed {
+            return;
+        }
+        self.removed = true;
         let parent = self.parent.clone();
         let handle = self.parent_window;
         window.remove_window();
@@ -142,9 +174,31 @@ impl TaskMenu {
 
 impl Render for TaskMenu {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let surface = div().relative().child(self.menu.clone());
+        let surface = if self.closed {
+            surface
+                .with_animation("task-menu-exit", motion::menu_exit(), |surface, delta| {
+                    surface.top(ui_px(-2. * delta)).opacity(1. - delta)
+                })
+                .into_any_element()
+        } else {
+            surface
+                .with_animation("task-menu-enter", motion::menu_enter(), |surface, delta| {
+                    surface
+                        .top(ui_px(-4. * (1. - delta)))
+                        .opacity(0.35 + 0.65 * delta)
+                })
+                .into_any_element()
+        };
         div()
+            .id("task-menu-transition")
+            .when(self.closed, |root| {
+                root.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                    .capture_any_mouse_up(|_, _, cx| cx.stop_propagation())
+                    .capture_key_down(|_, _, cx| cx.stop_propagation())
+            })
             .p(ui_px(8.))
-            .child(self.menu.clone())
+            .child(surface)
             .on_prepaint(|bounds, window, _| {
                 // Follow the actual component height, including UI scaling.
                 let wanted = size(ui_px(176.), bounds.size.height);

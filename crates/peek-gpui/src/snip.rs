@@ -88,6 +88,7 @@ impl Snip {
         auto_query: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::motion::sync_system_preference(cx);
         let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
         let snip = Self {
             anchor: None,
@@ -506,6 +507,11 @@ impl Render for Snip {
                                     this.close(window);
                                 })),
                         ),
+                )
+                .with_animation(
+                    "snip-card-enter",
+                    crate::motion::content_enter(),
+                    |card, delta| card.opacity(0.55 + 0.45 * delta),
                 )
                 .into_any_element()
         });
