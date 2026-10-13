@@ -49,6 +49,13 @@ pub struct ImageInput {
     pub png_base64: String,
 }
 impl ImageInput {
+    pub fn from_png(bytes: &[u8]) -> Self {
+        use base64::Engine;
+        Self {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
     pub fn validate_png(&self, max_bytes: usize, max_pixels: u64) -> Result<(), Error> {
         use base64::Engine;
         if self.png_base64.len() > max_bytes.div_ceil(3) * 4 {
@@ -319,8 +326,39 @@ impl Client {
         tx: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(), Error> {
+        self.stream_channels_inner(channels, (text, target), messages, None, tx, cancel)
+            .await
+    }
+
+    /// Image turns use the same ordered fallback policy, but only vision AI.
+    pub async fn stream_image_channels(
+        &self,
+        channels: &[peek_core::Channel],
+        messages: &[Message],
+        image: &ImageInput,
+        tx: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(), Error> {
+        image.validate_png(12 * 1024 * 1024, 16_000_000)?;
+        self.stream_channels_inner(channels, ("", ""), messages, Some(image), tx, cancel)
+            .await
+    }
+
+    async fn stream_channels_inner(
+        &self,
+        channels: &[peek_core::Channel],
+        translation: (&str, &str),
+        messages: &[Message],
+        image: Option<&ImageInput>,
+        tx: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(), Error> {
+        let (text, target) = translation;
         let mut last_error = Error::Invalid("status-channel-missing".into());
         for channel in channels {
+            if image.is_some() && (!channel.kind.is_ai() || !channel.vision) {
+                continue;
+            }
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -360,13 +398,28 @@ impl Client {
                 continue;
             };
             let (net_tx, mut net_rx) = mpsc::channel(32);
-            let request = self.stream(
-                &provider,
-                &channel.api_key,
-                messages,
-                net_tx,
-                cancel.clone(),
-            );
+            let request = async {
+                if let Some(image) = image {
+                    self.stream_image(
+                        &provider,
+                        &channel.api_key,
+                        messages,
+                        image,
+                        net_tx,
+                        cancel.clone(),
+                    )
+                    .await
+                } else {
+                    self.stream(
+                        &provider,
+                        &channel.api_key,
+                        messages,
+                        net_tx,
+                        cancel.clone(),
+                    )
+                    .await
+                }
+            };
             let drain = async {
                 let mut output = false;
                 let mut failed = None;
@@ -860,6 +913,139 @@ mod tests {
                 .encode(include_bytes!("../../../assets/ocr-test.png")),
         }
     }
+    async fn image_stub(
+        status: u16,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<Value>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0; 4096];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&bytes[..header_end]);
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            while bytes.len() < header_end + length {
+                let mut chunk = [0; 4096];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            let request = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+        (format!("http://{address}/v1"), handle)
+    }
+
+    #[tokio::test]
+    async fn image_channels_skip_nonvision_and_fall_back_before_output() {
+        let (bad, first) = image_stub(503, "unavailable").await;
+        let (good, second) = image_stub(
+            200,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a chart\"}}]}\n\ndata: [DONE]\n\n",
+        )
+        .await;
+        let make = |endpoint: String, vision| peek_core::Channel {
+            endpoint,
+            vision,
+            api_key: "test-only".into(),
+            model: "vision-test".into(),
+            ..Default::default()
+        };
+        let channels = vec![
+            peek_core::Channel {
+                kind: peek_core::ChannelKind::GoogleFree,
+                ..Default::default()
+            },
+            make("http://127.0.0.1:1".into(), false),
+            make(bad, true),
+            make(good, true),
+        ];
+        let messages = vec![Message {
+            role: "user".into(),
+            content: "explain".into(),
+        }];
+        let (tx, mut rx) = mpsc::channel(16);
+        Client::default()
+            .stream_image_channels(
+                &channels,
+                &messages,
+                &test_image(),
+                tx,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rx.recv().await, Some(Event::Text("a chart".into())));
+        assert_eq!(rx.recv().await, Some(Event::Done));
+        for request in [first.await.unwrap(), second.await.unwrap()] {
+            assert_eq!(request["messages"][0]["content"][1]["type"], "image_url");
+            assert!(
+                request["messages"][0]["content"][1]["image_url"]["url"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("data:image/png;base64,")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn image_channels_do_not_restart_a_partially_streamed_answer() {
+        let (endpoint, server) = image_stub(
+            200,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        )
+        .await;
+        let channel = peek_core::Channel {
+            endpoint,
+            vision: true,
+            api_key: "test-only".into(),
+            model: "vision-test".into(),
+            ..Default::default()
+        };
+        let unused = peek_core::Channel {
+            endpoint: "http://127.0.0.1:1".into(),
+            ..channel.clone()
+        };
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = Client::default()
+            .stream_image_channels(
+                &[channel, unused],
+                &[Message {
+                    role: "user".into(),
+                    content: "explain".into(),
+                }],
+                &test_image(),
+                tx,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(result, Err(Error::Invalid(code)) if code == "error-stream-ended"));
+        assert_eq!(rx.recv().await, Some(Event::Text("partial".into())));
+        server.await.unwrap();
+    }
+
     #[test]
     fn malformed_image_and_pixel_bomb_rejected() {
         assert!(

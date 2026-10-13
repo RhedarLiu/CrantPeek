@@ -39,6 +39,12 @@ pub enum Action {
         replies: Sender<OverlayEvent>,
         cancel: tokio_util::sync::CancellationToken,
     },
+    /// Explicit image interpretation; pixels remain transient and are never saved.
+    ExplainImage {
+        png: Vec<u8>,
+        replies: Sender<OverlayEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    },
     Welcome,
     UpdateChecked(Result<Option<String>, String>),
     /// A UI-visible startup or registration error.

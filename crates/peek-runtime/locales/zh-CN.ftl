@@ -394,3 +394,9 @@ settings-tab-about = 关于
 settings-about-description = 快捷查询，即用即走。
 settings-about-website = 官网
 settings-about-github = GitHub
+
+status-vision-channel-missing = 请在渠道设置中启用「支持图片输入」，并将该 AI 渠道加入调用顺序。
+status-image-preparing = 正在准备图片…
+snip-explain-upload = 图片解读：将选区图片发送给支持图片的 AI
+snip-copy-answer = 复制结果
+snip-answer-copied = 已复制解读结果

@@ -18,6 +18,7 @@ use std::sync::{
 };
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::text::TextView;
@@ -35,6 +36,8 @@ enum OcrResult {
     Text(String),
     Empty,
     Failed(String),
+    Image(Vec<u8>),
+    ImageFailed(String),
 }
 
 /// Card geometry, also used to keep it on screen.
@@ -72,6 +75,7 @@ pub struct Snip {
     /// Close as soon as the text is copied, from the user's settings.
     close_on_copy: bool,
     auto_query: bool,
+    image_mode: bool,
     cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -103,6 +107,7 @@ impl Snip {
             captured: false,
             close_on_copy,
             auto_query,
+            image_mode: false,
             cancel: tokio_util::sync::CancellationToken::new(),
         };
         // The worker thread and the panel's progress channel cannot touch GPUI
@@ -168,7 +173,40 @@ impl Snip {
         let mut changed = false;
         let mut recognized = None;
         while let Ok(result) = self.ocr_rx.try_recv() {
+            if self.image_mode
+                && matches!(
+                    result,
+                    OcrResult::Text(_) | OcrResult::Empty | OcrResult::Failed(_)
+                )
+            {
+                continue;
+            }
             match result {
+                OcrResult::Image(png) => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.events = Some(rx);
+                    if self
+                        .link
+                        .send(Action::ExplainImage {
+                            png,
+                            replies: tx,
+                            cancel: self.cancel.clone(),
+                        })
+                        .is_err()
+                    {
+                        self.busy = false;
+                        self.status = i18n::tr("status-worker-crashed");
+                    } else {
+                        self.status = i18n::tr("status-generating");
+                    }
+                    changed = true;
+                }
+                OcrResult::ImageFailed(error) => {
+                    self.pending_toast = Some(error);
+                    self.busy = false;
+                    self.status = i18n::tr("status-failed");
+                    changed = true;
+                }
                 OcrResult::Text(text) => recognized = Some(text),
                 OcrResult::Empty => {
                     self.status = i18n::tr("status-ocr-empty");
@@ -212,7 +250,7 @@ impl Snip {
             cx.notify();
         }
         // Started after the drain loops, which borrow other fields.
-        if self.auto_query && self.text.is_some() && self.events.is_none() {
+        if !self.image_mode && self.auto_query && self.text.is_some() && self.events.is_none() {
             self.translate(cx);
         }
     }
@@ -280,6 +318,39 @@ impl Snip {
         cx.notify();
     }
 
+    /// Only this explicit action uploads pixels; OCR never sends images.
+    fn explain_image(&mut self, cx: &mut Context<Self>) {
+        let Some(rect) = self.selection() else {
+            return;
+        };
+        self.cancel.cancel();
+        self.cancel = tokio_util::sync::CancellationToken::new();
+        self.image_mode = true;
+        self.events = None;
+        self.answer.clear();
+        self.busy = true;
+        self.status = i18n::tr("status-image-preparing");
+        let screen = self.screen.clone();
+        let tx = self.ocr_tx.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let image =
+                    capture::crop(&screen, rect).ok_or_else(|| i18n::tr("status-ocr-empty"))?;
+                let image = capture::prepare_region(image);
+                let mut png = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgba8(image)
+                    .write_to(&mut png, image::ImageFormat::Png)
+                    .map_err(|_| i18n::tr("error-image-header"))?;
+                Ok::<_, String>(png.into_inner())
+            })();
+            let _ = tx.send(match result {
+                Ok(png) => OcrResult::Image(png),
+                Err(error) => OcrResult::ImageFailed(error),
+            });
+        });
+        cx.notify();
+    }
+
     /// Hands the recognised text to the panel and closes the overlay.
     fn send_to_panel(&mut self, window: &mut Window) {
         if let Some(text) = self.text.clone() {
@@ -291,7 +362,11 @@ impl Snip {
     /// Copies the recognised text and confirms with a toast, so the card does
     /// not have to grow a status line for a transient message.
     fn copy_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = self.text.clone() else {
+        let Some(text) = (if self.image_mode {
+            (!self.answer.is_empty()).then(|| self.answer.clone())
+        } else {
+            self.text.clone()
+        }) else {
             return;
         };
         let characters = text.chars().count();
@@ -302,7 +377,12 @@ impl Snip {
             self.close(window);
         } else {
             window.push_notification(
-                Notification::success(i18n::tr("snip-copied")).autohide(true),
+                Notification::success(i18n::tr(if self.image_mode {
+                    "snip-answer-copied"
+                } else {
+                    "snip-copied"
+                }))
+                .autohide(true),
                 cx,
             );
         }
@@ -386,7 +466,16 @@ impl Render for Snip {
                         .child(
                             Button::new("snip_copy")
                                 .icon(IconName::Copy)
-                                .label(i18n::tr("snip-copy-text"))
+                                .label(i18n::tr(if self.image_mode {
+                                    "snip-copy-answer"
+                                } else {
+                                    "snip-copy-text"
+                                }))
+                                .disabled(if self.image_mode {
+                                    self.answer.is_empty()
+                                } else {
+                                    self.text.is_none()
+                                })
                                 .on_click(cx.listener(|this, _event, window, cx| {
                                     this.copy_text(window, cx);
                                 })),
@@ -396,9 +485,17 @@ impl Render for Snip {
                                 .primary()
                                 .icon(IconName::CornerDownLeft)
                                 .label(i18n::tr("snip-to-input"))
+                                .disabled(self.text.is_none())
                                 .on_click(cx.listener(|this, _event, window, _cx| {
                                     this.send_to_panel(window);
                                 })),
+                        )
+                        .child(
+                            Button::new("snip_explain_image")
+                                .icon(IconName::Sparkles)
+                                .tooltip(i18n::tr("snip-explain-upload"))
+                                .disabled(self.image_mode && self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.explain_image(cx))),
                         )
                         .child(div().flex_1())
                         .child(

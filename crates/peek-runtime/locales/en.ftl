@@ -369,3 +369,9 @@ settings-tab-about = About
 settings-about-description = Instant lookup, then back to your reading.
 settings-about-website = Website
 settings-about-github = GitHub
+
+status-vision-channel-missing = Enable image input for an AI channel and add it to the call order.
+status-image-preparing = Preparing image…
+snip-explain-upload = Explain image: send this selection to an image-capable AI
+snip-copy-answer = Copy answer
+snip-answer-copied = Explanation copied
