@@ -20,7 +20,6 @@ mod assets;
 mod fonts;
 mod motion;
 mod native_window;
-mod panel_surface;
 mod settings;
 mod shortcuts;
 mod snip;
@@ -41,7 +40,6 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -323,9 +321,9 @@ fn pointer_in_chrome_zone(position: Point<Pixels>, window: &Window) -> bool {
         0.
     };
     chrome_zone_contains(
-        position.x.as_f32() / scaled(1.) - panel_surface::INSET,
-        position.y.as_f32() / scaled(1.) - panel_surface::INSET,
-        width / scaled(1.) - 2. * panel_surface::INSET,
+        position.x.as_f32() / scaled(1.),
+        position.y.as_f32() / scaled(1.),
+        width / scaled(1.),
         input_top / scaled(1.),
         chrome_visible(),
     )
@@ -570,7 +568,7 @@ impl Peek {
     ) -> Self {
         // Hiding on focus loss. GPUI's callback carries no activation state, so
         // the state is read back from the window itself.
-        native_window::prepare_panel(window);
+        native_window::hide_window_buttons(window);
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             // Reopening a panel may retain GPUI focus and emit no new focus
             // event. Start AppKit text input again for the active editor.
@@ -2717,8 +2715,6 @@ impl Render for Peek {
                 fallback
             });
         }
-        // The shadow lives outside the content; keep the original content size.
-        height += scaled(2. * panel_surface::INSET);
         // A settings page may be long, especially with increased UI zoom.
         // Keep the native window on its display; the settings stack scrolls.
         if let Some(display) = window.display(cx) {
@@ -2739,7 +2735,7 @@ impl Render for Peek {
             let entity = cx.entity();
             native_window::resize_panel(
                 window,
-                size(ui_px(PANEL_WIDTH + 2. * panel_surface::INSET), px(height)),
+                size(ui_px(PANEL_WIDTH), px(height)),
                 chrome_offset - self.chrome_offset,
                 cx,
                 move |window, cx| {
@@ -2755,14 +2751,13 @@ impl Render for Peek {
         }
         // The pointer zone follows the frame actually painted, not the request.
         set_chrome_in_frame(!self.settings && self.chrome_offset > 0.);
-        let page = if self.onboarding {
-            self.welcome_page(cx)
-        } else if self.settings {
-            self.settings_page(cx)
-        } else {
-            self.query_page(cx)
-        };
-        panel_surface::wrap(page, cx)
+        if self.onboarding {
+            return self.welcome_page(cx);
+        }
+        if self.settings {
+            return self.settings_page(cx).into_any_element();
+        }
+        self.query_page(cx).into_any_element()
     }
 }
 
@@ -2888,16 +2883,7 @@ impl Peek {
         // One turn of the conversation. The user's own words sit on the right
         // and the assistant's on the left, which is what makes the two readable
         // apart in a panel this narrow.
-        let primary = theme.primary;
-        let primary_foreground = theme.primary_foreground;
-        let secondary = theme.secondary;
-        let secondary_foreground = theme.secondary_foreground;
         let bubble = move |index: usize, from_user: bool, text: String| -> AnyElement {
-            let (bubble_bg, bubble_fg) = if from_user {
-                (primary, primary_foreground)
-            } else {
-                (secondary, secondary_foreground)
-            };
             let body: AnyElement = if from_user {
                 div().text_size(ui_px(13.)).child(text).into_any_element()
             } else {
@@ -2913,11 +2899,17 @@ impl Peek {
                 .child(
                     div()
                         .max_w(ui_px(340.))
-                        .bg(bubble_bg)
-                        .text_color(bubble_fg)
-                        .rounded(ui_px(14.))
-                        .px(ui_px(12.))
-                        .py(ui_px(9.))
+                        .text_color(fg)
+                        .rounded(ui_px(12.))
+                        .when(from_user, |bubble| {
+                            bubble
+                                .bg(bg)
+                                .border_1()
+                                .border_color(border)
+                                .px(ui_px(12.))
+                                .py(ui_px(8.))
+                        })
+                        .when(!from_user, |bubble| bubble.py(ui_px(6.)))
                         .child(body),
                 )
                 .into_any_element()
@@ -3035,12 +3027,16 @@ impl Peek {
                         // input box, whose own padding starts at the same place.
                         .px(ui_px(14.))
                         .child(
-                            // A tag rather than plain text, so the title and
-                            // the buttons look like one row of controls.
-                            Tag::secondary()
-                                .rounded(ui_px(8.))
+                            h_flex()
+                                .items_center()
+                                .gap(ui_px(7.))
                                 .h(ui_px(28.))
-                                .px(ui_px(10.))
+                                .child(
+                                    svg()
+                                        .path("brand/crant-peek.svg")
+                                        .size(ui_px(18.))
+                                        .text_color(fg),
+                                )
                                 .child(
                                     div()
                                         .font_family(set.latin)
@@ -3049,16 +3045,7 @@ impl Peek {
                                         .child("Crant Peek"),
                                 ),
                         )
-                        .child(
-                            div()
-                                .id("panel-drag-space")
-                                .flex_1()
-                                .h_full()
-                                .window_control_area(WindowControlArea::Drag)
-                                .on_mouse_down(MouseButton::Left, |_, window, _| {
-                                    window.start_window_move();
-                                }),
-                        )
+                        .child(div().flex_1())
                         .child(
                             // Which channel answers a plain translation. Only
                             // channels that can translate are listed, and the same
@@ -4245,11 +4232,6 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     let published: std::rc::Rc<std::cell::RefCell<Option<Entity<Peek>>>> = Default::default();
     let publish_target = published.clone();
     let window = cx.open_window(preview_size, |window, cx| {
-        window.set_background_appearance(if page == "snip" {
-            WindowBackgroundAppearance::Opaque
-        } else {
-            WindowBackgroundAppearance::Transparent
-        });
         if let Err(err) = fonts::register(cx) {
             eprintln!("font registration failed: {err}");
         }
@@ -4374,7 +4356,7 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             let menu = task_menu::preview(view, window, cx);
             return cx.new(|cx| Root::new(menu, window, cx).bg(transparent_black()));
         }
-        cx.new(|cx| Root::new(view, window, cx).bg(transparent_black()))
+        cx.new(|cx| Root::new(view, window, cx))
     })?;
 
     // A few turns: settings measures its children after the first paint and
@@ -4610,8 +4592,8 @@ fn window_options() -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(ui_px(320.), ui_px(200.)),
             size: size(
-                ui_px(PANEL_WIDTH + 2. * panel_surface::INSET),
-                ui_px(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2. + 2. * panel_surface::INSET),
+                ui_px(PANEL_WIDTH),
+                ui_px(PANEL_COMPACT_BASE + PANEL_INPUT_ROW * 2.),
             ),
         })),
         titlebar: Some(TitlebarOptions {
@@ -4622,7 +4604,6 @@ fn window_options() -> WindowOptions {
         // Documented as "appears above all other windows"; also the branch that
         // sets CanJoinAllSpaces, which a globally summoned popup needs.
         kind: WindowKind::PopUp,
-        window_background: WindowBackgroundAppearance::Transparent,
         // Created hidden: the panel only appears when summoned.
         show: false,
         focus: true,
@@ -4769,7 +4750,7 @@ fn main() -> anyhow::Result<()> {
 
         let handle = match gpui_kit::open_window(window_options(), cx, move |window, cx| {
             let view = cx.new(|cx| Peek::new(window, cx, view_tx, action_rx));
-            cx.new(|cx| Root::new(view, window, cx).bg(transparent_black()))
+            cx.new(|cx| Root::new(view, window, cx))
         }) {
             Ok((handle, _)) => handle,
             Err(err) => {

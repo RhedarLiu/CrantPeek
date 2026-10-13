@@ -38,6 +38,11 @@ pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if path == "brand/crant-peek.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../../assets/tray-query.svg"
+            ))));
+        }
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -46,6 +51,9 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(AppIcons.list(path)?);
+        if "brand/crant-peek.svg".starts_with(path) {
+            paths.push("brand/crant-peek.svg".into());
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)
@@ -59,6 +67,7 @@ mod tests {
     fn application_and_component_assets_remain_available() {
         let mut expected = gpui_kit::assets::Assets.list("").unwrap();
         expected.extend(AppIcons.list("").unwrap());
+        expected.push("brand/crant-peek.svg".into());
         for path in expected {
             let bytes = AppAssets.load(&path).unwrap().unwrap();
             assert!(

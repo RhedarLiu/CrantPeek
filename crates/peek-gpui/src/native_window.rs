@@ -57,34 +57,9 @@ pub fn set_application_icon() {
 
 /// Shows and focuses the peek window.
 pub fn show(window: &mut Window) {
-    prepare_panel(window);
     #[cfg(windows)]
     windows_show(window);
     window.activate_window();
-}
-
-/// AppKit's key-window shadow is much heavier than the compact panel needs.
-/// Suppress it at creation and every summon; the UI draws its own boundaries.
-pub fn prepare_panel(window: &mut Window) {
-    hide_window_buttons(window);
-    #[cfg(target_os = "macos")]
-    if let Some(view) = macos_view(window) {
-        unsafe {
-            use objc2::{msg_send, runtime::AnyObject};
-            let native: *mut AnyObject = msg_send![view as *mut AnyObject, window];
-            if !native.is_null() {
-                // Remove the native frame around the transparent shadow inset.
-                // Changing the style mask resigns first responder, so do this
-                // only once at creation, never during later summons.
-                let style: usize = msg_send![native, styleMask];
-                if style != 0 {
-                    let _: () = msg_send![native, setStyleMask: 0usize];
-                }
-                let _: () = msg_send![native, setHasShadow: false];
-                let _: () = msg_send![native, invalidateShadow];
-            }
-        }
-    }
 }
 
 /// Refresh AppKit's input context after GPUI has focused a text editor.
