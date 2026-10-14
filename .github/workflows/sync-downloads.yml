@@ -11,7 +11,7 @@ on:
       runner:
         description: 'Upload network environment'
         type: choice
-        default: macos-latest
+        default: ubuntu-latest
         options: [ubuntu-latest, macos-latest]
   workflow_call:
     inputs:
@@ -20,7 +20,7 @@ on:
         type: string
       runner:
         type: string
-        default: macos-latest
+        default: ubuntu-latest
     secrets:
       GITCODE_TOKEN:
         required: false
@@ -32,7 +32,7 @@ concurrency:
 jobs:
   sync:
     if: github.event_name != 'release' || !github.event.release.prerelease
-    runs-on: ${{ inputs.runner || 'macos-latest' }}
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

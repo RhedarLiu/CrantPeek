@@ -217,7 +217,7 @@ def synchronize():
                     raise SyncError(f"Existing {name} differs; refusing to overwrite a published file")
             else:
                 upload(root / name, api(f"/releases/{tag}/upload_url", token, file_name=name))
-            print("Verified existing or uploaded:", name)
+            print("Verified existing or uploaded:", name, flush=True)
         sync_asset(NAMES[-1])
         # Distinct storage objects can upload independently. Publish metadata
         # only after all futures and every public checksum verification pass.
@@ -240,7 +240,7 @@ def synchronize():
         api(f"/releases/{tag}", token, "PATCH", {
             "name": release["name"], "body": release["body"], "release_status": "latest",
         })
-        print("Public downloads verified and published:", tag)
+        print("Public downloads verified and published:", tag, flush=True)
 
 
 if __name__ == "__main__":
