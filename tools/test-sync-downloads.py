@@ -68,6 +68,8 @@ class SyncTests(unittest.TestCase):
             if method != "GET":
                 mutations.append((method, body))
                 return {}
+            if path == "/tags":
+                return [{"name": "v0.1.0", "commit": {"id": "1" * 40}}]
             if path == "/releases":
                 return [{"tag_name": "v0.2.0", "prerelease": False}] if newer else []
             if path.endswith("upload_url"):
@@ -91,6 +93,41 @@ class SyncTests(unittest.TestCase):
             else:
                 sync.synchronize()
         return mutations, uploaded
+
+    def test_missing_tag_pushes_only_tag_with_credentials_out_of_argv(self):
+        recorded = []
+        def run(args, **kwargs):
+            recorded.append((args, kwargs))
+            if "--is-shallow-repository" in args:
+                return MagicMock(returncode=0, stdout="true\n")
+            if "rev-parse" in args:
+                return MagicMock(returncode=0, stdout="1" * 40 + "\n")
+            if "push" in args:
+                self.assertEqual(args[-1], "refs/tags/v0.1.1")
+                self.assertNotIn("--force", args)
+                self.assertNotIn("test-only-secret", " ".join(args))
+                helper = Path(kwargs["env"]["GIT_ASKPASS"])
+                self.assertNotIn("test-only-secret", helper.read_text())
+                self.assertEqual(kwargs["env"]["GITCODE_TOKEN"], "test-only-secret")
+            return MagicMock(returncode=0)
+        with patch.object(sync, "api", side_effect=[[], {"login": "test-user"},
+                [{"name": "v0.1.1", "commit": {"id": "1" * 40}}]]), \
+                patch.object(sync.subprocess, "run", run):
+            sync.ensure_release_tag("v0.1.1", "1" * 40, "test-only-secret")
+        self.assertTrue(any("--unshallow" in args for args, _ in recorded))
+
+    def test_matching_tag_needs_no_git_write(self):
+        with patch.object(sync, "api", return_value=[{"name": "v0.1.1", "commit": {"id": "1" * 40}}]), \
+                patch.object(sync.subprocess, "run") as run:
+            sync.ensure_release_tag("v0.1.1", "1" * 40, "test-only")
+            run.assert_not_called()
+
+    def test_conflicting_tag_is_never_overwritten(self):
+        with patch.object(sync, "api", return_value=[{"name": "v0.1.1", "commit": {"id": "2" * 40}}]), \
+                patch.object(sync.subprocess, "run") as run:
+            with self.assertRaises(sync.SyncError):
+                sync.ensure_release_tag("v0.1.1", "1" * 40, "test-only")
+            run.assert_not_called()
 
     def test_publish_only_after_all_attachments_are_verified(self):
         mutations, uploaded = self.run_fixture()

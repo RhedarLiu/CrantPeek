@@ -47,10 +47,10 @@ class PublicRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def api(path, token, method="GET", body=None, **params):
+def api(path, token, method="GET", body=None, base=API, **params):
     query = urllib.parse.urlencode({"access_token": token, **params})
     data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(API + path + "?" + query, data=data,
+    request = urllib.request.Request(base + path + "?" + query, data=data,
                                      method=method, headers={"Content-Type": "application/json"})
     try:
         # Prevent a redirect from forwarding the API token elsewhere.
@@ -116,6 +116,57 @@ def gh(*args):
     return result.stdout
 
 
+def ensure_release_tag(tag, commit, token):
+    def mirrored():
+        tags = api("/tags", token, per_page=100)
+        found = next((item for item in tags if item.get("name") == tag), None)
+        if found is None:
+            return False
+        target = found.get("commit", {})
+        if (target.get("sha") or target.get("id")) != commit:
+            raise SyncError("Download tag differs from the source release; refusing to overwrite it")
+        return True
+    if mirrored():
+        return
+    profile = api("/user", token, base="https://api.gitcode.com/api/v5")
+    login = profile.get("login", "")
+    if not isinstance(login, str) or not login or any(c in login for c in "\r\n\0"):
+        raise SyncError("Cannot resolve download repository login")
+    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    fetch = ["git", "fetch"] + (["--unshallow"] if shallow == "true" else []) + ["origin", "tag", tag]
+    result = subprocess.run(fetch, capture_output=True, timeout=180)
+    if result.returncode:
+        raise SyncError("Cannot fetch the source release tag")
+    resolved = subprocess.run(["git", "rev-parse", tag + "^{commit}"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    if resolved != commit:
+        raise SyncError("Source tag changed; refusing to publish mismatched packages")
+    with tempfile.TemporaryDirectory() as directory:
+        helper = Path(directory) / "askpass.py"
+        helper.write_text("#!/usr/bin/env python3\nimport os,sys\np=sys.argv[1].lower()\n"
+                          "if 'gitcode.com' not in p: sys.exit(1)\n"
+                          "print(os.environ['_DOWNLOAD_GIT_LOGIN'] if p.startswith('username') else os.environ['GITCODE_TOKEN'])\n")
+        helper.chmod(0o700)
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("GIT_TRACE") and k != "GIT_CURL_VERBOSE"}
+        env.update({"GIT_ASKPASS": str(helper), "GIT_TERMINAL_PROMPT": "0",
+                    "_DOWNLOAD_GIT_LOGIN": login, "GITCODE_TOKEN": token})
+        # Transfer only this new release tag, never branches or forced updates.
+        # Credentials are provided through askpass, not URLs or command arguments.
+        result = subprocess.run(["git", "-c", "credential.helper=", "-c", "http.followRedirects=false",
+                                 "push", "https://gitcode.com/CrantAI/CrantPeek.git", "refs/tags/" + tag],
+                                env=env, capture_output=True, timeout=180)
+        if result.returncode:
+            raise SyncError("Cannot populate the download release tag; token needs repository write permission or manually refresh the mirror")
+    for _ in range(6):
+        if mirrored():
+            print("Source release tag synchronized:", tag, flush=True)
+            return
+        time.sleep(5)
+    raise SyncError("Download release tag is not visible yet; retry synchronization")
+
+
 def synchronize():
     token = os.environ.get("GITCODE_TOKEN", "")
     if not token:
@@ -151,6 +202,7 @@ def synchronize():
                 raise SyncError("A newer download release exists; refusing to replace latest with an older version")
         existing = next((r for r in releases if r.get("tag_name") == tag), None)
         if existing is None:
+            ensure_release_tag(tag, commit, token)
             api("/releases", token, "POST", {
                 "tag_name": tag, "name": release["name"], "body": release["body"],
                 "target_commitish": commit, "release_status": "pre",
@@ -194,7 +246,7 @@ def synchronize():
 if __name__ == "__main__":
     try:
         synchronize()
-    except (SyncError, KeyError, TypeError, json.JSONDecodeError) as error:
+    except (SyncError, KeyError, TypeError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         # Never print raw request objects, signed URLs, API bodies or tracebacks.
         print("::error::" + (str(error) if isinstance(error, SyncError) else "Invalid release/upload metadata"))
         raise SystemExit(1)
