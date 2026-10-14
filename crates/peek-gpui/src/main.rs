@@ -3268,9 +3268,18 @@ impl Peek {
                                 .px(ui_px(14.))
                                 .child(
                                     h_flex()
+                                        .id("chrome-drag-area")
+                                        .flex_1()
+                                        .h_full()
                                         .items_center()
                                         .gap(ui_px(7.))
-                                        .h(ui_px(28.))
+                                        // Windows needs a native caption hit-test region.
+                                        // Keep toolbar controls outside it so their clicks
+                                        // never start a window drag. macOS already supports
+                                        // moving the panel by its background.
+                                        .when(cfg!(windows), |this| {
+                                            this.window_control_area(WindowControlArea::Drag)
+                                        })
                                         .child(
                                             svg()
                                                 .path("brand/crant-peek.svg")
@@ -3285,7 +3294,6 @@ impl Peek {
                                                 .child("Crant Peek"),
                                         ),
                                 )
-                                .child(div().flex_1())
                                 .child(
                                     // Which channel answers a plain translation. Only
                                     // channels that can translate are listed, and the same

@@ -16,7 +16,7 @@ macOS · Windows · 原生浮窗 · MIT 开源
 
 [![Crant Peek 使用演示](assets/showcase/preview.gif)](assets/showcase/video.mp4)
 
-<p align="center"><a href="assets/showcase/video.mp4">观看完整演示 · 39 秒 · 含声音</a></p>
+<p align="center"><a href="assets/showcase/video.mp4">观看完整演示 · 48 秒 · 含声音</a></p>
 
 阅读文档、浏览网页或看代码时，选中一段内容，用快捷键唤出 Crant Peek。结果就在浮窗里，读完离开；需要继续了解，就在同一个窗口追问。
 
