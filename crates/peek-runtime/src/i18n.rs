@@ -188,8 +188,19 @@ mod tests {
                 // A literal handed to a constructor is a stable widget id, not
                 // a resource reference: Button::new("look-up"), .id("answer").
                 // Without this the audit flags every id shaped like a key.
-                let before = &source[position.saturating_sub(12)..position];
-                if before.ends_with("new(") || before.ends_with(".id(") {
+                // Inspect up to the quote boundary: a fixed byte lookbehind
+                // can split UTF-8, and multiline animation constructors also
+                // carry IDs rather than translation resource names.
+                let before = source[..position].trim_end();
+                if [
+                    "new(",
+                    ".id(",
+                    ".with_animation(",
+                    "ElementId::NamedInteger(",
+                ]
+                .iter()
+                .any(|constructor| before.ends_with(constructor))
+                {
                     continue;
                 }
                 if [
