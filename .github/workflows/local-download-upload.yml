@@ -1,0 +1,36 @@
+name: Prepare local download upload
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing formal release tag
+        required: true
+        type: string
+      certificate:
+        description: Temporary public X.509 certificate (never a private key)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Encrypt one-time upload requests for the local client
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          UPLOAD_CERTIFICATE: ${{ inputs.certificate }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 tools/local-download-upload.py prepare --output dist/encrypted-upload-requests.der
+      - uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-download-transfer
+          path: dist/encrypted-upload-requests.der
+          retention-days: 1
