@@ -17,41 +17,208 @@
 
 use gpui_kit::{AppContext as _, Window};
 
+#[cfg(target_os = "macos")]
+thread_local! {
+    // Keep a concrete image alive through AppKit's asynchronous Dock removal.
+    // All callers run on the application's main thread.
+    static APPLICATION_ICON: std::cell::RefCell<Option<objc2::rc::Retained<objc2::runtime::AnyObject>>> = const { std::cell::RefCell::new(None) };
+    static DOCK_EXIT_TILE: std::cell::RefCell<Option<objc2::rc::Retained<objc2::runtime::AnyObject>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Accessory apps can acquire a Dock tile before Launch Services refreshes
-/// their bundle icon. Set the image explicitly when starting or pinning.
+/// their bundle icon. Refresh both sides of an activation-policy transition.
 pub fn set_application_icon() {
     #[cfg(target_os = "macos")]
-    unsafe {
+    APPLICATION_ICON.with(|cached| unsafe {
         use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
         use objc2_foundation::NSData;
 
         let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let bundle = std::env::current_exe().ok().and_then(|path| {
-            path.parent()
-                .and_then(std::path::Path::parent)
-                .and_then(std::path::Path::parent)
-                .map(std::path::Path::to_path_buf)
-        });
-        // NSWorkspace can return a lazy Icon Services image that draws correctly
-        // in Finder but becomes a placeholder in this app's Dock tile. Decode
-        // the compiled native ICNS into a concrete NSImage instead.
-        let bundled_icon = bundle
-            .and_then(|path| std::fs::read(path.join("Contents/Resources/CrantPeek.icns")).ok());
-        let data = NSData::with_bytes(
-            bundled_icon
-                .as_deref()
-                .unwrap_or(include_bytes!("../../../assets/app-icon.png")),
-        );
-        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
-        let image: *mut AnyObject = msg_send![image, initWithData: &*data];
-        let Some(image) = Retained::from_raw(image) else {
-            eprintln!("Could not decode the application icon");
-            return;
-        };
+        let mut cached = cached.borrow_mut();
+        if cached.is_none() {
+            let bundle = std::env::current_exe().ok().and_then(|path| {
+                path.parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .map(std::path::Path::to_path_buf)
+            });
+            // NSWorkspace can return a lazy Icon Services image that draws correctly
+            // in Finder but becomes a placeholder in this app's Dock tile. Decode
+            // the compiled native ICNS into a concrete NSImage instead.
+            let bundled_icon = bundle.and_then(|path| {
+                std::fs::read(path.join("Contents/Resources/CrantPeek.icns")).ok()
+            });
+            let data = NSData::with_bytes(
+                bundled_icon
+                    .as_deref()
+                    .unwrap_or(include_bytes!("../../../assets/app-icon.png")),
+            );
+            let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+            let image: *mut AnyObject = msg_send![image, initWithData: &*data];
+            let Some(image) = Retained::from_raw(image) else {
+                eprintln!("Could not decode the application icon");
+                return;
+            };
+            *cached = Some(image);
+            println!("Dock application icon decoded and cached");
+        }
+        let image = cached.as_ref().expect("icon was decoded").clone();
+        drop(cached);
         let _: () = msg_send![application, setApplicationIconImage: &*image];
         let tile: *mut AnyObject = msg_send![application, dockTile];
         let _: () = msg_send![tile, display];
-        println!("Dock application icon decoded and refreshed");
+    });
+}
+
+/// Hold the current artwork in the Dock tile while AppKit removes it. Clear
+/// this custom view when returning to Regular so normal system styling remains.
+fn prepare_dock_removal(removing: bool) {
+    #[cfg(target_os = "macos")]
+    APPLICATION_ICON.with(|cached| unsafe {
+        use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let current_tile: *mut AnyObject = msg_send![application, dockTile];
+        if !removing {
+            DOCK_EXIT_TILE.with(|exit| {
+                if let Some(tile) = exit.borrow_mut().take() {
+                    let _: () = msg_send![&*tile, setContentView: std::ptr::null::<AnyObject>()];
+                }
+            });
+            let tile = current_tile;
+            let _: () = msg_send![tile, setContentView: std::ptr::null::<AnyObject>()];
+        } else {
+            // Accessory apps no longer have an application Dock tile. Hold the
+            // outgoing Regular tile itself, not just its image, until the next
+            // pin; querying NSApp.dockTile after the switch can return nil.
+            let tile = DOCK_EXIT_TILE.with(|exit| {
+                let mut exit = exit.borrow_mut();
+                if exit.is_none() {
+                    *exit = Retained::retain(current_tile);
+                }
+                exit.as_ref().cloned()
+            });
+            let Some(tile) = tile else {
+                return;
+            };
+            let Some(image) = cached.borrow().as_ref().cloned() else {
+                return;
+            };
+            // A non-nil contentView can be AppKit's lazy default image view,
+            // not our exit artwork. Replace it explicitly instead of reusing it.
+            let size: NSSize = msg_send![&*tile, size];
+            let size = NSSize::new(size.width.max(1.0), size.height.max(1.0));
+            let view: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+            let view: *mut AnyObject =
+                msg_send![view, initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), size)];
+            let Some(view) = Retained::from_raw(view) else {
+                return;
+            };
+            let _: () = msg_send![&*view, setImage: &*image];
+            let _: () = msg_send![&*view, setImageScaling: 3usize];
+            let _: () = msg_send![&*view, setAutoresizingMask: 18usize];
+            let _: () = msg_send![&*tile, setContentView: &*view];
+            let _: () = msg_send![&*tile, display];
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _ = removing;
+}
+
+pub fn refresh_dock_icon(pinned: bool) {
+    #[cfg(target_os = "macos")]
+    let outgoing = DOCK_EXIT_TILE.with(|exit| exit.borrow().is_some());
+    #[cfg(not(target_os = "macos"))]
+    let outgoing = false;
+    // After removal starts, update the held tile instead of asking NSApp to
+    // rebuild an application icon for a tile it has already discarded.
+    if pinned || !outgoing {
+        set_application_icon();
+    }
+    prepare_dock_removal(!pinned);
+}
+
+/// Check native policy and the exit snapshot, without assuming AppKit's
+/// applicationIconImage getter preserves NSImage identity or TIFF encoding.
+#[cfg(target_os = "macos")]
+pub fn dock_transition_ready(pinned: bool) -> bool {
+    APPLICATION_ICON.with(|cached| unsafe {
+        use objc2::{class, msg_send, runtime::AnyObject};
+        let application: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let policy: isize = msg_send![application, activationPolicy];
+        if policy != if pinned { 0 } else { 1 } {
+            return false;
+        }
+        if pinned {
+            let tile: *mut AnyObject = msg_send![application, dockTile];
+            let view: *mut AnyObject = msg_send![tile, contentView];
+            return view.is_null() && DOCK_EXIT_TILE.with(|exit| exit.borrow().is_none());
+        }
+        DOCK_EXIT_TILE.with(|exit| {
+            let exit = exit.borrow();
+            let Some(tile) = exit.as_ref() else {
+                return false;
+            };
+            let view: *mut AnyObject = msg_send![&**tile, contentView];
+            if view.is_null() {
+                return false;
+            }
+            let image: *mut AnyObject = msg_send![view, image];
+            let cached = cached.borrow();
+            let Some(expected) = cached.as_ref() else {
+                return false;
+            };
+            if image.is_null() {
+                return false;
+            }
+            // NSImageView can copy and promote artwork to an HDR image. Object
+            // identity and TIFF encoding differ; compare normalized pixels.
+            let Some(actual) = icon_pixels(image) else {
+                return false;
+            };
+            let Some(expected) = icon_pixels(&**expected as *const AnyObject as *mut AnyObject)
+            else {
+                return false;
+            };
+            expected.as_chunks::<4>().0.iter().any(|p| p[3] > 0)
+                && actual.len() == expected.len()
+                && actual.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 4)
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn icon_pixels(image: *mut objc2::runtime::AnyObject) -> Option<Vec<u8>> {
+    use objc2::{class, msg_send, rc::Retained, runtime::AnyObject};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    unsafe {
+        let bitmap: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
+        let bitmap: *mut AnyObject = msg_send![bitmap,
+            initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>(),
+            pixelsWide: 64isize, pixelsHigh: 64isize,
+            bitsPerSample: 8isize, samplesPerPixel: 4isize,
+            hasAlpha: true, isPlanar: false,
+            colorSpaceName: &*NSString::from_str("NSDeviceRGBColorSpace"),
+            bytesPerRow: 0isize, bitsPerPixel: 0isize];
+        let bitmap = Retained::from_raw(bitmap)?;
+        let bytes: *mut u8 = msg_send![&*bitmap, bitmapData];
+        let stride: isize = msg_send![&*bitmap, bytesPerRow];
+        if bytes.is_null() || stride <= 0 {
+            return None;
+        }
+        let len = stride as usize * 64;
+        std::ptr::write_bytes(bytes, 0, len);
+        let context: *mut AnyObject =
+            msg_send![class!(NSGraphicsContext), graphicsContextWithBitmapImageRep: &*bitmap];
+        let context = Retained::retain(context)?;
+        let _: () = msg_send![class!(NSGraphicsContext), saveGraphicsState];
+        let _: () = msg_send![class!(NSGraphicsContext), setCurrentContext: &*context];
+        let _: () = msg_send![image,
+            drawInRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(64.0, 64.0)),
+            fromRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            operation: 1usize, fraction: 1.0f64];
+        let _: () = msg_send![class!(NSGraphicsContext), restoreGraphicsState];
+        Some(std::slice::from_raw_parts(bytes, len).to_vec())
     }
 }
 

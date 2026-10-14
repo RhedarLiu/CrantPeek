@@ -560,6 +560,8 @@ struct Peek {
     /// stops hiding when it loses focus. Unpinned is the quick peek that appears
     /// and leaves, with no Dock presence at all.
     pinned: bool,
+    /// Cancels stale Dock refreshes when the pin button is toggled rapidly.
+    pin_transition: u64,
     /// Last applied window height, so the window resizes on transitions only
     /// rather than on every frame.
     applied_height: Option<f32>,
@@ -789,6 +791,7 @@ impl Peek {
             chrome_pointer: None,
             geometry_pending: false,
             pinned: false,
+            pin_transition: 0,
             overlay: None,
             pending_input: None,
             original_query: String::new(),
@@ -1096,6 +1099,50 @@ impl Peek {
                     cx.notify();
                 })
                 .ok();
+            })
+            .detach();
+        }
+
+        #[cfg(target_os = "macos")]
+        if std::env::var("PEEK_PIN_SELFTEST").is_ok() {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                cx.update_window(panel_handle, |_, window, _| show_panel(window))
+                    .ok();
+                let mut passed = true;
+                // Slow transitions cover Dock removal; fast transitions cover
+                // stale refresh callbacks from the preceding pin state.
+                for interval in [350, 350, 20, 20, 20, 350, 350, 350] {
+                    let result = cx
+                        .update_window(panel_handle, |_, window, cx| {
+                            this.update(cx, |peek, cx| {
+                                peek.toggle_pinned(window, cx);
+                                (
+                                    peek.pinned,
+                                    native_window::dock_transition_ready(peek.pinned),
+                                )
+                            })
+                        })
+                        .ok()
+                        .and_then(Result::ok);
+                    passed &= result.is_some_and(|(_, current)| current);
+                    cx.background_executor()
+                        .timer(Duration::from_millis(interval))
+                        .await;
+                    let current = this
+                        .update(cx, |peek, _| {
+                            native_window::dock_transition_ready(peek.pinned)
+                        })
+                        .unwrap_or(false);
+                    passed &= current;
+                    println!(
+                        "[pin-test] transition={result:?} after={interval}ms icon_current={current}"
+                    );
+                }
+                println!("[pin-test] passed={passed}");
+                cx.update(quit_now);
             })
             .detach();
         }
@@ -2743,35 +2790,52 @@ impl Peek {
     /// Switches between the quick peek and a regular window.
     fn toggle_pinned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pinned = !self.pinned;
+        self.pin_transition = self.pin_transition.wrapping_add(1);
+        let transition = self.pin_transition;
+        // Dock can snapshot the bundle fallback when switching back to an
+        // accessory app. Supply the retained concrete image on both sides.
+        native_window::refresh_dock_icon(self.pinned);
         cx.set_activation_policy(if self.pinned {
             ActivationPolicy::Regular
         } else {
             ActivationPolicy::Accessory
         });
+        native_window::refresh_dock_icon(self.pinned);
         if self.pinned {
             // A regular window keeps the title row. Hover is only for a peek.
             set_chrome_locked(true);
             set_chrome_visible(true);
             // A regular app's menu bar only appears once it is activated.
             cx.activate(true);
-            native_window::set_application_icon();
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
-                    .await;
-                let _ = this.update(cx, |this, _| {
-                    if this.pinned {
-                        native_window::set_application_icon();
-                    }
-                });
-            })
-            .detach();
+            native_window::refresh_dock_icon(self.pinned);
         } else {
             set_chrome_locked(false);
             set_chrome_visible(false);
             // Dropping the Dock icon must not take the window with it.
             native_window::show(window);
         }
+        cx.spawn(async move |this, cx| {
+            // Reapply after native policy/activation notifications and during
+            // the removal animation. Setting an image never changes the policy.
+            for delay in [0, 50, 200] {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(delay))
+                    .await;
+                let current = this
+                    .update(cx, |this, _| {
+                        if this.pin_transition != transition {
+                            return false;
+                        }
+                        native_window::refresh_dock_icon(this.pinned);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.notify();
     }
 
