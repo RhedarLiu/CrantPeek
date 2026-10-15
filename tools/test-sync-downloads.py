@@ -110,11 +110,20 @@ class SyncTests(unittest.TestCase):
                 self.assertNotIn("test-only-secret", helper.read_text())
                 self.assertEqual(kwargs["env"]["GITCODE_TOKEN"], "test-only-secret")
             return MagicMock(returncode=0)
-        with patch.object(sync, "api", side_effect=[[], {"login": "test-user"},
+        with patch.object(sync, "api", side_effect=[[], sync.SyncError("Tag API unavailable"), {"login": "test-user"},
                 [{"name": "v0.1.1", "commit": {"id": "1" * 40}}]]), \
                 patch.object(sync.subprocess, "run", run):
             sync.ensure_release_tag("v0.1.1", "1" * 40, "test-only-secret")
         self.assertTrue(any("--unshallow" in args for args, _ in recorded))
+
+    def test_missing_tag_uses_exact_commit_via_api_before_git_push(self):
+        with patch.object(sync, "api", side_effect=[[], {},
+                [{"name": "v0.1.2", "commit": {"sha": "1" * 40}}]]) as api, \
+                patch.object(sync.subprocess, "run") as run:
+            sync.ensure_release_tag("v0.1.2", "1" * 40, "test-only")
+            self.assertEqual(api.call_args_list[1].args,
+                             ("/tags", "test-only", "POST", {"tag_name": "v0.1.2", "refs": "1" * 40}))
+            run.assert_not_called()
 
     def test_matching_tag_needs_no_git_write(self):
         with patch.object(sync, "api", return_value=[{"name": "v0.1.1", "commit": {"id": "1" * 40}}]), \

@@ -128,6 +128,17 @@ def ensure_release_tag(tag, commit, token):
         return True
     if mirrored():
         return
+    # A mirror can already contain the commit while its new tag is still
+    # pending. Use the documented tag API before trying a Git push: release
+    # credentials may allow API writes without enabling Git-over-HTTPS pushes.
+    try:
+        api("/tags", token, "POST", {"tag_name": tag, "refs": commit})
+    except SyncError:
+        pass
+    else:
+        if mirrored():
+            print("Source release tag synchronized:", tag, flush=True)
+            return
     profile = api("/user", token, base="https://api.gitcode.com/api/v5")
     login = profile.get("login", "")
     if not isinstance(login, str) or not login or any(c in login for c in "\r\n\0"):
