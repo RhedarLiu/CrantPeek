@@ -131,7 +131,10 @@ jobs:
                   for license in pathlib.Path('assets/licenses').glob('*.txt'):
                       packaged = prefix + 'licenses/' + license.name
                       assert packaged in files, 'Missing font notice: ' + packaged
-                      assert archive.read(files[packaged]) == license.read_bytes(), 'Changed font notice: ' + packaged
+                      # Windows checkout can use CRLF; preserve every character
+                      # while accepting the platform's line-ending convention.
+                      normalize = lambda data: data.replace(b'\r\n', b'\n')
+                      assert normalize(archive.read(files[packaged])) == normalize(license.read_bytes()), 'Changed font notice: ' + packaged
           assert (root / names[2]).read_bytes()[:2] == b'MZ'
           (root / 'SHA256SUMS.txt').write_text('\n'.join(hashlib.sha256((root / n).read_bytes()).hexdigest() + '  ' + n for n in names) + '\n')
           PY
