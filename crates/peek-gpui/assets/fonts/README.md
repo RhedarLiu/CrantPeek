@@ -9,7 +9,7 @@
 
 中文和日文延用衬线方案的系统字体：macOS 使用 Songti SC / Hiragino Mincho ProN；Windows 使用 SimSun / Yu Mincho。两平台字形可能略有差异。
 
-字体采用 SIL Open Font License 1.1。上游：
+字体采用 SIL Open Font License 1.1。完整版权和许可保存在仓库 `assets/licenses/`，打包时原样复制至 Windows 程序目录 `licenses/` 和 macOS `Contents/Resources/licenses/`。上游：
 - https://github.com/notofonts
 - https://github.com/JetBrains/JetBrainsMono
 

@@ -5692,7 +5692,7 @@ dependencies = [
 
 [[package]]
 name = "peek-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -5703,7 +5703,7 @@ dependencies = [
 
 [[package]]
 name = "peek-dict"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "csv",
  "memmap2",
@@ -5713,7 +5713,7 @@ dependencies = [
 
 [[package]]
 name = "peek-gpui"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -5735,7 +5735,7 @@ dependencies = [
 
 [[package]]
 name = "peek-network"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -5751,7 +5751,7 @@ dependencies = [
 
 [[package]]
 name = "peek-runtime"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",

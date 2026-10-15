@@ -32,6 +32,9 @@ try {
     Copy-Item $executable (Join-Path $destination 'CrantPeek.exe') -Force
     Sign-Artifact (Join-Path $destination 'CrantPeek.exe')
     Copy-Item (Join-Path $root 'LICENSE') $destination -Force
+    $licenses = Join-Path $destination 'licenses'
+    New-Item -ItemType Directory -Force -Path $licenses | Out-Null
+    Copy-Item (Join-Path $root 'assets/licenses/*.txt') $licenses -Force
     $dictionary = Join-Path $root 'local-assets/ecdict.pkd'
     if (Test-Path $dictionary) {
         Copy-Item $dictionary $destination -Force

@@ -48,7 +48,7 @@
               <summary aria-label="选择 Windows 下载版本" title="选择 Windows 下载版本"><svg><use href="#i-chevron"/></svg></summary>
               <div class="menu-panel">
                 <a href="https://api.gitcode.com/api/v5/repos/CrantAI/CrantPeek/releases/latest/attach_files/Crant-Peek-Windows.zip/download" data-release-asset="windows"><span><strong>便携版</strong><small>解压即可运行 · 默认推荐</small></span><svg><use href="#i-check"/></svg></a>
-                <a href="https://api.gitcode.com/api/v5/repos/CrantAI/CrantPeek/releases/latest/attach_files/Crant-Peek-Windows-Setup.exe/download" data-release-asset="installer"><span><strong>安装包 <em>未测试</em></strong><small>安装到系统，从开始菜单打开</small></span><svg><use href="#i-download"/></svg></a>
+                <a href="https://api.gitcode.com/api/v5/repos/CrantAI/CrantPeek/releases/latest/attach_files/Crant-Peek-Windows-Setup.exe/download" data-release-asset="installer"><span><strong>安装包</strong><small>安装到系统，从开始菜单打开</small></span><svg><use href="#i-download"/></svg></a>
               </div>
             </details>
           </div>
@@ -85,8 +85,8 @@
     <section class="notes section" id="notes" aria-labelledby="notes-title">
       <div class="section-heading"><span class="section-kicker">下载之前</span><h2 id="notes-title">下载前，了解这些细节。</h2><p>正式版本仍在持续完善，请留意平台支持与首次打开方式。</p></div>
       <div class="notes-grid">
-        <article><h3>平台与测试情况</h3><p>macOS 已有较完整的测试。Windows 部分功能仍需实机验证，可能存在缺失或不完善；安装包尚未测试，建议先用便携版。</p><p>当前 macOS 包为 Apple Silicon，Windows 包为 x64。未提供原生 Windows ARM64 包，ARM 设备上的兼容性未验证。</p></article>
-        <article><h3>签名与首次打开</h3><p>macOS 使用开发签名，尚未经过发行公证，系统可能阻止首次打开。请核对下载来源，再按系统提示允许打开并授权。</p><p>Windows 未配置发行代码签名，可能出现安全提示。请核对下载来源，再按系统提示运行。</p></article>
+        <article><h3>平台与测试情况</h3><p>macOS 已有较完整的测试，Windows 核心功能已通过用户实测。安装包另通过 Windows 自动安装、升级与卸载验证；具体测试范围见仓库验收记录。</p><p>当前 macOS 包为 Apple Silicon，Windows 包为 x64。未提供原生 Windows ARM64 包，ARM 设备上的兼容性未验证。</p></article>
+        <article><h3>签名与首次打开</h3><p>macOS 下载包尚无发行签名与公证，系统可能阻止首次打开。请核对下载来源，再按系统提示允许打开并授权。</p><p>Windows 未配置发行代码签名，可能出现安全提示。请核对下载来源，再按系统提示运行。</p></article>
         <article><h3>文字读取与截图</h3><p>选区读取受来源应用和系统权限影响。Windows OCR 依赖系统语言包，识别效果可能不佳；读取管理员运行的应用也可能受权限限制。</p><p>截图默认在本机提取文字。主动点击「图片解读」才会将选区发送给支持图片的 AI；可解释图表、界面和视觉内容。请先在渠道设置启用图片输入，并加入调用顺序。</p></article>
         <article><h3>版本与反馈</h3><p><span id="release-detail">下载链接会自动获取最新正式版，无需手动选择版本。</span>在线翻译与 AI 功能需要你自行配置服务和网络。</p><p>遇到问题，可以在 <a href="https://github.com/RhedarLiu/CrantPeek/issues" target="_blank" rel="noopener">GitHub Issues</a> 反馈，并注明系统版本、来源应用和复现步骤。</p></article>
       </div>

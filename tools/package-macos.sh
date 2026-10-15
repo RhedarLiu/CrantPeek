@@ -53,6 +53,8 @@ fi
 /usr/bin/plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$APP/Contents/Info.plist"
 
 cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+mkdir -p "$APP/Contents/Resources/licenses"
+cp "$ROOT/assets/licenses/"*.txt "$APP/Contents/Resources/licenses/"
 cp "$ROOT/assets/app-icon.icns" "$APP/Contents/Resources/CrantPeek.icns"
 bash "$ROOT/tools/compile-macos-icon.sh"
 if [[ -f "$ROOT/dist/macos-icon/Assets.car" ]]; then

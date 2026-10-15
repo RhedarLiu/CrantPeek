@@ -55,6 +55,28 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tools/package-windows.ps1 -SkipBuild -Installer
+      - name: Verify Windows installation, upgrade and uninstall
+        if: runner.os == 'Windows'
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $baseline = Join-Path $env:RUNNER_TEMP 'CrantPeek-installer-baseline'
+          gh release download v0.1.2 --repo RhedarLiu/CrantPeek --pattern Crant-Peek-Windows-Setup.exe --pattern SHA256SUMS.txt --dir $baseline
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download the v0.1.2 upgrade baseline' }
+          $checksum = Get-Content (Join-Path $baseline 'SHA256SUMS.txt') | Where-Object { $_ -match '^([0-9a-f]{64})\s+Crant-Peek-Windows-Setup\.exe$' }
+          if (-not $checksum) { throw 'Missing baseline installer checksum' }
+          $expectedHash = ($checksum -split '\s+')[0]
+          if ((Get-FileHash (Join-Path $baseline 'Crant-Peek-Windows-Setup.exe') -Algorithm SHA256).Hash -ine $expectedHash) { throw 'Baseline installer checksum mismatch' }
+          ./tools/test-windows-installer.ps1 -Installer dist/Crant-Peek-Windows-Setup.exe -PortableArchive dist/Crant-Peek-Windows.zip -PreviousInstaller (Join-Path $baseline 'Crant-Peek-Windows-Setup.exe') -PreviousVersion '0.1.2'
+      - name: Save Windows installer validation logs
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-installer-validation
+          path: dist/installer-test-logs/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
@@ -99,9 +121,17 @@ jobs:
           for name in names[:2]:
               with zipfile.ZipFile(root / name) as archive:
                   assert archive.testzip() is None, 'Corrupt package: ' + name
+                  files = {n.replace('\\', '/'): n for n in archive.namelist() if not n.startswith('__MACOSX/')}
                   if name == names[0]:
                       info = next(n for n in archive.namelist() if n.endswith('/Contents/Info.plist') and not n.startswith('__MACOSX/'))
                       assert plistlib.loads(archive.read(info))['CFBundleShortVersionString'] == version
+                      prefix = info.removesuffix('Info.plist') + 'Resources/'
+                  else:
+                      prefix = ''
+                  for license in pathlib.Path('assets/licenses').glob('*.txt'):
+                      packaged = prefix + 'licenses/' + license.name
+                      assert packaged in files, 'Missing font notice: ' + packaged
+                      assert archive.read(files[packaged]) == license.read_bytes(), 'Changed font notice: ' + packaged
           assert (root / names[2]).read_bytes()[:2] == b'MZ'
           (root / 'SHA256SUMS.txt').write_text('\n'.join(hashlib.sha256((root / n).read_bytes()).hexdigest() + '  ' + n for n in names) + '\n')
           PY

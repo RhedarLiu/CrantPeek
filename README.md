@@ -25,7 +25,7 @@ macOS · Windows · 原生浮窗 · MIT 开源
 | 你正在看什么 | Crant Peek 如何帮你 |
 | --- | --- |
 | 一个英文单词 | 先查离线词典，查看音标、释义和词形；也可以继续问 AI。 |
-| 一段外语 | 使用你排好顺序的快速翻译渠道，失败时依次尝试下一个。 |
+| 一段外语 | 使用你排好顺序的翻译渠道，失败时依次尝试下一个。 |
 | 一段源码 | 自动识别为代码解释，理解逻辑和用途。 |
 | 报错或堆栈 | 解释问题和可能的处理方向。 |
 | 无法选中的文字 | 框选截图，用系统本地 OCR 提取文字后查询。 |
@@ -69,7 +69,11 @@ macOS · Windows · 原生浮窗 · MIT 开源
 
 渠道设置保存在本机；API key 保存在用户配置目录独立的本地凭据文件中，未加密；macOS 文件仅当前用户可读写。旧系统凭据仅尝试导入一次，拒绝导入后可在渠道设置重新填写。
 
+内置 Noto Serif 与 JetBrains Mono 采用 SIL Open Font License 1.1，完整版权和许可随包放在 `licenses/`（macOS 为应用包内 `Contents/Resources/licenses/`）。
+
 词典数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)，采用 MIT 许可。Crant Peek 同样以 [MIT 许可](LICENSE)开源。
+
+详细使用方式见 [使用指南](USER_GUIDE.md)，当前验收证据与自动安装测试见 [TESTING.md](TESTING.md)。Windows 核心流程已由用户实测；安装包另由 Windows 构建机验证新装、升级、卸载及配置保留。
 
 ## 从源码运行与打包
 
