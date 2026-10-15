@@ -12,6 +12,7 @@
 | Windows 选区取词、主输入与追问中文输入 | 用户确认已测试 |
 | Windows 截图 OCR、图片解读 | 用户确认已测试 |
 | Windows 设置修改与重启后保留 | 用户确认已测试 |
+| Windows 安装包新装、启动、升级、卸载与配置保留 | Windows 构建机实际执行六项检查通过，见下方自动验收记录 |
 | macOS Chrome、VS Code、聚焦搜索取词 | 用户在开发过程中确认已能填入 |
 | macOS 原生工具顶栏悬停与拖动保持 | 原生窗口自检通过，检查拖动中几何稳定及松开后的判断 |
 | macOS Dock 取消固定后的图标 | 原生窗口反复固定/取消固定自检，像素比对通过 |
@@ -29,6 +30,8 @@
 正式 tag 必须与应用版本一致。发布步骤核对两个 ZIP 的完整性、macOS 版本、Windows EXE 和两款字体许可原文，完成后生成 SHA256SUMS.txt，三个程序包一起发布。
 
 ## Windows 安装包自动验收
+
+首轮 v0.1.3 安装验收已通过：[运行 38693355118](https://github.com/RhedarLiu/CrantPeek/actions/runs/38693355118)。日志逐项记录六项通过结果，包含 v0.1.2 → v0.1.3 的覆盖升级。此记录对应 Windows 自动验收，不冒充安装向导的人工点击验收。
 
 每次 Windows 构建在打包后执行 `tools/test-windows-installer.ps1`。正式发布依赖这个步骤成功；对应 tag 的 Actions 运行及 `Windows-installer-validation` 日志产物是本版安装验证证据。
 
