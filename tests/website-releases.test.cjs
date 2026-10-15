@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const {resolveRelease, filenames, latestDownloadUrl} = require("./public/releases.js");
+const {resolveRelease, filenames, latestDownloadUrl} = require("../website/public/releases.js");
 const asset = (name, url = `https://gitcode.com/CrantAI/CrantPeek/releases/download/v0.1.1/${name}`) => ({name, browser_download_url:url});
 
 test("selects executable packages, never source archives", () => {

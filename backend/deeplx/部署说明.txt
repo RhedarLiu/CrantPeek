@@ -1,0 +1,61 @@
+CrantPeek 部署：前端用宝塔，DeepLX 后端用 MCSM
+
+只认两个位置：
+前端：项目的 website/public
+后端：项目的 backend/deeplx（本文件所在目录）
+不需要生成其他部署文件夹。以下按宝塔 nginx 和 MCSM 守护进程在同一台 Linux x86_64 服务器配置。
+
+1. 前端：宝塔
+打开宝塔 → 网站 → crantpeek.eno.ink → 根目录。
+将 website/public 里面的所有文件和 assets 文件夹上传进去，覆盖原文件。
+上传后，根目录应直接能看到 index.html、styles.css、site.js、releases.js、assets，不要再套一个 public 文件夹。
+继续使用宝塔现有的网站配置、域名和 HTTPS 证书，不用上传任何 nginx.conf。
+
+2. 后端：MCSM
+新建一个“通用程序/自定义程序”实例，使用普通进程模式。
+先将 settings.example.env 复制为 settings.env，填写自己的监听、端口、密钥及代理设置（可留空使用默认值），再按末尾来源说明下载并校验程序。将 backend/deeplx 里的全部内容上传到这个实例工作目录，不要放进宝塔网站根目录。
+启动命令：bash start.sh
+停止命令：^C
+工作目录：包含 start.sh 和 deeplx_linux_amd64 的目录。
+点击启动。程序默认监听 127.0.0.1:1188，日志由 MCSM 显示。
+默认无需访问密钥，settings.env 中 DEEPLX_TOKEN 留空即可。
+从旧版本升级：覆盖 start.sh 和 settings.env 后，在 MCSM 中停止并重新启动实例。旧 access-token.txt 不再读取，可以留着，不影响空密钥访问。
+
+3. 让官网域名转发到后端
+宝塔 → 网站 → crantpeek.eno.ink → 设置 → 配置文件。
+在现有 server { ... } 内部，与其他 location 同级，加入下面这一段，保存并重载 nginx：
+
+location = /api/deeplx/translate {
+    limit_except POST { deny all; }
+    client_max_body_size 32k;
+    proxy_pass http://127.0.0.1:1188/translate;
+    proxy_set_header Authorization $http_authorization;
+    proxy_read_timeout 30s;
+    proxy_cache off;
+}
+
+不替换宝塔整份配置，也不需要对公网开放 1188 端口。
+网页只负责展示和下载；这个翻译接口由 CrantPeek 客户端直接调用，无需前端改动。
+原有 proxy_set_header Authorization 配置可以保留；未启用后端鉴权时不需要该请求头。
+
+4. CrantPeek 客户端
+设置 → 渠道 → 添加 DeepLX：
+服务地址：填写自己的可用 DeepLX 地址（默认留空）。当前自部署测试地址 https://crantpeek.eno.ink/api/deeplx/translate 仍有上游 429，不再由客户端预填。
+API key：留空
+模型：不填
+保存后，去 设置 → 翻译 → 调用顺序，把这个渠道加进去。
+选择“翻译”模式，输入一小句测试，得到译文才算完成。
+
+补充
+- 502：检查 MCSM 实例是否启动、1188 是否被占用、nginx 和 MCSM 是否确实在同一台服务器。
+- 翻译超时：服务器需要能访问 DeepL；可在 settings.env 填 DEEPLX_PROXY 后重启实例。
+- 代理设置后仍返回 429：在服务目录用 bash check.sh 自检。保持 DeepLX 正常运行，不要在 MCSM 里把正在运行的服务当作命令行输入；可使用宝塔终端进入实例目录执行。自检不会修改配置或重启服务，检查代理连通、与直连出口是否不同、运行中进程的 PROXY 是否匹配，以及一次本机翻译请求。输出不包含代理地址或密码。
+- 429 的“IP 被封”是 DLX 对上游 429 的统一提示，不能单凭此判定 IP 封禁；上游也曾因客户端版本不匹配而始终返回 429。若代理连通且进程配置匹配仍失败，需要进一步核对上游兼容性。
+- v1.3.1 已包含上游 #237 的版本号修复和 #238 的动态版本查询，不需要重复打这两个补丁。当前服务器使用现有代理、自动解析到 26.54 的隔离实测仍返回 429；上游原始回复只有“Too many requests. Please slow down and try again later.”，没有 Retry-After，暂不能进一步确定拒绝原因。可待限流恢复后低频测试不同实际出口；不能保证换代理一定有效，持续失败时使用 Google 或用户自己的 DeepL 官方 API 作为后续渠道。不要连续重启或反复点测试。 后续源码隔离测试还尝试了去掉异步 Cookie 预热、旧 JSON-RPC 网页协议、新版 oneshot 网页请求配置，三种均仍返回上游 429，均未部署到生产服务。
+- 换端口：修改 settings.env 的 DEEPLX_PORT，并同步修改宝塔反代端口，再重启实例和重载 nginx。
+- 如果 nginx 与 MCSM 不同机，需要把监听地址和反代目标改成双方可通的内网地址，并限制只有 nginx 所在机器可访问后端。
+- 401：确认已经上传新版 start.sh，settings.env 中 DEEPLX_TOKEN 为空，并在 MCSM 停止后重新启动；若实例启动参数额外设置了 -token，也需要移除。
+- 更新程序时保留自己的 settings.env 中监听地址、端口和代理设置；DEEPLX_TOKEN 留空。启动脚本不再读取 access-token.txt，也不再自动生成密钥。
+
+程序来源为 DLX v1.3.1，Linux x86_64 独立程序，SHA256SUMS.txt 和 UPSTREAM.json 记录官方附件校验值，DeepLX-LICENSE.txt 是上游 MIT 许可。源码仓库不提交该二进制文件；重新获取时按 UPSTREAM.json 的地址下载后，用 sha256sum -c SHA256SUMS.txt 核对。
+程序已核对完整性和架构；空密钥请求已由客户端本地模拟服务验证。服务器需上传新版脚本并重启后再验证真实翻译，不代表已经替你更新线上实例。

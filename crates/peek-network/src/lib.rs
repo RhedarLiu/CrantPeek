@@ -367,17 +367,30 @@ impl Client {
                 continue;
             }
             if channel.kind.is_translation_only() {
-                let result = if channel.kind == peek_core::ChannelKind::GoogleFree {
-                    self.translate_google(text, target, cancel.clone()).await
-                } else {
-                    self.translate_deeplx(
-                        &channel.endpoint,
-                        &channel.api_key,
-                        text,
-                        target,
-                        cancel.clone(),
-                    )
-                    .await
+                let result = match channel.kind {
+                    peek_core::ChannelKind::GoogleFree => {
+                        self.translate_google(text, target, cancel.clone()).await
+                    }
+                    peek_core::ChannelKind::DeepLOfficial => {
+                        self.translate_deepl(
+                            &channel.endpoint,
+                            &channel.api_key,
+                            text,
+                            target,
+                            cancel.clone(),
+                        )
+                        .await
+                    }
+                    _ => {
+                        self.translate_deeplx(
+                            &channel.endpoint,
+                            &channel.api_key,
+                            text,
+                            target,
+                            cancel.clone(),
+                        )
+                        .await
+                    }
                 };
                 match result {
                     Ok(answer) => {
@@ -611,13 +624,59 @@ impl Client {
         .await
     }
 
-    /// Translates with a DeepLX-compatible endpoint.
-    ///
-    /// DeepLX is a self-hosted proxy in front of DeepL's free web API, so it
-    /// usually needs no credential, only a reachable URL. A deployment behind a
-    /// gateway may want a token, so a non-empty `key` is sent as a bearer token;
-    /// servers that ignore it are unaffected. It answers in one piece rather
-    /// than as a stream.
+    /// Translates using DeepL's official v2 API and a user-supplied API key.
+    pub async fn translate_deepl(
+        &self,
+        endpoint: &str,
+        key: &str,
+        text: &str,
+        target_language: &str,
+        cancel: CancellationToken,
+    ) -> Result<String, Error> {
+        if key.trim().is_empty() {
+            return Err(Error::Invalid("status-key-missing".into()));
+        }
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        peek_core::validate_endpoint(endpoint, true).map_err(|e| Error::Invalid(e.into()))?;
+        let body = json!({"text": [text], "target_lang": deeplx_language_code(target_language)});
+        let request = self
+            .transport(endpoint)
+            .post(endpoint)
+            .header("Authorization", format!("DeepL-Auth-Key {}", key.trim()))
+            .json(&body);
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            response = request.send() => response?,
+        };
+        if !response.status().is_success() {
+            return Err(Error::Http(response.status().as_u16()));
+        }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            next = stream.next() => next,
+        } {
+            let chunk = chunk?;
+            if bytes.len().saturating_add(chunk.len()) > 256 * 1024 {
+                return Err(Error::Invalid("error-translation-size".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("error-service".into()))?;
+        value["translations"]
+            .as_array()
+            .filter(|items| items.len() == 1)
+            .and_then(|items| items[0]["text"].as_str())
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Invalid("error-service".into()))
+    }
+
+    /// Translates using a DeepLX-compatible service, with an optional gateway token.
     pub async fn translate_deeplx(
         &self,
         endpoint: &str,
@@ -1367,6 +1426,15 @@ impl Client {
     }
 }
 
+/// Official Free keys have an :fx suffix; other keys use the Pro endpoint.
+pub fn deepl_endpoint(key: &str) -> &'static str {
+    if key.trim().ends_with(":fx") {
+        "https://api-free.deepl.com/v2/translate"
+    } else {
+        "https://api.deepl.com/v2/translate"
+    }
+}
+
 /// Maps a language name or tag to the code a DeepLX endpoint expects.
 pub fn deeplx_language_code(language: &str) -> String {
     let lower = language.trim().to_ascii_lowercase();
@@ -1437,6 +1505,10 @@ mod deeplx_tests {
         assert!(request.contains(r#""text":"Hello""#), "{request}");
         assert!(request.contains(r#""target_lang":"ZH""#), "{request}");
         assert!(request.contains(r#""source_lang":"auto""#), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "{request}"
+        );
     }
 
     #[tokio::test]

@@ -175,6 +175,7 @@ mod tests {
             include_str!("../../peek-gpui/src/main.rs"),
             include_str!("../../peek-gpui/src/snip.rs"),
             include_str!("../../peek-gpui/src/settings.rs"),
+            include_str!("../../peek-gpui/src/channel_menu.rs"),
             include_str!("../../peek-gpui/src/shortcuts.rs"),
             include_str!("permissions.rs"),
             include_str!("store.rs"),
@@ -195,6 +196,7 @@ mod tests {
                 if [
                     "new(",
                     ".id(",
+                    ".within(",
                     ".with_animation(",
                     "ElementId::NamedInteger(",
                 ]

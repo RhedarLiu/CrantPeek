@@ -16,7 +16,7 @@ macOS · Windows · 原生浮窗 · MIT 开源
 
 [![Crant Peek 使用演示](assets/showcase/preview.gif)](assets/showcase/video.mp4)
 
-<p align="center"><a href="assets/showcase/video.mp4">观看完整演示 · 48 秒 · 含声音</a></p>
+<p align="center"><a href="assets/showcase/video.mp4">观看完整演示 · 47 秒 · 含声音</a></p>
 
 阅读文档、浏览网页或看代码时，选中一段内容，用快捷键唤出 Crant Peek。结果就在浮窗里，读完离开；需要继续了解，就在同一个窗口追问。
 
@@ -56,6 +56,7 @@ macOS · Windows · 原生浮窗 · MIT 开源
 ## 选择适合你的渠道
 
 - **Google 翻译**：无需 API key 或端点地址，使用系统网络与代理设置；网络需要能够连接 Google。
+- **DeepL 官方 API**：填写自己的 API key，自动匹配 Free / Pro 接口，无需填写模型；仅用于翻译模式。
 - **DeepLX**：填写你使用的 DeepLX 服务地址。
 - **AI 服务**：支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 协议，按服务提供方填写地址、API key 和模型。
 - **DeepSeek**：支持独立的思考强度设置，翻译时可以关闭思考。
@@ -77,7 +78,9 @@ macOS · Windows · 原生浮窗 · MIT 开源
 
 ## 从源码运行与打包
 
-项目官网可以使用 nginx 托管，静态文件和部署指引见 [website/部署说明.md](website/部署说明.md)。
+官网前端只有 [website/public](website/public)：将其中的文件和 `assets` 文件夹直接上传到宝塔站点根目录，继续使用宝塔现有的证书与 nginx 配置。可选 DeepLX 后端在 [backend/deeplx](backend/deeplx)，由 MCSM 启动；前后端连接步骤见后端的 [部署说明.txt](backend/deeplx/部署说明.txt)。无需另外生成部署目录。
+
+本地发布包保存在 `dist/releases/<版本>/`，最终提交材料位于 `dist/交付/CrantPeek/`，验收证据位于 `dist/验收记录/`。
 
 <details>
 <summary>展开运行、词库与打包指引</summary>

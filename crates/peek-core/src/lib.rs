@@ -295,6 +295,8 @@ pub enum ChannelKind {
     /// A DeepLX-compatible endpoint: a self-hosted proxy in front of DeepL's
     /// free web API, so it needs no credential, only a reachable URL.
     DeepLx,
+    /// DeepL's authenticated official text translation API.
+    DeepLOfficial,
     /// A System One decision model: TypeSafe Jev or Cloudflare Clef.
     /// It classifies text. It does not translate or chat.
     Decision,
@@ -303,12 +305,13 @@ pub enum ChannelKind {
 }
 
 impl ChannelKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ChatCompletions,
         Self::DeepSeek,
         Self::Responses,
         Self::Anthropic,
         Self::DeepLx,
+        Self::DeepLOfficial,
         Self::GoogleFree,
         Self::Decision,
     ];
@@ -320,14 +323,15 @@ impl ChannelKind {
             Self::Responses => "channel-kind-responses",
             Self::Anthropic => "channel-kind-anthropic",
             Self::DeepLx => "channel-kind-deeplx",
+            Self::DeepLOfficial => "channel-kind-deepl",
             Self::Decision => "channel-kind-decision",
             Self::GoogleFree => "channel-kind-google",
         }
     }
 
-    /// Free translation endpoints that answer plain translation only.
+    /// Translation endpoints that answer plain translation only.
     pub fn is_translation_only(self) -> bool {
-        matches!(self, Self::DeepLx | Self::GoogleFree)
+        matches!(self, Self::DeepLx | Self::DeepLOfficial | Self::GoogleFree)
     }
 
     /// Chat-style models. Follow-ups and code explanations need one of these.
@@ -349,10 +353,12 @@ impl ChannelKind {
         matches!(self, Self::Decision)
     }
 
-    /// AI and decision kinds require a key. DeepLX accepts an optional one, since
-    /// a proxy may want a token. The public Google and Bing endpoints need none.
+    /// Whether to show a credential field. Official DeepL requires a key;
+    /// DeepLX accepts an optional gateway token. Google needs none.
     pub fn needs_credential(self) -> bool {
-        self.is_ai() || self.supports_decision() || self == Self::DeepLx
+        self.is_ai()
+            || self.supports_decision()
+            || matches!(self, Self::DeepLx | Self::DeepLOfficial)
     }
 
     /// AI kinds and decision models need a model id. Translation endpoints do not.
@@ -366,7 +372,7 @@ impl ChannelKind {
             Self::ChatCompletions | Self::DeepSeek => Some(Protocol::ChatCompletions),
             Self::Responses => Some(Protocol::Responses),
             Self::Anthropic => Some(Protocol::Anthropic),
-            Self::DeepLx | Self::Decision | Self::GoogleFree => None,
+            Self::DeepLx | Self::DeepLOfficial | Self::Decision | Self::GoogleFree => None,
         }
     }
 }
@@ -1274,12 +1280,16 @@ pub fn recognize(image: &image::RgbaImage) -> Result<String, String> {
                 channel("chat", ChannelKind::ChatCompletions),
                 channel("responses", ChannelKind::Responses),
                 channel("deeplx", ChannelKind::DeepLx),
+                channel("deepl", ChannelKind::DeepLOfficial),
                 channel("clef", ChannelKind::Decision),
             ],
             ..Config::default()
         };
         let ids = |iter: Vec<&Channel>| iter.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(config.basic_candidates().collect()), ["deeplx"]);
+        assert_eq!(
+            ids(config.basic_candidates().collect()),
+            ["deeplx", "deepl"]
+        );
         assert_eq!(ids(config.ai_candidates().collect()), ["chat", "responses"]);
         assert_eq!(ids(config.decision_candidates().collect()), ["clef"]);
 
@@ -1310,18 +1320,31 @@ pub fn recognize(image: &image::RgbaImage) -> Result<String, String> {
     }
 
     #[test]
+    fn official_deepl_roundtrips_as_translation_only_with_key() {
+        let kind = ChannelKind::DeepLOfficial;
+        assert!(kind.needs_credential() && kind.supports_basic());
+        assert!(!kind.needs_model() && !kind.is_ai() && !kind.supports_decision());
+        let original = channel("deepl", kind);
+        let restored: Channel =
+            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        assert_eq!(restored.kind, kind);
+        assert!(restored.provider().is_none());
+    }
+
+    #[test]
     fn basic_slot_offers_only_translation_endpoints() {
         let config = Config {
             channels: vec![
                 channel("chat", ChannelKind::ChatCompletions),
                 channel("deeplx", ChannelKind::DeepLx),
+                channel("deepl", ChannelKind::DeepLOfficial),
                 channel("google", ChannelKind::GoogleFree),
                 channel("clef", ChannelKind::Decision),
             ],
             ..Config::default()
         };
         let ids: Vec<_> = config.basic_candidates().map(|c| c.id.clone()).collect();
-        assert_eq!(ids, ["deeplx", "google"]);
+        assert_eq!(ids, ["deeplx", "deepl", "google"]);
     }
 
     #[test]

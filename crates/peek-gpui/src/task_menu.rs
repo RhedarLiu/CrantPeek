@@ -107,9 +107,17 @@ impl TaskMenu {
         let dismissed = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
             this.close(true, window, cx);
         });
-        let activation = cx.observe_window_activation(window, |this, window, cx| {
+        let activation = cx.observe_window_activation(window, |_this, window, cx| {
             if !window.is_window_active() {
-                this.close(false, window, cx);
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(POPUP_FOCUS_SETTLE).await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if !window.is_window_active() {
+                            this.close(false, window, cx);
+                        }
+                    });
+                })
+                .detach();
             }
         });
         Self {
@@ -153,17 +161,15 @@ impl TaskMenu {
         let parent = self.parent.clone();
         let handle = self.parent_window;
         window.remove_window();
-        // Wait until native activation events settle before deciding whether
-        // the user clicked the parent panel or another application.
+        // Release the keep-visible guard only once this popup is removed.
         cx.defer(move |cx| {
             let _ = cx.update_window(handle, |_, window, cx| {
                 parent.update(cx, |peek, cx| {
                     peek.task_menu_open = false;
                     if restore {
                         native_window::show(window);
-                    } else if peek.config.hide_on_blur && !peek.pinned && !window.is_window_active()
-                    {
-                        native_window::hide(window);
+                    } else {
+                        peek.hide_after_focus_settles(window, cx);
                     }
                     cx.notify();
                 });

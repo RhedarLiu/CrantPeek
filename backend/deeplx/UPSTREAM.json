@@ -1,0 +1,9 @@
+{
+  "project": "OwO-Network/DLX",
+  "version": "v1.3.1",
+  "platform": "linux-x86_64",
+  "asset": "deeplx_linux_amd64",
+  "size": 25284768,
+  "sha256": "4afe47d3866e6c6b38f5ffdb702a8b9e1582e75943810e2576558e934b85ebe0",
+  "url": "https://github.com/OwO-Network/DLX/releases/download/v1.3.1/deeplx_linux_amd64"
+}

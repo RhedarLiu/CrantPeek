@@ -8,8 +8,7 @@
 //! Ordering note: the tray icon and the hotkey manager are installed *inside*
 //! the `Application::run` callback, not before it. Creating them earlier makes
 //! muda build a plain `NSApplication`, after which `MacPlatform::run` panics
-//! with "Ivar platform not found on class NSApplication". Measured in
-//! `spikes/gpui-kit/lifecycle-probe-evidence.txt`.
+//! with "Ivar platform not found on class NSApplication".
 //!
 //! Modes:
 //!   PEEK_SELFTEST=1   show the panel, verify visibility, hide it, quit
@@ -17,6 +16,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
+mod channel_menu;
 mod fonts;
 mod motion;
 mod native_window;
@@ -31,9 +31,9 @@ use std::time::Duration;
 // Needed for `on_hover` on an element that carries an id.
 use gpui_kit::InteractiveElement as _;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Disableable as _;
+use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::base::{IndexPath, Root, StyledExt as _, TestSupportExt as _};
-use gpui_kit::component::button::{Button, ButtonVariants as _, DropdownButton};
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _, DropdownButton};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -153,7 +153,6 @@ fn parse_shortcuts(values: &[String; 3]) -> Result<Vec<HotKey>, String> {
 /// Which assignment a channel dropdown writes.
 #[derive(Clone, Copy)]
 enum ChannelSlot {
-    QuickFirst,
     QuickAdd,
     Llm,
     Decision,
@@ -194,6 +193,8 @@ const DRAIN: Duration = Duration::from_millis(30);
 /// period the panel would hide itself the instant it appeared — measured as a
 /// flaky `visible after show: false` in `PEEK_SELFTEST`.
 const FOCUS_GRACE: Duration = Duration::from_millis(500);
+/// Native key-window notifications can arrive between sibling popup activations.
+const POPUP_FOCUS_SETTLE: Duration = Duration::from_millis(150);
 
 thread_local! {
     /// When the panel was last shown. Everything here runs on GPUI's main
@@ -473,8 +474,9 @@ struct Peek {
     busy: bool,
     /// The in-flight turn is a follow-up, so its spinner belongs on that button.
     follow_up_turn: bool,
-    /// The task list is open. The compact panel grows so the list is not cut off.
+    /// Independent popup editors keep the compact panel visible without resizing it.
     task_menu_open: bool,
+    channel_menu_open: bool,
     /// Cleared on the next frame. See `send_follow_up`.
     clear_follow_up: bool,
     dictionary_note: String,
@@ -574,6 +576,29 @@ struct Peek {
 }
 
 impl Peek {
+    /// Popup flags belong to their windows, and stay set until those windows
+    /// have actually closed. Recheck them after the native focus handoff.
+    fn should_hide_on_blur(&self, window: &Window) -> bool {
+        self.config.hide_on_blur
+            && !self.pinned
+            && !self.task_menu_open
+            && !self.channel_menu_open
+            && !window.is_window_active()
+            && !shown_recently()
+    }
+
+    fn hide_after_focus_settles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(POPUP_FOCUS_SETTLE).await;
+            let _ = this.update_in(cx, |this, window, _| {
+                if this.should_hide_on_blur(window) {
+                    native_window::hide(window);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -599,14 +624,8 @@ impl Peek {
                     }
                 }
             }
-            // A pinned window behaves like a normal window and stays put.
-            if this.config.hide_on_blur
-                && !this.pinned
-                && !this.task_menu_open
-                && !window.is_window_active()
-                && !shown_recently()
-            {
-                native_window::hide(window);
+            if !window.is_window_active() {
+                this.hide_after_focus_settles(window, cx);
             }
         });
 
@@ -683,6 +702,36 @@ impl Peek {
                             field.update(cx, |state, cx| state.set_value(value, window, cx));
                         }
                     }
+                }
+                if this.draft_kind(cx) == ChannelKind::DeepLx
+                    && this
+                        .editing_channel
+                        .as_deref()
+                        .and_then(|id| this.config.channel(id))
+                        .is_none_or(|channel| channel.kind != ChannelKind::DeepLx)
+                {
+                    for (field, value) in [
+                        (&this.channel_name, "DeepLX"),
+                        (&this.channel_endpoint, ""),
+                        (&this.channel_model, ""),
+                        (&this.channel_key, ""),
+                    ] {
+                        field.update(cx, |state, cx| state.set_value(value, window, cx));
+                    }
+                }
+                if this.draft_kind(cx) == ChannelKind::DeepLOfficial
+                    && this
+                        .editing_channel
+                        .as_deref()
+                        .and_then(|id| this.config.channel(id))
+                        .is_none_or(|channel| channel.kind != ChannelKind::DeepLOfficial)
+                {
+                    this.channel_name
+                        .update(cx, |state, cx| state.set_value("DeepL", window, cx));
+                    this.channel_key
+                        .update(cx, |state, cx| state.set_value("", window, cx));
+                    this.channel_model
+                        .update(cx, |state, cx| state.set_value("", window, cx));
                 }
                 cx.notify();
             },
@@ -799,6 +848,7 @@ impl Peek {
             busy: false,
             follow_up_turn: false,
             task_menu_open: false,
+            channel_menu_open: false,
             clear_follow_up: false,
             dictionary_note: String::new(),
             permissions: peek_runtime::permissions::status(),
@@ -1349,6 +1399,7 @@ impl Peek {
         if button_down
             || self.pinned
             || self.task_menu_open
+            || self.channel_menu_open
             || self.settings
             || self.onboarding
             || chrome_settling()
@@ -1495,7 +1546,6 @@ impl Peek {
         self.auto_decision = None;
         self.status.clear();
         self.pending_toast = None;
-        self.task_menu_open = false;
         self.input_measured = 0.;
         self.answer_measured = 0.;
         self.query_measured = 0.;
@@ -1833,11 +1883,14 @@ impl Peek {
                                 .flex_none()
                                 .items_center()
                                 .gap(ui_px(6.))
-                                .child(div().flex_1().text_size(ui_px(12.)).child(format!(
-                                    "{}. {}",
-                                    index + 1,
-                                    channel.name
-                                )))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(ui_px(12.))
+                                        .child(format!("{}. {}", index + 1, channel.name)),
+                                )
                                 .child(
                                     Button::new(SharedString::from(format!("quick-up-{id}")))
                                         .ghost()
@@ -2027,12 +2080,18 @@ impl Peek {
                                 i18n::tr("channels-name"),
                                 Input::new(&peek.channel_name).into_any_element(),
                             ))
-                            .when(kind != ChannelKind::GoogleFree, |this| {
-                                this.child(field(
-                                    i18n::tr("channels-endpoint"),
-                                    Input::new(&peek.channel_endpoint).into_any_element(),
-                                ))
-                            })
+                            .when(
+                                !matches!(
+                                    kind,
+                                    ChannelKind::GoogleFree | ChannelKind::DeepLOfficial
+                                ),
+                                |this| {
+                                    this.child(field(
+                                        i18n::tr("channels-endpoint"),
+                                        Input::new(&peek.channel_endpoint).into_any_element(),
+                                    ))
+                                },
+                            )
                             .when(kind.needs_credential(), |this| {
                                 this.child(field(
                                     if peek.editing_channel.is_some() {
@@ -2053,6 +2112,14 @@ impl Peek {
                                     i18n::tr("channels-model"),
                                     Input::new(&peek.channel_model).into_any_element(),
                                 ))
+                            })
+                            .when(kind == ChannelKind::DeepLOfficial, |this| {
+                                this.child(
+                                    div()
+                                        .text_size(ui_px(11.))
+                                        .text_color(muted)
+                                        .child(i18n::tr("channels-deepl-hint")),
+                                )
                             })
                             .when(kind.is_ai(), |this| {
                                 this.child(field(
@@ -2139,13 +2206,34 @@ impl Peek {
     fn save_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let kind = self.draft_kind(cx);
         let name = self.channel_name.read(cx).value().trim().to_owned();
+        let editing = self.editing_channel.clone();
+        let entered_key = self.channel_key.read(cx).value().to_string();
+        let api_key = if entered_key.trim().is_empty() {
+            editing
+                .as_deref()
+                .and_then(|id| self.config.channel(id))
+                .filter(|channel| {
+                    !matches!(kind, ChannelKind::DeepLx | ChannelKind::DeepLOfficial)
+                        || channel.kind == kind
+                })
+                .map(|channel| channel.api_key.clone())
+                .unwrap_or_default()
+        } else {
+            entered_key.trim().to_owned()
+        };
+        if kind == ChannelKind::DeepLOfficial && api_key.is_empty() {
+            self.notify_error(i18n::tr("status-key-missing"));
+            cx.notify();
+            return false;
+        }
         let endpoint = if kind == ChannelKind::GoogleFree {
             "https://translate.googleapis.com/translate_a/single".to_owned()
+        } else if kind == ChannelKind::DeepLOfficial {
+            peek_network::deepl_endpoint(&api_key).to_owned()
         } else {
             self.channel_endpoint.read(cx).value().trim().to_owned()
         };
         let model = self.channel_model.read(cx).value().trim().to_owned();
-        let key = self.channel_key.read(cx).value().to_string();
         if name.is_empty() || endpoint.is_empty() {
             self.notify_error(i18n::tr("status-channel-incomplete"));
             cx.notify();
@@ -2174,7 +2262,6 @@ impl Peek {
         } else {
             peek_core::DEFAULT_OUTPUT_TOKENS
         };
-        let editing = self.editing_channel.clone();
         let id = editing.clone().unwrap_or_else(|| {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2182,18 +2269,6 @@ impl Peek {
                 .unwrap_or(0);
             format!("ch-{stamp}")
         });
-        // An existing key is kept when the field is left empty, so the secret
-        // never has to be re-entered to change another field. It is stored with
-        // memory; the configuration store persists only its secure reference.
-        let api_key = if key.trim().is_empty() {
-            editing
-                .as_deref()
-                .and_then(|id| self.config.channel(id))
-                .map(|channel| channel.api_key.clone())
-                .unwrap_or_default()
-        } else {
-            key
-        };
         let old_config = self.config.clone();
         let existing = editing.as_deref().and_then(|id| self.config.channel(id));
         let saved = Channel {
@@ -2204,6 +2279,10 @@ impl Peek {
             model,
             api_key,
             credential_id: existing
+                .filter(|channel| {
+                    !matches!(kind, ChannelKind::DeepLx | ChannelKind::DeepLOfficial)
+                        || channel.kind == kind
+                })
                 .map(|c| c.credential_id.clone())
                 .unwrap_or_default(),
             vision: kind.is_ai() && self.channel_vision,
@@ -2323,6 +2402,20 @@ impl Peek {
                     Ok(_) => (false, locale.text("channels-test-ok")),
                     Err(err) => (true, told(&channel.endpoint, &err)),
                 }
+            } else if channel.kind == ChannelKind::DeepLOfficial {
+                match client
+                    .translate_deepl(
+                        &channel.endpoint,
+                        &channel.api_key,
+                        "Hello",
+                        "Chinese",
+                        CancellationToken::new(),
+                    )
+                    .await
+                {
+                    Ok(_) => (false, locale.text("channels-test-ok")),
+                    Err(err) => (true, told(&channel.endpoint, &err)),
+                }
             } else if channel.kind == ChannelKind::DeepLx {
                 let url = channel.endpoint.clone();
                 match client
@@ -2368,13 +2461,6 @@ impl Peek {
     /// Points a place in the app at a channel.
     fn assign_channel(&mut self, slot: ChannelSlot, id: String, cx: &mut Context<Self>) {
         match slot {
-            ChannelSlot::QuickFirst => {
-                let ids = self.config.quick_channels.get_or_insert_with(Vec::new);
-                ids.retain(|old| old != &id);
-                if !id.is_empty() {
-                    ids.insert(0, id);
-                }
-            }
             ChannelSlot::QuickAdd => {
                 let ids = self.config.quick_channels.get_or_insert_with(Vec::new);
                 if !id.is_empty() && !ids.contains(&id) {
@@ -3058,12 +3144,26 @@ impl Peek {
             .icon(icon)
             .tooltip(tooltip)
             .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                if this.task_menu_open {
+                if this.task_menu_open || this.channel_menu_open {
                     return;
                 }
                 this.task_menu_open = true;
                 task_menu::open(cx.entity(), event.position(), window, cx);
             }))
+    }
+
+    fn open_channel_menu(
+        &mut self,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.task_menu_open || self.channel_menu_open {
+            return;
+        }
+        self.channel_menu_open = true;
+        channel_menu::open(cx.entity(), event.position(), window, cx);
+        cx.notify();
     }
 
     /// The icon that stands for a task, so the picker can collapse to it.
@@ -3132,19 +3232,6 @@ impl Peek {
     }
 
     fn query_page(&self, cx: &Context<Self>) -> AnyElement {
-        let basic_choices: Vec<(String, String)> = self
-            .config
-            .quick_candidates()
-            .map(|channel| (channel.id.clone(), channel.name.clone()))
-            .collect();
-        let basic_active = self
-            .config
-            .quick_channels
-            .as_ref()
-            .and_then(|ids| ids.first())
-            .cloned()
-            .unwrap_or_default();
-        let basic_entity = cx.entity();
         let can_clear = !self.input.read(cx).value().is_empty() || self.has_result() || self.busy;
         let theme = cx.theme();
         let set = self.set;
@@ -3295,45 +3382,22 @@ impl Peek {
                                         ),
                                 )
                                 .child(
-                                    // Which channel answers a plain translation. Only
-                                    // channels that can translate are listed, and the same
-                                    // choice can be made in settings. The icon says
-                                    // "channel", not "translate": the input box already
-                                    // uses the language icon for the task picker.
-                                    DropdownButton::new("basic-channel")
-                                        .button(
+                                    ButtonGroup::new("basic-channel")
+                                        .ghost()
+                                        .child(
                                             Button::new("basic-channel-button")
-                                                .ghost()
                                                 .icon(IconName::Cable)
-                                                .tooltip(i18n::tr("channels-basic-pick")),
+                                                .tooltip(i18n::tr("channels-quick"))
+                                                .selected(self.channel_menu_open)
+                                                .on_click(cx.listener(Self::open_channel_menu)),
                                         )
-                                        .dropdown_menu(move |mut menu, _window, _cx| {
-                                            if basic_choices.is_empty() {
-                                                return menu.item(
-                                                    PopupMenuItem::new(i18n::tr("channels-none"))
-                                                        .disabled(true),
-                                                );
-                                            }
-                                            for (id, name) in &basic_choices {
-                                                let target = basic_entity.clone();
-                                                let chosen = id.clone();
-                                                let selected = *id == basic_active;
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(name.clone())
-                                                        .checked(selected)
-                                                        .on_click(move |_event, _window, cx| {
-                                                            target.update(cx, |peek, cx| {
-                                                                peek.assign_channel(
-                                                                    ChannelSlot::QuickFirst,
-                                                                    chosen.clone(),
-                                                                    cx,
-                                                                );
-                                                            });
-                                                        }),
-                                                );
-                                            }
-                                            menu
-                                        }),
+                                        .child(
+                                            Button::new("basic-channel-toggle")
+                                                .dropdown_caret(true)
+                                                .tooltip(i18n::tr("channels-quick"))
+                                                .selected(self.channel_menu_open)
+                                                .on_click(cx.listener(Self::open_channel_menu)),
+                                        ),
                                 )
                                 .child(self.icon_button(
                                     "pin-window",
@@ -4527,6 +4591,8 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     // The overlay preview needs a desktop-sized canvas; the panel is a popup.
     let preview_size = if page == "snip" {
         size(ui_px(1400.), ui_px(900.))
+    } else if page == "channel-order" {
+        size(ui_px(340.), ui_px(260.))
     } else if page == "task-menu" {
         size(ui_px(176.), ui_px(210.))
     } else {
@@ -4600,6 +4666,30 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             }
 
             match page.as_str() {
+                "channel-order" | "channel-popup" | "popup-focus" => {
+                    peek.onboarding = false;
+                    set_chrome_visible(true);
+                    peek.config.channels = [
+                        ("preview-google", "Google", ChannelKind::GoogleFree),
+                        ("preview-ai", "DeepSeek", ChannelKind::DeepSeek),
+                        ("preview-deeplx", "DeepLX", ChannelKind::DeepLx),
+                        ("preview-spare", "CrewRouter", ChannelKind::ChatCompletions),
+                    ]
+                    .into_iter()
+                    .map(|(id, name, kind)| Channel {
+                        id: id.into(),
+                        name: name.into(),
+                        kind,
+                        endpoint: "https://example.invalid/translate".into(),
+                        ..Default::default()
+                    })
+                    .collect();
+                    peek.config.quick_channels = Some(vec![
+                        "preview-google".into(),
+                        "preview-ai".into(),
+                        "preview-deeplx".into(),
+                    ]);
+                }
                 // Not persisted: a preview must not overwrite the real choice.
                 "settings" => {
                     peek.settings = true;
@@ -4665,6 +4755,10 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             }
             cx.notify();
         });
+        if page == "channel-order" {
+            let menu = channel_menu::preview(view, window, cx);
+            return cx.new(|cx| Root::new(menu, window, cx).bg(transparent_black()));
+        }
         if page == "task-menu" {
             let menu = task_menu::preview(view, window, cx);
             return cx.new(|cx| Root::new(menu, window, cx).bg(transparent_black()));
@@ -4676,6 +4770,22 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
     // resizes, and the next paint has to fill that new window.
     for _ in 0..8 {
         cx.run_until_parked();
+    }
+    if page == "channel-popup"
+        && let Some(view) = published.borrow().clone()
+    {
+        channel_menu::verify_popup(view, window.into(), &mut cx)?;
+    }
+    if page == "popup-focus"
+        && let Some(view) = published.borrow().clone()
+    {
+        channel_menu::verify_focus(view, window.into(), &mut cx)?;
+    }
+    if page == "channel-order"
+        && std::env::var("PEEK_CHANNEL_ORDER_SELFTEST").is_ok()
+        && let Some(view) = published.borrow().clone()
+    {
+        channel_menu::verify_controls(view, window.into(), &mut cx)?;
     }
     if std::env::var("PEEK_TOOLBAR_SELFTEST").is_ok()
         && let Some(view) = published.borrow().clone()
@@ -4941,6 +5051,8 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
             view.update(cx, |peek, cx| {
                 peek.open_channel_dialog(None, window, cx);
                 if let Ok(kind) = std::env::var("PEEK_DIALOG_KIND")
+                    && std::env::var("PEEK_DEEPLX_SELFTEST").is_err()
+                    && std::env::var("PEEK_DEEPL_SELFTEST").is_err()
                     && let Some(index) = ChannelKind::ALL.iter().position(|k| k.label_key() == kind)
                 {
                     peek.channel_kind.update(cx, |state, cx| {
@@ -4952,6 +5064,133 @@ fn render_preview(path: &str) -> anyhow::Result<()> {
         })?;
         for _ in 0..4 {
             cx.run_until_parked();
+        }
+        if std::env::var("PEEK_DEEPL_SELFTEST").is_ok() {
+            use gpui_kit::test::TestWindowExt as _;
+            cx.update_window(window.into(), |_, window, cx| {
+                window.within("channel-kind-dialog").click("input", cx);
+                let index = ChannelKind::ALL
+                    .iter()
+                    .position(|kind| *kind == ChannelKind::DeepLOfficial)
+                    .unwrap();
+                for _ in 0..index {
+                    window.press("down", cx);
+                }
+                window.press("enter", cx);
+            })?;
+            for _ in 0..4 {
+                cx.run_until_parked();
+            }
+            cx.update_window(window.into(), |_, window, cx| {
+                view.update(cx, |peek, cx| {
+                    assert_eq!(peek.draft_kind(cx), ChannelKind::DeepLOfficial);
+                    assert_eq!(peek.channel_name.read(cx).value(), "DeepL");
+                    assert!(peek.channel_key.read(cx).value().is_empty());
+                    let count = peek.config.channels.len();
+                    assert!(!peek.save_channel(window, cx));
+                    assert_eq!(peek.config.channels.len(), count);
+                    peek.channel_key.update(cx, |input, cx| {
+                        input.set_value("preview-only:fx", window, cx)
+                    });
+                    assert!(peek.save_channel(window, cx));
+                    let saved = peek.config.channels.last().unwrap().clone();
+                    assert_eq!(saved.endpoint, "https://api-free.deepl.com/v2/translate");
+                    assert!(saved.model.is_empty());
+                    assert!(
+                        peek.config
+                            .quick_channels
+                            .as_ref()
+                            .unwrap()
+                            .contains(&saved.id)
+                    );
+                    window.close_dialog(cx);
+                    peek.open_channel_dialog(Some(saved.id), window, cx);
+                });
+            })?;
+            for _ in 0..4 {
+                cx.run_until_parked();
+            }
+            cx.update_window(window.into(), |_, window, cx| {
+                view.update(cx, |peek, cx| {
+                    assert!(peek.channel_key.read(cx).value().is_empty());
+                    assert!(peek.save_channel(window, cx));
+                    let saved = peek.config.channels.last().unwrap().clone();
+                    assert_eq!(saved.api_key, "preview-only:fx");
+                    assert_eq!(saved.endpoint, "https://api-free.deepl.com/v2/translate");
+                    window.close_dialog(cx);
+                    peek.open_channel_dialog(Some(saved.id), window, cx);
+                    peek.channel_key.update(cx, |input, cx| {
+                        input.set_value("preview-only-pro", window, cx)
+                    });
+                    assert!(peek.save_channel(window, cx));
+                    assert_eq!(
+                        peek.config.channels.last().unwrap().endpoint,
+                        "https://api.deepl.com/v2/translate"
+                    );
+                    window.close_dialog(cx);
+                    let id = peek.config.channels.last().unwrap().id.clone();
+                    peek.open_channel_dialog(Some(id), window, cx);
+                });
+            })?;
+            println!(
+                "[deepl-official-selftest] real type selection, missing key rejection, Free/Pro endpoints, saved-key retention and call order passed"
+            );
+        }
+        if std::env::var("PEEK_DEEPLX_SELFTEST").is_ok() {
+            use gpui_kit::test::TestWindowExt as _;
+            cx.update_window(window.into(), |_, window, cx| {
+                window.within("channel-kind-dialog").click("input", cx);
+                for _ in 0..4 {
+                    window.press("down", cx);
+                }
+                window.press("enter", cx);
+            })?;
+            for _ in 0..4 {
+                cx.run_until_parked();
+            }
+            cx.update_window(window.into(), |_, window, cx| {
+                view.update(cx, |peek, cx| {
+                    assert_eq!(peek.draft_kind(cx), ChannelKind::DeepLx);
+                    assert_eq!(peek.channel_name.read(cx).value(), "DeepLX");
+                    assert!(peek.channel_endpoint.read(cx).value().is_empty());
+                    assert!(peek.channel_key.read(cx).value().is_empty());
+                    let count = peek.config.channels.len();
+                    assert!(!peek.save_channel(window, cx));
+                    assert_eq!(peek.config.channels.len(), count);
+                    peek.channel_endpoint.update(cx, |input, cx| {
+                        input.set_value("https://example.invalid/custom/translate", window, cx)
+                    });
+                    assert!(peek.save_channel(window, cx));
+                    let saved = peek.config.channels.last().unwrap().clone();
+                    assert_eq!(saved.endpoint, "https://example.invalid/custom/translate");
+                    assert!(saved.api_key.is_empty() && saved.credential_id.is_empty());
+                    // Existing custom services keep their configured address and key.
+                    let existing = peek.config.channels.last_mut().unwrap();
+                    existing.endpoint = "https://example.invalid/custom/translate".into();
+                    existing.api_key = "test-only-optional-key".into();
+                    window.close_dialog(cx);
+                    peek.open_channel_dialog(Some(saved.id), window, cx);
+                    cx.notify();
+                });
+            })?;
+            for _ in 0..4 {
+                cx.run_until_parked();
+            }
+            cx.update_window(window.into(), |_, _, cx| {
+                let peek = view.read(cx);
+                assert_eq!(
+                    peek.channel_endpoint.read(cx).value(),
+                    "https://example.invalid/custom/translate"
+                );
+                assert!(peek.channel_key.read(cx).value().is_empty());
+                assert_eq!(
+                    peek.config.channels.last().unwrap().api_key,
+                    "test-only-optional-key"
+                );
+            })?;
+            println!(
+                "[deeplx-defaults-selftest] blank endpoint, missing endpoint rejection, custom endpoint empty-key save and existing service preservation passed"
+            );
         }
     }
     // A notification needs the window's root, which the component layer

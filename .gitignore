@@ -8,8 +8,15 @@
 /local-assets/
 /spikes/
 
-# Local delivery bundle (includes a nested source clone and executables).
-/CrantPeek/
-
 # Legacy website download artifacts must never enter the repository.
 /website/public/downloads/
+
+# Private access token generated on the MCSM server at first start.
+/backend/deeplx/access-token.txt
+/backend/deeplx/deeplx_linux_amd64
+
+# Local incoming video originals; canonical public copies are tracked.
+/video-small.mp4
+/video-no-credits-small.mp4
+# Deployment-specific settings can contain proxy credentials.
+/backend/deeplx/settings.env
