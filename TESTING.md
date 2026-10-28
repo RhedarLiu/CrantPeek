@@ -1,10 +1,10 @@
 # Crant Peek 验收记录与复现
 
-> 2026-10-15 更新。区分用户实测、自动验证和未覆盖场景，不用编译通过代替系统交互验收。
+> 2026-10-28 更新。区分用户实测、自动验证和未覆盖场景，不用编译通过代替系统交互验收。
 
 ## 已有实机证据
 
-用户在 v0.1.2 上确认：Windows 除安装包安装外，上一轮核心流程清单均已自行测试。v0.1.3 随后补齐打包验收。v0.1.4 新增官方 DeepL 渠道并修复调用顺序弹层和失焦行为，相关模拟与隔离界面测试见下文；旧版用户确认不代替新版全部交互的实机验收。
+用户在 v0.1.2 上确认：Windows 除安装包安装外，上一轮核心流程清单均已自行测试。v0.1.3 随后补齐打包验收。v0.1.4 新增官方 DeepL 渠道并修复调用顺序弹层和失焦行为，相关模拟与隔离界面测试见下文；v0.1.5 改善 macOS 取词和对象占位符清理，QQ 连续取词由用户确认通过。旧版用户确认不代替新版全部交互的实机验收。
 
 | 范围 | 证据来源与结果 |
 | --- | --- |
@@ -98,3 +98,27 @@ PEEK_RENDER=/tmp/crantpeek-deeplx.png PEEK_LANGUAGE=zh-CN PEEK_PAGE=settings PEE
 DeepLX 表单自检通过真实类型选择操作验证默认地址为空、缺少地址时拒绝保存、自定义地址空密钥保存和已有服务保留；`cargo test -p peek-network deeplx` 使用本机模拟接口，校验空密钥请求不会携带 Authorization 请求头。
 
 DeepL 官方 API 自检覆盖实际选择、空密钥拒绝、Free/Pro 地址自动选择、编辑时保留原密钥和加入调用顺序。网络模拟测试覆盖官方鉴权、请求结构、错误/超大响应、取消和失败后转用 LLM；没有真实密钥时不代表已完成官方服务端验收。
+
+## macOS 取词可靠性回归（2026-10-28，v0.1.5）
+
+用户于 2026-10-28 在更新并启动本地适配版后，按提示在 QQ 聊天消息中连续测试 Command+E，反馈「连续几次都能取到」。这是本轮 QQ 的实际使用验证；未记录具体次数、QQ/macOS 版本及消息类型，不据此推断所有 QQ 场景均已覆盖。
+
+这一轮依据 Apple 的 [键盘焦点接口](https://developer.apple.com/documentation/applicationservices/kaxfocusedapplicationattribute)、[AX 超时接口](https://developer.apple.com/documentation/applicationservices/1459345-axuielementsetmessagingtimeout)、[Electron 辅助功能文档](https://www.electronjs.org/docs/latest/tutorial/accessibility)，并对照 [Pot Selection](https://github.com/pot-app/Selection/blob/main/src/macos.rs)、[selection-hook](https://github.com/0xfullex/selection-hook/blob/main/src/mac/core/engine.mm) 的实现。也查阅了 [Bob 权限故障说明](https://bobtranslate.com/faq/selection-error.html) 和 [PopClip 的焦点干扰案例](https://forum.popclip.app/t/weird-behaviour-on-copy-when-bettermouse-is-running/2808)。这些资料用于理解平台限制，未整体引入第三方取词库。
+
+取词顺序为：焦点控件的选中文字 → UTF-16 选区/多选区与文本标记 → 有界焦点子节点和祖先 → 应用自身的标准复制菜单 → 定向发送完整的 Command+C 按键序列。取得选区前不展示主面板；用请求编号、键鼠活动及来源应用检查丢弃过期结果。Chromium/Electron 引擎通过应用包的框架和辅助进程识别，涵盖 QQNT，不再只依赖五个应用 ID。
+
+空选区只以当前重试的焦点文本控件为依据；祖先的空范围、先前尝试的空范围和 Cocoa 的 NSNotFound 不阻断复制。真正空选区仍不触发编辑器“复制整行”。辅助功能遍历有整体预算，复制最多等待 1.4 秒；有标准复制菜单时无需等待用户松开 Command。快捷键自动重复不再连续创建取词线程。
+
+复制前保存全部可读取的剪贴板项目及格式，不先清空系统剪贴板。只有请求后的新剪贴板内容才可返回，等待数据就绪和短暂稳定；单次写入可恢复，检测到用户输入或后续写入时保留较新的内容。多次写入无法可靠判断归属，因此允许读取稳定的新文本，但不会冒险覆盖它。剪贴板格式不能完整备份、超过 64MiB、安全输入或密码控件等情况保持保守处理。
+
+自动回归覆盖 NSNotFound、UTF-16 中文和 emoji、延迟/多次写入、空选区、复制命令筛选、完整格式恢复、不覆盖后续复制和失效请求。系统剪贴板测试使用独立命名的测试剪贴板并串行执行，不读取或清空用户剪贴板。完整工作区 131 项通过、2 项原有联网/本地 OCR 测试跳过；严格 clippy 通过。
+
+运行 `bash tools/test-macos-selection.sh` 构建隔离测试程序，再打开它提示的测试窗口（使用与本地应用相同的开发签名，不重置系统权限）。`tools/selection-fixture.swift` 是原生 AppKit 测试窗口，使用合成文本和专用剪贴板；`PEEK_SELECTION_FIXTURE_PID` 诊断入口严格限定 `dev.crant.selection-fixture` 测试应用，可在后台验证辅助功能与复制菜单。每种场景连续读取 5 次：原生文本、仅复制、900ms 延迟复制、多次写入、祖先空范围、临时空范围、真正空选区及复制无响应。此类受控验证不等于真实 QQ 消息列表、全部 Chrome 页面、VS Code 插件、聚焦搜索和远程桌面的全面验收。keyboard 场景需要真实前台键盘焦点，不作为后台测试通过项目。
+
+实际应用诊断可在正式应用启动环境中设置 `PEEK_SELECTION_SELFTEST=1`、`PEEK_SELECTION_LOG`，用 `PEEK_SELECTION_EXPECT` 和 `PEEK_SELECTION_REPEAT` 比较合成选区；日志只记录路径、状态、长度和耗时，不记录选中文字。本次适配需继续在日常应用中观察；不能承诺所有第三方应用 100% 成功。密码框不取词，不开放选区的画布、扫描文档、受保护内容及部分远程桌面需手动截图 OCR 或复制粘贴。
+
+### 选区尾部 OBJ 占位符（2026-10-28）
+
+用户报告从富文本界面选取文字后，末尾混入多个 OBJ 方框。根据 [Unicode 对象占位符说明](https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-23/)，U+FFFC 表示文本流中的嵌入对象。现在共用的 `Entry::Selection` 入口移除此字符，再清理首尾空白；macOS 辅助功能、范围/文本标记与复制路径，以及 Windows 取词均使用这个入口。过滤在 UTF-16 选区截取之后执行，避免改变选区位置；手动输入不经过此清理。
+
+针对性回归 68 项通过，1 项原有本地 OCR 测试跳过，严格 clippy 通过。覆盖原问题的连续尾部占位符、开头/中间占位符、只包含对象的选区，以及保留中文、换行、组合重音、emoji ZWJ/肤色/变体选择符、阿拉伯文、真正的替换字符和字面 OBJ 文本。原生 `objects-ax` 与 `objects-copy` 场景各连续 5 次读取通过，使用专用剪贴板；来源字符串保留占位符，返回文字与干净的预期字符串完全一致。

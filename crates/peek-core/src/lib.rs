@@ -99,9 +99,12 @@ pub enum Entry {
 pub fn entry_text(entry: Entry, selection: Option<&str>) -> Option<String> {
     match entry {
         Entry::Selection => selection
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
+            // Rich-text accessibility/copy providers include U+FFFC anchors
+            // for inline images, attachments and buttons. They are not text.
+            // Clean after extracting the range: AX offsets still count them.
+            .map(|text| text.replace('\u{fffc}', ""))
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty()),
         Entry::Blank => Some(String::new()),
         Entry::Screenshot => None,
     }
@@ -1031,6 +1034,33 @@ mod tests {
             entry_text(Entry::Selection, Some(" word ")),
             Some("word".into())
         );
+    }
+    #[test]
+    fn selection_discards_rich_text_object_anchors() {
+        let text = "验收记录。当前运行的是本地适配版，正式 Release 尚未更新。";
+        assert_eq!(
+            entry_text(
+                Entry::Selection,
+                Some(&format!("{text}\u{fffc}\u{fffc}\u{fffc}\u{fffc}"))
+            ),
+            Some(text.into())
+        );
+        assert_eq!(
+            entry_text(
+                Entry::Selection,
+                Some("\u{fffc}查看\u{fffc}验收记录\u{fffc}\n")
+            ),
+            Some("查看验收记录".into())
+        );
+        assert_eq!(
+            entry_text(Entry::Selection, Some(" \u{fffc}\n\u{fffc} ")),
+            None
+        );
+    }
+    #[test]
+    fn selection_preserves_unicode_text_and_literal_obj_labels() {
+        let text = "中文\tcode\n👨‍👩‍👧‍👦 👍🏽 ❤️ e\u{301} العربية � OBJ [OBJ] \\u{FFFC}";
+        assert_eq!(entry_text(Entry::Selection, Some(text)), Some(text.into()));
     }
     #[test]
     fn blank_never_imports_selection() {

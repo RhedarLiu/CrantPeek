@@ -5332,9 +5332,48 @@ fn main() -> anyhow::Result<()> {
     // happens when the app is launched from a terminal rather than by
     // LaunchServices. This exercises the API itself, and shows no window.
     if std::env::var("PEEK_SELECTION_SELFTEST").is_ok() {
-        match peek_runtime::selection::read() {
-            Some(text) => println!("selection read ok: {} chars", text.chars().count()),
-            None => println!("selection read failed (see the [selection] lines above)"),
+        let repeat = std::env::var("PEEK_SELECTION_REPEAT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 50);
+        let expected = std::env::var("PEEK_SELECTION_EXPECT").ok();
+        for index in 0..repeat {
+            let generation = peek_runtime::selection::next_generation();
+            #[cfg(target_os = "macos")]
+            let fixture = std::env::var("PEEK_SELECTION_FIXTURE_PID")
+                .ok()
+                .and_then(|v| v.parse::<i32>().ok());
+            #[cfg(target_os = "macos")]
+            let text = match fixture {
+                Some(pid) => peek_runtime::selection::read_test_fixture(pid, generation),
+                None => peek_runtime::selection::read_for_generation(generation),
+            };
+            #[cfg(not(target_os = "macos"))]
+            let text = peek_runtime::selection::read_for_generation(generation);
+            let matched = expected
+                .as_ref()
+                .map(|v| text.as_deref().unwrap_or("") == v);
+            let report = format!(
+                "[selection-selftest] sample={}, chars={}, matched={matched:?}",
+                index + 1,
+                text.as_ref().map_or(0, |s| s.chars().count())
+            );
+            println!("{report}");
+            if let Ok(path) = std::env::var("PEEK_SELECTION_LOG") {
+                use std::io::Write as _;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(file, "{report}");
+                }
+            }
+            if matched == Some(false) {
+                anyhow::bail!("selection selftest mismatch (text not logged)");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
         }
         return Ok(());
     }
@@ -5537,6 +5576,7 @@ fn main() -> anyhow::Result<()> {
         // Drain the tray/hotkey channels. These are separate ecosystems from
         // GPUI, so they are polled rather than wired into GPUI's dispatcher.
         cx.spawn(async move |cx| {
+            let mut selection_key_down = false;
             loop {
                 cx.background_executor().timer(POLL).await;
 
@@ -5546,6 +5586,14 @@ fn main() -> anyhow::Result<()> {
                 let mut ask_selection = false;
 
                 while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                    if shortcuts::role(event.id) == Some(2) {
+                        let pressed = event.state == HotKeyState::Pressed;
+                        if pressed && !selection_key_down && !PAUSED.with(|p| p.get()) {
+                            ask_selection = true;
+                        }
+                        selection_key_down = pressed;
+                        continue;
+                    }
                     if PAUSED.with(|paused| paused.get()) || event.state != HotKeyState::Pressed {
                         continue;
                     }
@@ -5553,8 +5601,6 @@ fn main() -> anyhow::Result<()> {
                         toggle = true;
                     } else if shortcuts::role(event.id) == Some(1) {
                         screenshot = true;
-                    } else if shortcuts::role(event.id) == Some(2) {
-                        ask_selection = true;
                     }
                 }
 
@@ -5566,7 +5612,8 @@ fn main() -> anyhow::Result<()> {
                     let generation = peek_runtime::selection::next_generation();
                     let tx = selection_tx.clone();
                     std::thread::spawn(move || {
-                        let text = peek_runtime::selection::read().unwrap_or_default();
+                        let text = peek_runtime::selection::read_for_generation(generation)
+                            .unwrap_or_default();
                         let text = text.trim().to_owned();
                         if peek_runtime::selection::is_current(generation) {
                             let _ = tx.send(Action::SelectionRead { generation, text });
